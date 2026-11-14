@@ -1218,8 +1218,13 @@ impl Library {
                 let shelf: Vec<&(AppId, String, u64)> = account_recent.iter().filter(|g| Some(g.0) != first).collect();
                 if !shelf.is_empty() {
                     w::section(ui, t, t!("Recent games"), None);
-                    let size = vec2(170.0, 255.0);
-                    let per = (((ui.available_width() + 16.0) / (size.x + 16.0)).floor() as usize).max(1);
+                    // As many 2:3 covers as fit; a full row is widened a little so it
+                    // ends at the right edge, like the cards above it.
+                    let (gap, base) = (16.0, 170.0);
+                    let avail = ui.available_width();
+                    let per = (((avail + gap) / (base + gap)).floor() as usize).max(1);
+                    let width = if shelf.len() >= per { ((avail - gap * (per - 1) as f32) / per as f32).floor() } else { base };
+                    let size = vec2(width, width * 1.5);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 16.0;
                         for (id, name, when) in shelf.into_iter().take(per) {

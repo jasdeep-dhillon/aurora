@@ -82,8 +82,13 @@ fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
         let current = app.prefs.page.clone();
         for p in pages.iter().filter(|p| p.placement == Placement::Main) {
             let icon = (!p.icon.is_empty()).then_some(p.icon.as_str());
-            if w::nav_tab_icon(ui, t, icon, &i18n::tr_dyn(&p.title), current == p.id, TOP_BAR).clicked() {
+            let tab = w::nav_tab_icon(ui, t, icon, &i18n::tr_dyn(&p.title), current == p.id, TOP_BAR);
+            if tab.clicked() {
                 actions.push(Action::Navigate { page: p.id.clone(), arg: None });
+            }
+            let items = tab_menu_items(app, &p.id);
+            if let Some((page, arg)) = hover_menu(ui, t, egui::Id::unique(("tab-menu", &p.id)), &tab, &items) {
+                actions.push(Action::Navigate { page, arg });
             }
         }
         let plugin_pages: Vec<_> = pages.iter().filter(|p| p.placement == Placement::Apps).collect();
@@ -138,6 +143,129 @@ fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
             }
         });
     });
+}
+
+/// One entry of a header tab's hover menu: icon, label, page, page argument.
+type MenuEntry = (&'static str, String, &'static str, Option<String>);
+
+/// Shortcuts into a page, like Steam's menus under STORE / LIBRARY /
+/// COMMUNITY / your name. `None` entries are separators.
+fn tab_menu_items(app: &SteamApp, page: &str) -> Vec<Option<MenuEntry>> {
+    let e = |icon, label: &str, page, arg: Option<String>| Some((icon, label.to_string(), page, arg));
+    let me = app.state.steam_id;
+    match page {
+        "store" => vec![
+            e(icons::SPARKLE, t!("Featured"), "store", None),
+            e(icons::SLIDERS, t!("Browse"), "store", Some("browse".into())),
+            None,
+            e(icons::TAG, t!("Specials"), "store", Some("section:specials".into())),
+            e(icons::FIRE, t!("Top sellers"), "store", Some("section:top_sellers".into())),
+            e(icons::STAR, t!("New releases"), "store", Some("section:new_releases".into())),
+            e(icons::CALENDAR, t!("Coming soon"), "store", Some("section:coming_soon".into())),
+            None,
+            e(icons::HEART, t!("Wishlist"), "store", Some("wishlist".into())),
+            e(icons::CART, t!("Cart"), "store", Some("cart".into())),
+        ],
+        "library" => vec![
+            e(icons::HOUSE, t!("Home"), "library", None),
+            e(icons::DOWNLOAD, t!("Downloads"), "downloads", None),
+        ],
+        "community" => vec![
+            e(icons::USERS, t!("Friends"), "community", None),
+            e(icons::CUBE, t!("Workshop"), "workshop", None),
+            e(icons::BACKPACK, t!("Inventory"), "inventory", None),
+        ],
+        "profile" => vec![
+            e(icons::USER_CIRCLE, t!("My profile"), "profile", None),
+            e(icons::CONTROLLER, t!("Games"), "profile", Some(format!("{me}/games"))),
+            e(icons::BACKPACK, t!("Inventory"), "inventory", None),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// A menu that opens while `anchor` is hovered (after a short delay, so
+/// passing over the tab doesn't open it) and stays open while the pointer
+/// is on the tab or the menu. Returns the entry clicked.
+fn hover_menu(ui: &mut Ui, t: &Theme, id: egui::Id, anchor: &egui::Response, items: &[Option<MenuEntry>]) -> Option<(String, Option<String>)> {
+    if items.is_empty() {
+        return None;
+    }
+    let now = ui.input(|i| i.time);
+    let pointer = ui.input(|i| i.pointer.hover_pos());
+    let menu_rect: Option<Rect> = ui.data(|d| d.get_temp(id.with("rect")));
+    let over_menu = pointer.zip(menu_rect).is_some_and(|(p, r)| r.expand(8.0).contains(p));
+    // The tab's own pill plus the strip down to the menu, so moving onto
+    // the menu never crosses a gap.
+    let pill = Rect::from_center_size(anchor.rect.center(), vec2(anchor.rect.width(), w::CONTROL_LG));
+    let bridge = Rect::from_min_max(pill.left_top(), egui::pos2(pill.right(), anchor.rect.bottom() + 6.0));
+    let over_tab = anchor.hovered() || pointer.is_some_and(|p| bridge.contains(p)) || over_menu;
+    let mut since: Option<f64> = ui.data(|d| d.get_temp(id));
+    if over_tab {
+        since.get_or_insert(now);
+        ui.data_mut(|d| d.insert_temp(id.with("left"), now));
+    } else {
+        let left: f64 = ui.data(|d| d.get_temp(id.with("left"))).unwrap_or(0.0);
+        if now - left > 0.2 {
+            since = None;
+        }
+    }
+    ui.data_mut(|d| match since {
+        Some(s) => {
+            d.insert_temp(id, s);
+        }
+        None => {
+            d.remove::<f64>(id);
+        }
+    });
+    let Some(start) = since else {
+        ui.data_mut(|d| d.remove::<Rect>(id.with("rect")));
+        return None;
+    };
+    if now - start < 0.25 {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+        return None;
+    }
+    let mut picked = None;
+    let pos = egui::pos2(pill.left(), pill.bottom() + 6.0);
+    let area = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
+        egui::Frame::new()
+            .fill(t.chrome)
+            .stroke(Stroke::new(1.0, t.border))
+            .corner_radius(t.corner())
+            .shadow(egui::Shadow { offset: [0, 10], blur: 28, spread: 0, color: egui::Color32::from_black_alpha(130) })
+            .inner_margin(Margin::same(6))
+            .show(ui, |ui| {
+                ui.set_width(210.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for item in items {
+                    match item {
+                        None => {
+                            ui.add_space(3.0);
+                            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+                            ui.painter().hline(r.x_range().shrink(6.0), r.center().y, Stroke::new(1.0, t.border));
+                            ui.add_space(3.0);
+                        }
+                        Some((icon, label, page, arg)) => {
+                            if w::menu_item(ui, t, icon, label).clicked() {
+                                picked = Some((page.to_string(), arg.clone()));
+                            }
+                        }
+                    }
+                }
+            });
+    });
+    ui.data_mut(|d| d.insert_temp(id.with("rect"), area.response.rect));
+    if picked.is_some() {
+        // Close right away; it reopens only on a fresh hover.
+        ui.data_mut(|d| {
+            d.remove::<f64>(id);
+            d.remove::<Rect>(id.with("rect"));
+            d.insert_temp(id.with("left"), 0.0f64);
+        });
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
+    picked
 }
 
 /// Hovering the friends button shows a quick friends list, like Steam's,
