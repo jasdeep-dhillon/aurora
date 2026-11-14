@@ -325,7 +325,7 @@ fn window(app: &mut SteamApp, ctx: &egui::Context) {
         Status::Checking | Status::UpToDate | Status::Failed(_) => {
             // The answer to "Check for updates…".
             let mut close = false;
-            egui::Modal::new(egui::Id::unique("update-check")).show(ctx, |ui| {
+            ui::widgets::modal(ctx, egui::Id::unique("update-check")).show(ctx, |ui| {
                 ui.set_width(360.0);
                 ui.horizontal(|ui| {
                     w::logo(ui, &t, 28.0);
@@ -357,7 +357,7 @@ fn window(app: &mut SteamApp, ctx: &egui::Context) {
         }
     };
     let mut close = false;
-    egui::Modal::new(egui::Id::unique("update-window")).show(ctx, |ui| {
+    ui::widgets::modal(ctx, egui::Id::unique("update-window")).show(ctx, |ui| {
         ui.set_width(460.0);
         ui.horizontal(|ui| {
             w::logo(ui, &t, 34.0);

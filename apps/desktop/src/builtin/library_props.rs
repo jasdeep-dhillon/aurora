@@ -709,7 +709,7 @@ impl Library {
             let n = props.ws_selected.len();
             let mut go = false;
             let mut cancel = false;
-            egui::Modal::new(egui::Id::unique(("ws-confirm", app))).show(ui.ctx(), |ui| {
+            ui::widgets::modal(ui.ctx(), egui::Id::unique(("ws-confirm", app))).show(ui.ctx(), |ui| {
                 ui.set_width(380.0);
                 ui.label(w::text_bold(t!("Unsubscribe from {n} items?", n = n), 17.0, t.text));
                 ui.add(egui::Label::new(w::text(t!("They'll be removed from this game and their files deleted. You can subscribe again later from the Workshop."), 13.0, t.text_dim)).wrap());

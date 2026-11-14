@@ -407,7 +407,7 @@ impl Profile {
         ui.add_space(12.0);
         if self.all_badges == Some(id) {
             let mut close = false;
-            egui::Modal::new(egui::Id::unique(("all-badges", id))).show(ui.ctx(), |ui| {
+            ui::widgets::modal(ui.ctx(), egui::Id::unique(("all-badges", id))).show(ui.ctx(), |ui| {
                 ui.set_width(520.0);
                 ui.horizontal(|ui| {
                     ui.label(w::text_bold(t!("Badges"), 20.0, t.text));

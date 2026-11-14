@@ -440,7 +440,7 @@ impl Library {
     fn naming_dialog(&mut self, ui: &mut Ui, t: &Theme) {
         let Some((index, name, _)) = &mut self.naming else { return };
         let mut done = None;
-        egui::Modal::new(egui::Id::unique("collection-name")).show(ui.ctx(), |ui| {
+        ui::widgets::modal(ui.ctx(), egui::Id::unique("collection-name")).show(ui.ctx(), |ui| {
             ui.set_width(360.0);
             ui.label(w::text_bold(if index.is_some() { t!("Rename collection") } else { t!("New collection") }, 18.0, t.text));
             ui.add_space(8.0);
@@ -491,7 +491,7 @@ impl Library {
         let dir = ctx.local.games.iter().find(|g| g.app_id == app).map(|g| g.install_dir.clone());
         let names: Vec<String> = hold.report.conflicts.iter().map(|c| c.name.clone()).collect();
         let mut choice = None;
-        egui::Modal::new(egui::Id::unique(("cloud-conflict", app))).show(ui.ctx(), |ui| {
+        ui::widgets::modal(ui.ctx(), egui::Id::unique(("cloud-conflict", app))).show(ui.ctx(), |ui| {
             ui.set_width(560.0);
             ui.horizontal(|ui| {
                 ui.label(w::text(icons::CLOUD_CHECK, 28.0, t.away));
@@ -1082,7 +1082,7 @@ impl Library {
         let Some(g) = &mut self.adding else { return };
         let mut close = false;
         let mut add = false;
-        egui::Modal::new(egui::Id::unique("add-game")).show(ui.ctx(), |ui| {
+        ui::widgets::modal(ui.ctx(), egui::Id::unique("add-game")).show(ui.ctx(), |ui| {
             ui.set_width(500.0);
             ui.label(w::text_bold(t!("Add a non-Steam game"), 20.0, t.text));
             ui.add_space(8.0);
@@ -1699,7 +1699,7 @@ impl Library {
         let name = ctx.state.app_name(id).unwrap_or_default().to_string();
         let mut go = false;
         let mut close = false;
-        egui::Modal::new(egui::Id::unique(("install", id))).show(ui.ctx(), |ui| {
+        ui::widgets::modal(ui.ctx(), egui::Id::unique(("install", id))).show(ui.ctx(), |ui| {
             ui.set_width(520.0);
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(150.0, 70.0), Sense::hover());
@@ -1839,7 +1839,7 @@ impl Library {
             return;
         }
         let running = ctx.state.playing == Some(id);
-        egui::Modal::new(egui::Id::unique(("uninstall", id))).show(ui.ctx(), |ui| {
+        ui::widgets::modal(ui.ctx(), egui::Id::unique(("uninstall", id))).show(ui.ctx(), |ui| {
             ui.set_width(460.0);
             ui.label(w::text(icons::TRASH, 28.0, t.danger));
             ui.label(w::text_bold(t!("Uninstall {name}?", name = name), 20.0, t.text));

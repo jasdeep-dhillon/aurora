@@ -531,16 +531,19 @@ impl SteamApp {
             .and_then(|id| self.state.app_name(id).map(String::from))
             .unwrap_or_default();
         let (mut exit, mut tray, mut cancel) = (false, false, false);
-        egui::Modal::new(egui::Id::unique("confirm-exit")).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.label(ui::widgets::text_bold(i18n::tr("A download is in progress"), 18.0, t.text));
-            ui.add_space(6.0);
+        ui::widgets::modal(ctx, egui::Id::unique("confirm-exit")).show(ctx, |ui| {
+            ui.set_width(500.0);
+            ui.label(ui::widgets::text_bold(i18n::tr("A download is in progress"), 19.0, t.text));
+            ui.add_space(10.0);
             let body = i18n::trf("{game} is still downloading. If you exit, it continues the next time you open SteamInRust.", &[("game", name.clone())]);
-            ui.add(egui::Label::new(ui::widgets::text(body, 13.5, t.text_dim)).wrap());
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
+            ui.add(egui::Label::new(ui::widgets::text(body, 14.0, t.text_dim)).wrap());
+            ui.add_space(26.0);
+            // Linux has no tray: the window minimizes instead.
+            let keep = if cfg!(windows) { i18n::tr("Keep downloading in the tray") } else { i18n::tr("Minimize and keep downloading") };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 exit = ui::widgets::button(ui, &t, Some(ui::icons::POWER), i18n::tr("Exit anyway"), ui::widgets::Kind::Danger, ui::widgets::Size::Md).clicked();
-                tray = ui::widgets::button(ui, &t, None, i18n::tr("Keep downloading in the tray"), ui::widgets::Kind::Secondary, ui::widgets::Size::Md).clicked();
+                tray = ui::widgets::button(ui, &t, None, keep, ui::widgets::Kind::Secondary, ui::widgets::Size::Md).clicked();
                 cancel = ui::widgets::button(ui, &t, None, i18n::tr("Cancel"), ui::widgets::Kind::Ghost, ui::widgets::Size::Md).clicked();
             });
         });

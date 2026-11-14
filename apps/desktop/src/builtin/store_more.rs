@@ -372,7 +372,7 @@ impl Store {
         }
         let mut close = false;
         let mut acts = Vec::new();
-        egui::Modal::new(egui::Id::unique("cart-popup")).show(ui.ctx(), |ui| {
+        ui::widgets::modal(ui.ctx(), egui::Id::unique("cart-popup")).show(ui.ctx(), |ui| {
             ui.set_width(620.0);
             ui.horizontal(|ui| {
                 ui.label(w::text_bold(t!("Added to your cart!"), 20.0, t.text));
@@ -442,7 +442,7 @@ impl Store {
         let Some(g) = &mut self.gift else { return };
         let mut close = false;
         let mut send = None;
-        egui::Modal::new(egui::Id::unique(("gift", g.package))).show(ui.ctx(), |ui| {
+        ui::widgets::modal(ui.ctx(), egui::Id::unique(("gift", g.package))).show(ui.ctx(), |ui| {
             ui.set_width(440.0);
             ui.label(w::text_bold(t!("Buy {name} as a gift", name = g.name), 19.0, t.text));
             ui.label(w::text(t!("Pick a friend. The gift goes into your cart and is delivered after checkout."), 13.0, t.text_dim));

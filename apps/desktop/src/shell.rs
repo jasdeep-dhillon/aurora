@@ -583,7 +583,7 @@ pub fn activate_dialog(app: &mut SteamApp, ctx: &egui::Context) {
     let t = app.prefs.theme.clone();
     let Some(dlg) = &mut app.activate else { return };
     let mut close = false;
-    egui::Modal::new(egui::Id::unique("activate")).show(ctx, |ui| {
+    ui::widgets::modal(ctx, egui::Id::unique("activate")).show(ctx, |ui| {
         ui.set_width(460.0);
         ui.label(w::text(icons::KEY, 28.0, t.accent));
         ui.label(w::text_bold(t!("Activate a product on Steam"), 20.0, t.text));
@@ -1113,7 +1113,7 @@ pub fn friend_dialogs(app: &mut SteamApp, ctx: &egui::Context) {
     let mut keep = dialog.clone();
     // Fits narrow windows too (the Friends window can be ~300 px wide).
     let width = (ctx.content_rect().width() - 64.0).clamp(220.0, 400.0);
-    egui::Modal::new(egui::Id::unique("friend-dialog")).show(ctx, |ui| {
+    ui::widgets::modal(ctx, egui::Id::unique("friend-dialog")).show(ctx, |ui| {
         ui.set_width(width);
         match &mut keep {
             FriendDialog::Nickname { id, text } => {

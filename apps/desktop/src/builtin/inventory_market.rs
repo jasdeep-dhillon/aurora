@@ -255,7 +255,7 @@ impl Inventory {
         let rules = ctx.state.fee_rules;
         let mut close = false;
         let mut send = None;
-        egui::Modal::new(egui::Id::unique("sell-item")).show(ui.ctx(), |ui| {
+        ui::widgets::modal(ui.ctx(), egui::Id::unique("sell-item")).show(ui.ctx(), |ui| {
             ui.set_width(420.0);
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
@@ -332,7 +332,7 @@ impl Inventory {
         }
         let mut close = false;
         let friends = ctx.state.friend_list();
-        egui::Modal::new(egui::Id::unique("gift-item")).show(ui.ctx(), |ui| {
+        ui::widgets::modal(ui.ctx(), egui::Id::unique("gift-item")).show(ui.ctx(), |ui| {
             ui.set_width(380.0);
             ui.label(w::text_bold(t!("Gift to a friend"), 18.0, t.text));
             ui.add(egui::Label::new(w::text(t!("Pick a friend. A trade offer to them opens on Steam's website; add this item and send it."), 12.5, t.text_dim)).wrap());

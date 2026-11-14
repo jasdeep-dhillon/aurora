@@ -332,7 +332,7 @@ impl Plugins {
         };
         let (name, perms) = (p.manifest.name.clone(), p.manifest.permissions.clone());
         let mut decision = None;
-        egui::Modal::new(egui::Id::unique(("plugin-consent", &id))).show(ui.ctx(), |ui| {
+        ui::widgets::modal(ui.ctx(), egui::Id::unique(("plugin-consent", &id))).show(ui.ctx(), |ui| {
             ui.set_width(440.0);
             ui.label(w::text(icons::SHIELD, 30.0, t.accent));
             ui.label(w::text_bold(t!("Enable {name}?", name = name), 20.0, t.text));

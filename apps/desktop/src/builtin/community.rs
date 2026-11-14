@@ -499,7 +499,7 @@ impl Community {
         let Some(id) = self.remove_confirm else { return };
         let name = ctx.state.persona(id).name;
         let mut done = false;
-        egui::Modal::new(egui::Id::unique(("remove-friend", id))).show(ui.ctx(), |ui| {
+        ui::widgets::modal(ui.ctx(), egui::Id::unique(("remove-friend", id))).show(ui.ctx(), |ui| {
             ui.set_width(360.0);
             ui.label(w::text_bold(t!("Remove {name} from friends?", name = name), 17.0, t.text));
             ui.add_space(10.0);
