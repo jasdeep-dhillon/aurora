@@ -795,16 +795,34 @@ async fn online(
                         sink(Event::Comments { steam_id, result: crate::social::comments(Some(&w), steam_id, 0).await });
                     }
                 }),
-                Some(Command::DeleteComment { steam_id, comment_id }) => st.with_web(sink, move |web, sink| async move {
-                    let result = match web {
-                        Ok(w) => crate::social::delete_comment(&w, steam_id, comment_id).await,
-                        Err(e) => Err(e),
+                Some(Command::DeleteComment { steam_id, comment_id }) => {
+                    let conn = st.conn.clone();
+                    st.with_web(sink, move |web, sink| async move {
+                    // Steam's comment service first (what its web pages use
+                    // now), the old form endpoint if that fails.
+                    let result = match crate::social::delete_comment_service(&conn, steam_id, comment_id).await {
+                        Ok(()) => {
+                            let anon = crate::market::Web::anonymous();
+                            let w: &crate::market::Web = match &web {
+                                Ok(w) => w,
+                                Err(_) => &anon,
+                            };
+                            crate::social::comments(Some(w), steam_id, 0).await
+                        }
+                        Err(service) => {
+                            tracing::warn!("Community.DeleteCommentFromThread: {service}");
+                            match web {
+                                Ok(w) => crate::social::delete_comment(&w, steam_id, comment_id).await,
+                                Err(e) => Err(e),
+                            }
+                        }
                     };
                     match result {
                         Ok(page) => sink(Event::Comments { steam_id, result: Ok(page) }),
                         Err(e) => sink(Event::Error(format!("Couldn't delete the comment: {e}"))),
                     }
-                }),
+                    });
+                }
                 Some(Command::LoadBadges { steam_id }) => st.with_web(sink, move |web, sink| async move {
                     let result = crate::social::badges(web.as_deref().ok(), steam_id).await;
                     sink(Event::Badges { steam_id, result });

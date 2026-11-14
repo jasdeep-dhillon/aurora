@@ -75,7 +75,7 @@ pub fn fade_right(ui: &Ui, rect: Rect, color: Color32, to: f32) {
 /// made once per context. Clamped at the edges, so uv outside 0..1 holds
 /// the end values.
 fn ramp(ctx: &egui::Context, vertical: bool) -> egui::TextureId {
-    let id = egui::Id::new(("ui-fade-ramp", vertical));
+    let id = egui::Id::unique(("ui-fade-ramp", vertical));
     if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return tex.id();
     }
@@ -832,27 +832,25 @@ pub fn check(ui: &mut Ui, t: &Theme, on: &mut bool, label: impl Into<egui::Widge
 
 /// A chip with a small picture (a game icon, an avatar) before the label.
 pub fn image_chip(ui: &mut Ui, t: &Theme, image: Option<&str>, label: &str, selected: bool) -> Response {
-    let galley = ui.painter().layout_no_wrap(label.to_string(), font_medium(13.0), Color32::PLACEHOLDER);
-    let pic = if image.is_some() { 26.0 } else { 0.0 };
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 24.0 + pic, 30.0), Sense::click());
+    // A 38 px control with a 28 px picture: big enough to tell games apart.
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font_medium(13.5), Color32::PLACEHOLDER);
+    let (h, pic) = (38.0, 28.0);
+    let lead = if image.is_some() { 5.0 + pic + 10.0 } else { 14.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(lead + galley.size().x + 14.0, h), Sense::click());
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
-    let r = CornerRadius::same(15);
+    let r = t.corner_small();
     let p = ui.painter();
-    if selected {
-        p.rect_filled(rect, r, t.accent.gamma_multiply(0.18));
-        p.rect_stroke(rect, r, Stroke::new(1.0, t.accent.gamma_multiply(0.7)), StrokeKind::Inside);
-    } else {
-        p.rect_filled(rect, r, mix(t.raised, t.surface_hover, hover));
-        p.rect_stroke(rect, r, Stroke::new(1.0, t.border), StrokeKind::Inside);
-    }
+    let fill = if selected { active_fill(t) } else { mix(t.raised, t.surface_hover, hover) };
+    p.rect_filled(rect, r, fill);
     if let Some(url) = image {
-        let img = Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), Vec2::splat(20.0));
-        if !paint_cover(ui, img, url, CornerRadius::same(4)) {
-            skeleton(ui, t, img, CornerRadius::same(4));
+        let img = Rect::from_min_size(egui::pos2(rect.left() + 5.0, rect.center().y - pic / 2.0), Vec2::splat(pic));
+        let ir = CornerRadius::same(r.nw.saturating_sub(2).max(3));
+        if !paint_cover(ui, img, url, ir) {
+            skeleton(ui, t, img, ir);
         }
     }
     let color = if selected { t.accent } else { mix(t.text_dim, t.text, hover) };
-    ui.painter().galley(egui::pos2(rect.left() + 12.0 + pic, rect.center().y - galley.size().y / 2.0), galley, color);
+    ui.painter().galley(egui::pos2(rect.left() + lead, rect.center().y - galley.size().y / 2.0), galley, color);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

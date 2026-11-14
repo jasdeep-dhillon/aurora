@@ -99,6 +99,50 @@ pub async fn block_user(web: &Web, steam_id: SteamId, block: bool) -> Result<boo
     if resp.status().is_success() { Ok(block) } else { Err(format!("Steam said {}", resp.status())) }
 }
 
+/// `Community.DeleteCommentFromThread#1`, the comment service Steam's own
+/// web pages use to delete comments now (the old form endpoint below fails
+/// with a generic error). Defined here instead of vendoring
+/// steammessages_community.proto with all its imports.
+#[derive(Clone, PartialEq, prost::Message)]
+struct DeleteCommentFromThreadRequest {
+    #[prost(fixed64, optional, tag = "1")]
+    steamid: Option<u64>,
+    /// ECommentThreadType.
+    #[prost(int32, optional, tag = "2")]
+    comment_thread_type: Option<i32>,
+    #[prost(fixed64, optional, tag = "3")]
+    gidfeature: Option<u64>,
+    #[prost(fixed64, optional, tag = "4")]
+    gidfeature2: Option<u64>,
+    #[prost(fixed64, optional, tag = "5")]
+    gidcomment: Option<u64>,
+    #[prost(bool, optional, tag = "6")]
+    undelete: Option<bool>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct DeleteCommentFromThreadResponse {}
+
+/// k_ECommentThreadTypeProfile (enums.proto).
+const THREAD_PROFILE: i32 = 10;
+/// A profile thread has no feature ids; the web pages send "-1", which the
+/// service takes as the largest u64.
+const NO_FEATURE: u64 = u64::MAX;
+
+/// Delete a profile comment through Steam's comment service.
+pub async fn delete_comment_service(conn: &net::Connection, steam_id: SteamId, comment_id: u64) -> Result<(), String> {
+    let req = DeleteCommentFromThreadRequest {
+        steamid: Some(steam_id),
+        comment_thread_type: Some(THREAD_PROFILE),
+        gidfeature: Some(NO_FEATURE),
+        gidfeature2: Some(NO_FEATURE),
+        gidcomment: Some(comment_id),
+        undelete: Some(false),
+    };
+    let _: DeleteCommentFromThreadResponse = conn.call("Community.DeleteCommentFromThread#1", &req).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Delete a comment. Steam allows it on your own profile and for your own comments.
 pub async fn delete_comment(web: &Web, steam_id: SteamId, comment_id: u64) -> Result<model::Comments, String> {
     let v: Value = web

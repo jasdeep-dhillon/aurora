@@ -362,14 +362,15 @@ impl Community {
                         (FriendsTab::Blocked, icons::LOCK_SIMPLE, t!("Blocked"), blocked_n),
                     ];
                     for (tab, icon, label, n) in items {
-                        let (r, resp) = ui.allocate_exact_size(vec2(220.0, 36.0), Sense::click());
+                        let (r, resp) = ui.allocate_exact_size(vec2(220.0, 34.0), Sense::click());
                         let on = self.tab == tab;
                         let hover = resp.hovered();
                         if on || hover {
-                            ui.painter().rect_filled(r, t.corner_small(), if on { t.accent.gamma_multiply(0.16) } else { t.surface_hover });
+                            ui.painter().rect_filled(r, t.corner_small(), if on { w::active_fill(t) } else { t.raised });
                         }
-                        ui.painter().text(pos2(r.left() + 14.0, r.center().y), Align2::CENTER_CENTER, icon, w::font(15.0), if on { t.accent } else { t.text_dim });
-                        ui.painter().text(pos2(r.left() + 32.0, r.center().y), Align2::LEFT_CENTER, label, w::font_medium(13.5), if on { t.text } else { t.text_dim });
+                        let c = if on { t.accent } else if hover { t.text } else { t.text_dim };
+                        ui.painter().text(pos2(r.left() + 18.0, r.center().y), Align2::CENTER_CENTER, icon, w::font(16.0), c);
+                        ui.painter().text(pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, label, w::font_medium(13.5), c);
                         if n > 0 {
                             let highlight = tab == FriendsTab::Invites;
                             let txt = n.to_string();
@@ -425,11 +426,13 @@ impl Community {
             if list.is_empty() {
                 continue;
             }
-            ui.label(w::text_bold(format!("{title}  ·  {}", list.len()), 11.5, t.text_faint));
-            ui.add_space(6.0);
-            let card = vec2(290.0, 52.0);
+            ui.label(w::caption_text(t, &format!("{title} · {}", list.len())));
+            ui.add_space(8.0);
+            // Cards fill the row edge to edge, like the library's shelves.
             let gap = 10.0;
-            let cols = (((ui.available_width() + gap) / (card.x + gap)).floor() as usize).max(1);
+            let avail = ui.available_width();
+            let cols = (((avail + gap) / (280.0 + gap)).floor() as usize).max(1);
+            let card = vec2(((avail - gap * (cols - 1) as f32) / cols as f32).floor(), 56.0);
             for row in list.chunks(cols) {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = gap;
@@ -448,16 +451,22 @@ impl Community {
         let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
         let color = crate::shell::status_color(t, p);
         let offline = p.state == PersonaState::Offline;
-        ui.painter().rect_filled(r, CornerRadius::same(4), w::mix(t.surface, t.surface_hover, hover));
-        let av = Rect::from_min_size(r.min, vec2(size.y, size.y));
-        if !w::paint_cover(ui, av, &art::avatar(p.avatar_hash.as_deref()), CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 }) {
-            w::skeleton(ui, t, av, CornerRadius::same(4));
+        // NEVKO card: one flat fill, the avatar inset with a status dot (no
+        // colored stripe down the side).
+        let fill = w::mix(t.raised, t.surface_hover, hover);
+        ui.painter().rect_filled(r, t.corner_small(), fill);
+        let side = size.y - 16.0;
+        let av = Rect::from_min_size(r.min + vec2(8.0, 8.0), vec2(side, side));
+        let ar = CornerRadius::same(6);
+        if !w::paint_cover(ui, av, &art::avatar(p.avatar_hash.as_deref()), ar) {
+            w::skeleton(ui, t, av, ar);
         }
         if offline {
-            ui.painter().rect_filled(av, CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 }, egui::Color32::from_black_alpha(110));
+            ui.painter().rect_filled(av, ar, egui::Color32::from_black_alpha(110));
         }
-        // Status stripe, like Steam's.
-        ui.painter().rect_filled(Rect::from_min_size(pos2(av.right(), r.top()), vec2(3.0, size.y)), CornerRadius::ZERO, color);
+        let dot = av.right_bottom() - vec2(1.0, 1.0);
+        ui.painter().circle_filled(dot, 6.0, fill);
+        ui.painter().circle_filled(dot, 4.0, color);
         let x = av.right() + 12.0;
         let max_w = r.right() - x - 8.0;
         let fit = |text: String, font: egui::FontId, c: egui::Color32| {
@@ -468,8 +477,8 @@ impl Community {
         let name_color = if p.in_game() { t.in_game } else if offline { t.text_dim } else { t.accent };
         let name = fit(p.name.clone(), w::font_semibold(14.0), name_color);
         let status = fit(crate::shell::status_text(ctx.state, p), w::font(12.0), if offline { t.text_faint } else { color });
-        ui.painter().galley(pos2(x, r.top() + 8.0), name, name_color);
-        ui.painter().galley(pos2(x, r.top() + 28.0), status, color);
+        ui.painter().galley(pos2(x, r.top() + 10.0), name, name_color);
+        ui.painter().galley(pos2(x, r.top() + 30.0), status, color);
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         if resp.clicked() {
             ctx.act(Action::OpenChat(p.steam_id));
