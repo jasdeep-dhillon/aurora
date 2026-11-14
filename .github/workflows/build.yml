@@ -1,0 +1,95 @@
+# SteamOnRust-Linux builds: a Linux binary and the Windows release files
+# (setup + portable zip), attached to each run as artifacts.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Headers for the GUI crates (eframe/winit, GTK for tray-icon and rfd,
+      # libxdo for global-hotkey) and OpenSSL for native-tls.
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libgtk-3-dev libxdo-dev \
+            libayatana-appindicator3-dev libxkbcommon-dev libwayland-dev
+
+      - name: Rust (stable)
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      # steamclient is a Windows DLL (it doesn't link on Linux), so only
+      # the app; tests for the crates that are platform-neutral.
+      - name: Build
+        run: cargo build --release --locked -p steam-rs
+
+      - name: Test
+        run: cargo test --release --locked -p i18n -p ui -p vdf -p model -p store
+
+      - name: Package
+        run: |
+          name=SteamOnRust-Linux-x86_64
+          mkdir -p dist/$name
+          cp target/release/steam-rs README.md LICENSE dist/$name/
+          tar -C dist -czf dist/$name.tar.gz $name
+          (cd dist && sha256sum $name.tar.gz > $name.tar.gz.sha256)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SteamOnRust-Linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          retention-days: 30
+
+  windows:
+    runs-on: windows-latest
+    # The upstream Windows build: GNU toolchain from MinGW, and
+    # `cargo xtask package` for the setup and the portable zip (with the
+    # 32-bit steamclient for 32-bit games).
+    env:
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: MinGW
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          # The MSYS2 that ships with the runner (downloading it often fails).
+          release: false
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64-i686-gcc mingw-w64-i686-binutils
+
+      - name: Put MinGW on PATH
+        shell: pwsh
+        run: echo "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - run: rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Package
+        shell: pwsh
+        env:
+          SIR_MINGW32: ${{ steps.msys2.outputs.msys2-location }}\mingw32\bin
+        run: cargo xtask package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SteamOnRust-Windows
+          path: target/package/dist/*
+          retention-days: 30
