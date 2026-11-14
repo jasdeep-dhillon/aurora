@@ -1188,8 +1188,8 @@ impl Library {
                     if !w::paint_cover_first(ui, rect, &[&art::hero(g.app_id), &art::header(g.app_id)], r) {
                         w::skeleton(ui, t, rect, r);
                     }
-                    w::fade_right(ui, rect, Color32::from_black_alpha(200), 0.65);
-                    w::fade_down(ui, rect, Color32::from_black_alpha(160), 0.4);
+                    w::fade_right_rounded(ui, rect, Color32::from_black_alpha(200), 0.65, r);
+                    w::fade_down_rounded(ui, rect, Color32::from_black_alpha(160), 0.4, r);
                     let inner = rect.shrink(32.0);
                     ui.painter().text(inner.left_top(), Align2::LEFT_TOP, t!("CONTINUE PLAYING"), w::font_bold(12.0), t.accent);
                     let logo = Rect::from_min_max(inner.left_top() + vec2(0.0, 28.0), inner.left_bottom() + vec2(380.0, -66.0));

@@ -71,6 +71,40 @@ pub fn fade_right(ui: &Ui, rect: Rect, color: Color32, to: f32) {
     gradient(&ui.painter_at(rect), r, color, Color32::TRANSPARENT, true);
 }
 
+/// A 256-step alpha ramp (opaque white -> transparent) along x or y,
+/// made once per context. Clamped at the edges, so uv outside 0..1 holds
+/// the end values.
+fn ramp(ctx: &egui::Context, vertical: bool) -> egui::TextureId {
+    let id = egui::Id::new(("ui-fade-ramp", vertical));
+    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return tex.id();
+    }
+    let pixels: Vec<Color32> = (0..256u32).map(|i| { let a = (255 - i) as u8; Color32::from_rgba_premultiplied(a, a, a, a) }).collect();
+    let size = if vertical { [1, 256] } else { [256, 1] };
+    let tex = ctx.load_texture("fade-ramp", egui::ColorImage::new(size, pixels), egui::TextureOptions::LINEAR);
+    let tid = tex.id();
+    ctx.data_mut(|d| d.insert_temp(id, tex));
+    tid
+}
+
+/// [`fade_right`] that keeps `rect`'s rounded corners.
+pub fn fade_right_rounded(ui: &Ui, rect: Rect, color: Color32, to: f32, radius: CornerRadius) {
+    // u = 0 at the left edge, 1 at `to`; beyond that the ramp stays clear.
+    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0 / to.max(0.01), 1.0));
+    let shape = egui::epaint::RectShape::filled(rect, radius, color).with_texture(ramp(ui.ctx(), false), uv);
+    ui.painter().add(shape);
+}
+
+/// [`fade_down`] that keeps `rect`'s rounded corners.
+pub fn fade_down_rounded(ui: &Ui, rect: Rect, color: Color32, from: f32, radius: CornerRadius) {
+    // The ramp runs opaque -> clear, so it is read bottom-up: v = 0 at the
+    // bottom edge, 1 at `from`, clear above.
+    let span = (1.0 - from).max(0.01);
+    let uv = Rect::from_min_max(pos2(0.0, 1.0 / span), pos2(1.0, 0.0));
+    let shape = egui::epaint::RectShape::filled(rect, radius, color).with_texture(ramp(ui.ctx(), true), uv);
+    ui.painter().add(shape);
+}
+
 /// How a remote image is doing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ImageState {
