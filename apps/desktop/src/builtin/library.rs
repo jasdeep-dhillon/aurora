@@ -565,7 +565,8 @@ impl Library {
             return;
         }
         w::section(ui, t, t!("What's new"), None);
-        let card = vec2(300.0, 230.0);
+        // Steam's event images are 16:9 (800x450): a 16:9 slot shows them whole.
+        let card = vec2(300.0, 300.0 * 9.0 / 16.0 + 80.0);
         egui::ScrollArea::horizontal().id_salt("whats-new").show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 16.0;
@@ -586,7 +587,7 @@ impl Library {
                         _ => ui::date(e.time),
                     };
                     ui.painter().text(r.left_top(), Align2::LEFT_TOP, when, w::font(12.0), t.text_faint);
-                    let img = Rect::from_min_size(r.min + vec2(0.0, 18.0), vec2(card.x, 150.0));
+                    let img = Rect::from_min_size(r.min + vec2(0.0, 18.0), vec2(card.x, card.x * 9.0 / 16.0));
                     match e.capsule.as_deref().or(e.header.as_deref()) {
                         Some(u) => w::image_or_title(ui, t, img, u, &e.title, t.corner_small()),
                         None => w::image_or_title(ui, t, img, &art::header(*id), &e.title, t.corner_small()),

@@ -8,8 +8,9 @@ use extensions::{Action, Env, Placement};
 use model::{Persona, PersonaState, art};
 use ui::{Theme, icons, widgets as w};
 
-/// Header height (NEVKO: a 48 px bar holding 32 px controls).
-const TOP_BAR: f32 = 48.0;
+/// Header height: a 56 px bar holding 36 px controls.
+const TOP_BAR: f32 = 56.0;
+const CTRL: f32 = w::CONTROL_LG;
 
 pub fn show(app: &mut SteamApp, ui: &mut Ui, actions: &mut Vec<Action>) {
     let t = app.prefs.theme.clone();
@@ -64,12 +65,12 @@ fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.add_enabled_ui(!app.back.is_empty(), |ui| {
-            if w::icon_button(ui, t, icons::ARROW_LEFT, t!("Back"), false, 0).clicked() {
+            if w::icon_button_sized(ui, t, icons::ARROW_LEFT, t!("Back"), false, 0, CTRL).clicked() {
                 app.go_back();
             }
         });
         ui.add_enabled_ui(!app.forward.is_empty(), |ui| {
-            if w::icon_button(ui, t, icons::ARROW_RIGHT, t!("Forward"), false, 0).clicked() {
+            if w::icon_button_sized(ui, t, icons::ARROW_RIGHT, t!("Forward"), false, 0, CTRL).clicked() {
                 app.go_forward();
             }
         });
@@ -105,12 +106,13 @@ fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
             ui.add_space(6.0);
             account_menu(app, ui, t, actions);
             crate::offline_ui::badge(app, ui, t);
-            if let Some((balance, currency)) = app.state.wallet {
+            // Like Steam: no wallet button while it's empty.
+            if let Some((balance, currency)) = app.state.wallet.filter(|(b, _)| *b > 0 || app.state.wallet_pending > 0) {
                 wallet_button(ui, t, balance, currency, app.state.wallet_pending, actions);
             }
             let unread = app.state.total_unread();
             notifications_button(app, ui, t, actions);
-            let fr = w::icon_button(ui, t, icons::USERS, t!("Friends"), app.prefs.friends_open, unread);
+            let fr = w::icon_button_sized(ui, t, icons::USERS, t!("Friends"), app.prefs.friends_open, unread, CTRL);
             if fr.clicked() {
                 app.prefs.friends_open = !app.prefs.friends_open;
             }
@@ -119,7 +121,7 @@ fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
             // Shrinks, then collapses to an icon, so it never covers the tabs.
             let room = ui.available_width() - 16.0;
             if room >= 180.0 {
-                let r = w::search(ui, t, &mut app.search, t!("Search"), room.min(300.0));
+                let r = w::search_sized(ui, t, &mut app.search, t!("Search"), room.min(320.0), CTRL);
                 if r.has_focus() {
                     app.search_open = true;
                 }
@@ -131,7 +133,7 @@ fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
                 if app.search_open && !app.search.trim().is_empty() {
                     search_results(app, ui.ctx(), r.rect, t, actions);
                 }
-            } else if room >= 40.0 && w::icon_button(ui, t, icons::SEARCH, t!("Search"), false, 0).clicked() {
+            } else if room >= 40.0 && w::icon_button_sized(ui, t, icons::SEARCH, t!("Search"), false, 0, CTRL).clicked() {
                 actions.push(Action::Navigate { page: "store".into(), arg: None });
             }
         });
@@ -357,7 +359,7 @@ fn notifications_button(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mu
     data.items.sort_by_key(|n| std::cmp::Reverse(n.time));
     let waiting = data.pending_gifts + data.pending_friends + data.confirmations;
     let badge = (data.unread + waiting) as usize;
-    let r = w::icon_button(ui, t, icons::BELL, t!("Notifications"), false, badge);
+    let r = w::icon_button_sized(ui, t, icons::BELL, t!("Notifications"), false, badge, CTRL);
     egui::Popup::from_toggle_button_response(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(380.0).show(|ui| {
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
             ui.horizontal(|ui| {
@@ -431,7 +433,7 @@ fn wallet_button(ui: &mut Ui, t: &Theme, balance: i64, currency: i32, pending: i
     if pending > 0 {
         label = format!("{label}  ·  +{}", model::format_money(pending, currency));
     }
-    let r = ui.add(egui::Button::new(w::text_medium(label, 13.0, t.text)).fill(t.raised).stroke(Stroke::NONE).corner_radius(t.corner_small()).min_size(vec2(0.0, 32.0)));
+    let r = ui.add(egui::Button::new(w::text_medium(label, 13.0, t.text)).fill(t.raised).stroke(Stroke::NONE).corner_radius(t.corner_small()).min_size(vec2(0.0, CTRL)));
     let r = r.on_hover_text(t!("Steam Wallet"));
     egui::Popup::menu(&r).show(|ui| {
         ui.set_width(300.0);
@@ -470,13 +472,13 @@ fn wallet_button(ui: &mut Ui, t: &Theme, balance: i64, currency: i32, pending: i
 
 /// The logo is a menu, like Steam's "Steam" menu.
 fn app_menu(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>) {
-    let galley = ui.painter().layout_no_wrap(i18n::BRAND.into(), w::font_bold(14.0), t.text);
-    let (rect, resp) = ui.allocate_exact_size(vec2(22.0 + 8.0 + galley.size().x + 26.0, 32.0), Sense::click());
+    let galley = ui.painter().layout_no_wrap(i18n::BRAND.into(), w::font_bold(15.0), t.text);
+    let (rect, resp) = ui.allocate_exact_size(vec2(24.0 + 8.0 + galley.size().x + 28.0, CTRL), Sense::click());
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
     ui.painter().rect_filled(rect, t.corner_small(), w::mix(egui::Color32::TRANSPARENT, t.surface_hover, hover));
-    let mut c = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(6.0, 5.0), vec2(22.0, 22.0))));
-    w::logo(&mut c, t, 22.0);
-    ui.painter().galley(egui::pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0), galley, t.text);
+    let mut c = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(6.0, (CTRL - 24.0) / 2.0), vec2(24.0, 24.0))));
+    w::logo(&mut c, t, 24.0);
+    ui.painter().galley(egui::pos2(rect.left() + 38.0, rect.center().y - galley.size().y / 2.0), galley, t.text);
     ui.painter().text(rect.right_center() - vec2(10.0, 0.0), Align2::CENTER_CENTER, icons::CARET_DOWN, w::font(12.0), t.text_faint);
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     egui::Popup::menu(&resp).width(320.0).show(|ui| {
@@ -636,14 +638,14 @@ fn account_menu(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Ac
     // NEVKO's account button: avatar and name in one filled 32 px control,
     // the name in the status color (blue online, green in game).
     let name_color = if me.in_game() { t.in_game } else if me.state == PersonaState::Offline { t.text } else { color };
-    let name_g = ui.painter().layout_no_wrap(short, w::font_medium(13.0), name_color);
-    let (rect, resp) = ui.allocate_exact_size(vec2(6.0 + 22.0 + 8.0 + name_g.size().x + 26.0, 32.0), Sense::click());
+    let name_g = ui.painter().layout_no_wrap(short, w::font_medium(13.5), name_color);
+    let (rect, resp) = ui.allocate_exact_size(vec2(6.0 + 24.0 + 8.0 + name_g.size().x + 28.0, CTRL), Sense::click());
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
     ui.painter().rect_filled(rect, t.corner_small(), w::mix(t.raised, t.surface_hover, hover));
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(6.0, 5.0), vec2(22.0, 22.0))));
-    w::avatar(&mut child, t, &art::avatar(me.avatar_hash.as_deref()), 22.0, Some(color));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(6.0, (CTRL - 24.0) / 2.0), vec2(24.0, 24.0))));
+    w::avatar(&mut child, t, &art::avatar(me.avatar_hash.as_deref()), 24.0, Some(color));
     let p = ui.painter();
-    p.galley(egui::pos2(rect.left() + 36.0, rect.center().y - name_g.size().y / 2.0), name_g, name_color);
+    p.galley(egui::pos2(rect.left() + 38.0, rect.center().y - name_g.size().y / 2.0), name_g, name_color);
     p.text(rect.right_center() - vec2(12.0, 0.0), Align2::CENTER_CENTER, icons::CARET_DOWN, w::font(12.0), t.text_faint);
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     egui::Popup::menu(&resp).width(230.0).show(|ui| {

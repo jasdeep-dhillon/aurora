@@ -328,7 +328,12 @@ pub fn button(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, kind: Kin
 
 /// Square icon button with optional red badge.
 pub fn icon_button(ui: &mut Ui, t: &Theme, icon: &str, tooltip: &str, active: bool, badge: usize) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
+    icon_button_sized(ui, t, icon, tooltip, active, badge, 32.0)
+}
+
+/// [`icon_button`] at another size (the header uses larger controls).
+pub fn icon_button_sized(ui: &mut Ui, t: &Theme, icon: &str, tooltip: &str, active: bool, badge: usize, size: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     let enabled = ui.is_enabled();
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() && enabled, 0.12);
     let p = ui.painter();
@@ -336,7 +341,7 @@ pub fn icon_button(ui: &mut Ui, t: &Theme, icon: &str, tooltip: &str, active: bo
     p.rect_filled(rect, t.corner_small(), if enabled { bg } else { bg.gamma_multiply(0.5) });
     let color = if active { t.accent } else { mix(t.text_dim, t.text, hover) };
     let color = if enabled { color } else { color.gamma_multiply(0.45) };
-    p.text(rect.center(), Align2::CENTER_CENTER, icon, font(16.0), color);
+    p.text(rect.center(), Align2::CENTER_CENTER, icon, font(size / 2.0), color);
     if badge > 0 {
         let c = rect.right_top() + vec2(-8.0, 8.0);
         let label = if badge > 99 { "99+".to_string() } else { badge.to_string() };
@@ -390,13 +395,14 @@ pub fn active_fill(t: &Theme) -> Color32 {
 /// text, the others the neutral control fill.
 pub fn nav_tab_icon(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, selected: bool, height: f32) -> Response {
     // Laid out without a color, so the state color below applies.
-    let galley = ui.painter().layout_no_wrap(label.to_string(), font_medium(13.0), Color32::PLACEHOLDER);
+    let fs = if height >= 48.0 { 13.5 } else { 13.0 };
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font_medium(fs), Color32::PLACEHOLDER);
     let icon_w = if icon.is_some() { 22.0 } else { 0.0 };
     let w = galley.size().x + 24.0 + icon_w;
     let (rect, resp) = ui.allocate_exact_size(vec2(w, height), Sense::click());
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
     let sel = ui.ctx().animate_bool_with_time(resp.id.with("sel"), selected, 0.15);
-    let pill = Rect::from_center_size(rect.center(), vec2(w, height.min(32.0)));
+    let pill = Rect::from_center_size(rect.center(), vec2(w, height.min(CONTROL_LG)));
     let fill = mix(mix(t.raised, t.surface_hover, hover), active_fill(t), sel);
     let color = mix(mix(t.text_dim, t.text, hover), t.accent, sel);
     let p = ui.painter();
@@ -486,9 +492,17 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, t: &Theme, value: &mut T, opt
     changed
 }
 
+/// Height of the header's controls (tabs, search, icon buttons).
+pub const CONTROL_LG: f32 = 36.0;
+
 /// Compact search field (32 px tall) with a clear button.
 pub fn search(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, width: f32) -> Response {
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+    search_sized(ui, t, value, hint, width, 32.0)
+}
+
+/// [`search`] at another height.
+pub fn search_sized(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, width: f32, height: f32) -> Response {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     let r = t.corner_small();
     ui.painter().rect_filled(rect, r, t.raised);
     ui.painter().text(rect.left_center() + vec2(15.0, 0.0), Align2::CENTER_CENTER, crate::icons::SEARCH, font(14.0), t.text_faint);

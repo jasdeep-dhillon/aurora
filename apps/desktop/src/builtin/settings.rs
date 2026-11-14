@@ -392,13 +392,28 @@ fn accessibility(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
                 ui.label(w::text(t!("Makes text and everything else bigger or smaller."), 12.5, t.text_dim));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut zoom = ctx.zoom;
-                if ui.add(egui::Slider::new(&mut zoom, 0.8..=1.6).step_by(0.05).custom_formatter(|v, _| format!("{:.0}%", v * 100.0))).changed() {
-                    ctx.act(Action::SetZoom(zoom));
-                }
+                zoom_slider(ui, ctx);
             });
         });
     });
+}
+
+/// The interface size slider. Zooming rescales the slider itself, so a
+/// live zoom while dragging moves the handle away from the pointer and the
+/// value runs off to an end. While dragging it shows a draft value and
+/// applies it on release; a click or the arrow keys apply at once.
+fn zoom_slider(ui: &mut Ui, ctx: &mut Ctx) {
+    let id = egui::Id::new("zoom-slider-draft");
+    let mut zoom: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(ctx.zoom);
+    let r = ui.add(egui::Slider::new(&mut zoom, 0.8..=1.6).step_by(0.05).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+    if r.dragged() {
+        ui.data_mut(|d| d.insert_temp(id, zoom));
+    } else {
+        ui.data_mut(|d| d.remove::<f32>(id));
+        if r.drag_stopped() || (r.changed() && (zoom - ctx.zoom).abs() > f32::EPSILON) {
+            ctx.act(Action::SetZoom(zoom));
+        }
+    }
 }
 
 fn appearance(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
@@ -440,10 +455,7 @@ fn appearance(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
             ui.add(egui::Slider::new(&mut theme.radius, 0..=20));
             ui.end_row();
             ui.label(w::text_medium(t!("Interface scale"), 14.0, t.text));
-            let mut zoom = ctx.zoom;
-            if ui.add(egui::Slider::new(&mut zoom, 0.8..=1.6).step_by(0.05)).drag_stopped() {
-                ctx.act(Action::SetZoom(zoom));
-            }
+            zoom_slider(ui, ctx);
             ui.end_row();
         });
     });
