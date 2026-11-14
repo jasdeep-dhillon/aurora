@@ -59,7 +59,7 @@ fn not_ready<T>(ui: &mut Ui, t: &Theme, r: Option<&Result<T, String>>) -> bool {
 
 fn section(ui: &mut Ui, t: &Theme, title: &str) {
     ui.add_space(14.0);
-    ui.label(w::text_bold(title.to_uppercase(), 11.5, t.text_faint));
+    ui.label(w::caption_text(t, title));
     ui.add_space(6.0);
 }
 

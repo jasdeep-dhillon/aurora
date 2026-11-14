@@ -250,9 +250,9 @@ impl Library {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.add_space(14.0);
-                ui.add_sized(vec2(70.0, 30.0), egui::Label::new(w::text_bold(t!("INSTALL"), 11.0, t.text_faint)));
-                ui.add_sized(vec2((ui.available_width() - 110.0).max(0.0), 30.0), egui::Label::new(w::text_bold(t!("NAME"), 11.0, t.text_faint)));
-                ui.label(w::text_bold(t!("SIZE"), 11.0, t.text_faint));
+                ui.add_sized(vec2(70.0, 30.0), egui::Label::new(w::caption_text(&t, t!("INSTALL"))));
+                ui.add_sized(vec2((ui.available_width() - 110.0).max(0.0), 30.0), egui::Label::new(w::caption_text(&t, t!("NAME"))));
+                ui.label(w::caption_text(&t, t!("SIZE")));
             });
             for d in dlc.iter().filter(|d| q.is_empty() || d.name.to_lowercase().contains(&q)) {
                 ui.separator();
@@ -345,15 +345,15 @@ impl Library {
             w::panel(t).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 egui::Grid::new("upd-grid").num_columns(2).spacing(vec2(24.0, 6.0)).show(ui, |ui| {
-                    ui.label(w::text_bold(t!("INSTALLED BUILD"), 11.0, t.text_faint));
+                    ui.label(w::caption_text(&t, t!("INSTALLED BUILD")));
                     ui.label(w::text(if build == 0 { "—".into() } else { build.to_string() }, 13.5, t.text));
                     ui.end_row();
                     if let Some((b, when)) = latest {
-                        ui.label(w::text_bold(t!("LATEST BUILD"), 11.0, t.text_faint));
+                        ui.label(w::caption_text(&t, t!("LATEST BUILD")));
                         ui.label(w::text(format!("{b}  ·  {}", super::news::date(when)), 13.5, t.text));
                         ui.end_row();
                     }
-                    ui.label(w::text_bold(t!("LAST UPDATED"), 11.0, t.text_faint));
+                    ui.label(w::caption_text(&t, t!("LAST UPDATED")));
                     ui.label(w::text(g.last_updated.map(super::news::date).unwrap_or_else(|| "—".into()), 13.5, t.text));
                     ui.end_row();
                 });

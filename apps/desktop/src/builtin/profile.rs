@@ -211,7 +211,7 @@ impl Extension for Profile {
                                         w::image_or_skeleton(ui, &t, r, &art::header(g), t.corner_small());
                                     }
                                     ui.vertical(|ui| {
-                                        ui.label(w::text_bold(t!("CURRENTLY IN GAME"), 11.0, t.in_game));
+                                        ui.label(w::text_semibold(w::sentence_case(t!("CURRENTLY IN GAME")), 12.0, t.in_game));
                                         ui.label(w::text_semibold(game, 18.0, t.text));
                                     });
                                 });

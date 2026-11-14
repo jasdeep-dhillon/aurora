@@ -34,6 +34,11 @@ pub fn mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
     if let Some(ac) = anti_cheat(app, install_dir) {
         return LaunchMode::OfficialSteam { anti_cheat: ac };
     }
+    // Our steamclient is a Windows DLL; on Linux the official client runs
+    // every game (native ones in its runtime, Windows ones through Proton).
+    if !cfg!(windows) {
+        return LaunchMode::OfficialSteam { anti_cheat: "Steam for Linux".into() };
+    }
     let Some(exe) = executable(app, install_dir) else {
         return LaunchMode::NoSteam { reason: "no launch option for this system".into() };
     };
@@ -460,22 +465,32 @@ pub fn reg_string(sub: &str, value: &str) -> Option<String> {
 // -------------------------------------------- the official Steam client
 
 /// Where the official client is, from its own registry entry.
+#[cfg(windows)]
 pub fn steam_exe() -> Option<PathBuf> {
     let p = win::reg_string("Software\\Valve\\Steam", "SteamExe")?;
     let p = PathBuf::from(p.replace('/', "\\"));
     p.is_file().then_some(p)
 }
 
+/// `steam` on the PATH, else the launcher script in the Steam folder.
+#[cfg(not(windows))]
+pub fn steam_exe() -> Option<PathBuf> {
+    let on_path = std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|d| d.join("steam")).find(|p| p.is_file()));
+    on_path.or_else(|| local::find_steam_root().map(|r| r.join("steam.sh")).filter(|p| p.is_file()))
+}
+
 fn steam_running() -> bool {
-    win::reg_dword(ACTIVE, "pid").is_some_and(win::is_steam_process)
+    win::reg_dword(ACTIVE, "pid").is_some_and(win::is_steam_process) || win::steam_pid_file().is_some_and(win::is_steam_process)
 }
 
 fn signed_in() -> bool {
-    steam_running() && win::reg_dword(ACTIVE, "ActiveUser").unwrap_or(0) != 0
+    // Linux Steam may not publish ActiveUser; a running client then counts
+    // (it queues -applaunch until it has signed in).
+    steam_running() && win::reg_dword(ACTIVE, "ActiveUser").map_or(!cfg!(windows), |u| u != 0)
 }
 
 fn app_running(app_id: AppId) -> bool {
-    win::reg_dword(&format!("Software\\Valve\\Steam\\Apps\\{app_id}"), "Running").unwrap_or(0) == 1
+    win::reg_dword(&format!("Software\\Valve\\Steam\\Apps\\{app_id}"), "Running").unwrap_or(0) == 1 || win::steam_launch_running(app_id)
 }
 
 fn wait_until(limit: Duration, mut f: impl FnMut() -> bool) -> bool {
@@ -558,8 +573,11 @@ fn quiet(cmd: &mut Command) -> &mut Command {
 }
 
 fn steam_config(file: &str) -> Option<PathBuf> {
-    let root = win::reg_string("Software\\Valve\\Steam", "SteamPath")?;
-    Some(PathBuf::from(root.replace('/', "\\")).join("config").join(file))
+    #[cfg(windows)]
+    let root = PathBuf::from(win::reg_string("Software\\Valve\\Steam", "SteamPath")?.replace('/', "\\"));
+    #[cfg(not(windows))]
+    let root = local::find_steam_root()?;
+    Some(root.join("config").join(file))
 }
 
 /// The account's login name, if the official client remembers its login
@@ -582,6 +600,11 @@ fn remembered_account(steam_id: u64) -> Option<String> {
 /// ([`restore_login_later`]); Steam rewrites them on exit, so earlier would
 /// be undone.
 fn auto_login(steam_id: u64, offline: bool) -> Option<String> {
+    // Linux keeps AutoLoginUser in ~/.steam/registry.vdf, which we only
+    // read: Steam signs in to whichever account it remembers.
+    if !cfg!(windows) {
+        return None;
+    }
     let account = remembered_account(steam_id)?;
     let users_path = steam_config("loginusers.vdf")?;
     let config_path = steam_config("config.vdf");
@@ -978,16 +1001,45 @@ mod win {
         }
         out
     }
-}
 
-#[cfg(not(windows))]
-mod win {
-    use std::path::Path;
-    pub fn reg_string(_: &str, _: &str) -> Option<String> {
+    // Linux only (see the other `win`).
+    pub fn steam_pid_file() -> Option<u32> {
         None
     }
-    pub fn reg_dword(_: &str, _: &str) -> Option<u32> {
-        None
+    pub fn steam_launch_running(_: model::AppId) -> bool {
+        false
+    }
+}
+
+/// Linux: Steam mirrors its registry in `~/.steam/registry.vdf` (read only
+/// here) and the running client in `~/.steam/steam.pid`.
+#[cfg(not(windows))]
+mod win {
+    use model::AppId;
+    use std::path::{Path, PathBuf};
+
+    fn dot_steam() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".steam"))
+    }
+
+    fn registry_value(sub: &str, value: &str) -> Option<String> {
+        let text = std::fs::read_to_string(dot_steam()?.join("registry.vdf")).ok()?;
+        let kv = vdf::parse(&text).ok()?;
+        let mut keys = vec!["Registry", "HKCU"];
+        keys.extend(sub.split('\\').filter(|k| !k.is_empty()));
+        // Key case differs between Steam versions (Apps / apps).
+        let mut obj = kv.obj(keys[0])?;
+        for k in &keys[1..] {
+            obj = obj.iter().find(|(name, _)| name.eq_ignore_ascii_case(k))?.1.as_obj()?;
+        }
+        obj.iter().find(|(name, _)| name.eq_ignore_ascii_case(value))?.1.as_str().map(String::from)
+    }
+
+    pub fn reg_string(sub: &str, value: &str) -> Option<String> {
+        registry_value(sub, value)
+    }
+    pub fn reg_dword(sub: &str, value: &str) -> Option<u32> {
+        registry_value(sub, value)?.trim().parse().ok()
     }
     pub fn set_string(_: &str, _: &str, _: &str) -> Result<(), String> {
         Err("no registry".into())
@@ -998,14 +1050,43 @@ mod win {
     pub fn delete_value(_: &str, _: &str) -> Result<(), String> {
         Ok(())
     }
-    pub fn is_alive(_: u32) -> bool {
-        false
+    pub fn is_alive(pid: u32) -> bool {
+        pid != 0 && Path::new(&format!("/proc/{pid}")).exists()
     }
-    pub fn is_steam_process(_: u32) -> bool {
-        false
+    pub fn is_steam_process(pid: u32) -> bool {
+        is_alive(pid) && std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "steam")
     }
-    pub fn processes_in(_: &Path) -> Vec<u32> {
-        Vec::new()
+    /// The pid the running client wrote to `~/.steam/steam.pid`.
+    pub fn steam_pid_file() -> Option<u32> {
+        std::fs::read_to_string(dot_steam()?.join("steam.pid")).ok()?.trim().parse().ok()
+    }
+
+    fn pids() -> impl Iterator<Item = u32> {
+        std::fs::read_dir("/proc").into_iter().flatten().flatten().filter_map(|e| e.file_name().to_str()?.parse().ok())
+    }
+
+    /// Steam starts every game as `reaper SteamLaunch AppId=<id> -- ...`.
+    pub fn steam_launch_running(app_id: AppId) -> bool {
+        let want = format!("AppId={app_id}");
+        pids().any(|pid| {
+            let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else { return false };
+            let mut args = raw.split(|b| *b == 0).take_while(|a| *a != b"--");
+            let (mut launch, mut id) = (false, false);
+            for a in &mut args {
+                launch |= a == b"SteamLaunch";
+                id |= a == want.as_bytes();
+            }
+            launch && id
+        })
+    }
+
+    /// Processes whose program or working folder is inside `dir`.
+    pub fn processes_in(dir: &Path) -> Vec<u32> {
+        let me = std::process::id();
+        pids()
+            .filter(|&pid| pid != me)
+            .filter(|pid| ["exe", "cwd"].iter().any(|l| std::fs::read_link(format!("/proc/{pid}/{l}")).is_ok_and(|p| p.starts_with(dir))))
+            .collect()
     }
 }
 

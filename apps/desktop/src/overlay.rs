@@ -700,14 +700,14 @@ fn overview_window(app: &mut SteamApp, ctx: &egui::Context, t: &Theme) {
                 _ => None,
             };
             egui::Grid::new("ov-playtime").num_columns(2).spacing(vec2(16.0, 4.0)).show(ui, |ui| {
-                ui.label(w::text_bold(t!("THIS SESSION"), 10.5, t.text_faint));
+                ui.label(w::caption_text(&t, t!("THIS SESSION")));
                 ui.label(w::text(session_text(since), 13.0, t.text));
                 ui.end_row();
                 if let Some((all, recent)) = total {
-                    ui.label(w::text_bold(t!("PLAYED IN TOTAL"), 10.5, t.text_faint));
+                    ui.label(w::caption_text(&t, t!("PLAYED IN TOTAL")));
                     ui.label(w::text(hours(all), 13.0, t.text));
                     ui.end_row();
-                    ui.label(w::text_bold(t!("LAST TWO WEEKS"), 10.5, t.text_faint));
+                    ui.label(w::caption_text(&t, t!("LAST TWO WEEKS")));
                     ui.label(w::text(hours(recent), 13.0, t.text));
                     ui.end_row();
                 }
@@ -717,7 +717,7 @@ fn overview_window(app: &mut SteamApp, ctx: &egui::Context, t: &Theme) {
             match app.state.achievements.get(&id).copied() {
                 Some((done, all)) if all > 0 => {
                     ui.horizontal(|ui| {
-                        ui.label(w::text_bold(t!("ACHIEVEMENTS"), 11.0, t.text_faint));
+                        ui.label(w::caption_text(&t, t!("ACHIEVEMENTS")));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(w::text(t!("{done} of {all}", done = done, all = all), 12.5, t.text_dim));
                         });

@@ -358,7 +358,7 @@ impl Workshop {
             }
             if self.tab == Tab::Trending {
                 ui.add_space(6.0);
-                ui.label(w::text_bold(t!("PERIOD"), 10.5, t.text_faint));
+                ui.label(w::caption_text(&t, t!("PERIOD")));
                 let current = if self.period == 0 { 7 } else { self.period };
                 for (days, label) in [(1, t!("Today")), (7, t!("Week")), (30, t!("Month")), (90, t!("3 months")), (365, t!("Year"))] {
                     if w::radio(ui, t, current == days, label).clicked() && current != days {

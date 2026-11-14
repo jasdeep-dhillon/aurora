@@ -8,13 +8,16 @@ use extensions::{Action, Env, Placement};
 use model::{Persona, PersonaState, art};
 use ui::{Theme, icons, widgets as w};
 
+/// Header height (NEVKO: a 48 px bar holding 32 px controls).
+const TOP_BAR: f32 = 48.0;
+
 pub fn show(app: &mut SteamApp, ui: &mut Ui, actions: &mut Vec<Action>) {
     let t = app.prefs.theme.clone();
 
     egui::Panel::top("topbar")
-        .exact_size(60.0)
+        .exact_size(TOP_BAR)
         .resizable(false)
-        .frame(egui::Frame::new().fill(t.chrome).inner_margin(Margin { left: 16, right: 0, top: 0, bottom: 0 }))
+        .frame(egui::Frame::new().fill(t.chrome).inner_margin(Margin { left: 10, right: 0, top: 0, bottom: 0 }))
         .show(ui, |ui| top_bar(app, ui, &t, actions));
 
     egui::Panel::bottom("statusbar")
@@ -56,11 +59,10 @@ pub fn show(app: &mut SteamApp, ui: &mut Ui, actions: &mut Vec<Action>) {
 
 fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>) {
     let rect = ui.max_rect();
-    ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, t.border));
     // Empty parts of the bar move the window (we draw our own title bar).
-    crate::chrome::drag_area(ui, rect.expand2(vec2(16.0, 0.0)), true);
+    crate::chrome::drag_area(ui, rect.expand2(vec2(10.0, 0.0)), true);
     ui.horizontal_centered(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = 6.0;
         ui.add_enabled_ui(!app.back.is_empty(), |ui| {
             if w::icon_button(ui, t, icons::ARROW_LEFT, t!("Back"), false, 0).clicked() {
                 app.go_back();
@@ -71,21 +73,22 @@ fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
                 app.go_forward();
             }
         });
-        ui.add_space(10.0);
+        ui.add_space(4.0);
         app_menu(app, ui, t, actions);
-        ui.add_space(16.0);
+        ui.add_space(6.0);
 
         let pages = app.registry.pages();
         let current = app.prefs.page.clone();
         for p in pages.iter().filter(|p| p.placement == Placement::Main) {
-            if w::nav_tab(ui, t, &i18n::tr_dyn(&p.title), current == p.id, 60.0).clicked() {
+            let icon = (!p.icon.is_empty()).then_some(p.icon.as_str());
+            if w::nav_tab_icon(ui, t, icon, &i18n::tr_dyn(&p.title), current == p.id, TOP_BAR).clicked() {
                 actions.push(Action::Navigate { page: p.id.clone(), arg: None });
             }
         }
         let plugin_pages: Vec<_> = pages.iter().filter(|p| p.placement == Placement::Apps).collect();
         if !plugin_pages.is_empty() {
             let active = plugin_pages.iter().any(|p| p.id == current);
-            let resp = w::nav_tab(ui, t, &format!("{} {}", t!("Plugins"), icons::CARET_DOWN), active, 60.0);
+            let resp = w::nav_tab_icon(ui, t, Some(icons::PLUGS), &format!("{} {}", t!("Plugins"), icons::CARET_DOWN), active, TOP_BAR);
             egui::Popup::menu(&resp).width(220.0).show(|ui| {
                 for p in &plugin_pages {
                     let label = format!("{}   {}", p.icon, p.title);
@@ -98,7 +101,7 @@ fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            crate::chrome::window_buttons(ui, t, 60.0, true);
+            crate::chrome::window_buttons(ui, t, TOP_BAR, true);
             ui.add_space(6.0);
             account_menu(app, ui, t, actions);
             crate::offline_ui::badge(app, ui, t);
@@ -428,7 +431,7 @@ fn wallet_button(ui: &mut Ui, t: &Theme, balance: i64, currency: i32, pending: i
     if pending > 0 {
         label = format!("{label}  ·  +{}", model::format_money(pending, currency));
     }
-    let r = ui.add(egui::Button::new(w::text_semibold(label, 13.0, t.text)).fill(t.raised).corner_radius(t.corner_small()));
+    let r = ui.add(egui::Button::new(w::text_medium(label, 13.0, t.text)).fill(t.raised).stroke(Stroke::NONE).corner_radius(t.corner_small()).min_size(vec2(0.0, 32.0)));
     let r = r.on_hover_text(t!("Steam Wallet"));
     egui::Popup::menu(&r).show(|ui| {
         ui.set_width(300.0);
@@ -467,12 +470,12 @@ fn wallet_button(ui: &mut Ui, t: &Theme, balance: i64, currency: i32, pending: i
 
 /// The logo is a menu, like Steam's "Steam" menu.
 fn app_menu(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>) {
-    let galley = ui.painter().layout_no_wrap("SteamInRust".into(), w::font_bold(15.0), t.text);
-    let (rect, resp) = ui.allocate_exact_size(vec2(24.0 + 8.0 + galley.size().x + 22.0, 40.0), Sense::click());
+    let galley = ui.painter().layout_no_wrap(i18n::BRAND.into(), w::font_bold(14.0), t.text);
+    let (rect, resp) = ui.allocate_exact_size(vec2(22.0 + 8.0 + galley.size().x + 26.0, 32.0), Sense::click());
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
     ui.painter().rect_filled(rect, t.corner_small(), w::mix(egui::Color32::TRANSPARENT, t.surface_hover, hover));
-    let mut c = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(4.0, 8.0), vec2(24.0, 24.0))));
-    w::logo(&mut c, t, 24.0);
+    let mut c = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(6.0, 5.0), vec2(22.0, 22.0))));
+    w::logo(&mut c, t, 22.0);
     ui.painter().galley(egui::pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0), galley, t.text);
     ui.painter().text(rect.right_center() - vec2(10.0, 0.0), Align2::CENTER_CENTER, icons::CARET_DOWN, w::font(12.0), t.text_faint);
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -630,19 +633,18 @@ fn account_menu(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Ac
     let short: String = if name.chars().count() > 16 { name.chars().take(15).chain(std::iter::once('…')).collect() } else { name.clone() };
     let color = status_color(t, &me);
     // Painted as one fixed-size widget so it behaves inside right-to-left layouts.
-    let name_g = ui.painter().layout_no_wrap(short, w::font_semibold(13.5), t.text);
-    let status_g = ui.painter().layout_no_wrap(i18n::tr_dyn(me.state.label()), w::font(11.5), color);
-    let text_w = name_g.size().x.max(status_g.size().x);
-    let (rect, resp) = ui.allocate_exact_size(vec2(34.0 + 10.0 + text_w + 22.0, 44.0), Sense::click());
+    // NEVKO's account button: avatar and name in one filled 32 px control,
+    // the name in the status color (blue online, green in game).
+    let name_color = if me.in_game() { t.in_game } else if me.state == PersonaState::Offline { t.text } else { color };
+    let name_g = ui.painter().layout_no_wrap(short, w::font_medium(13.0), name_color);
+    let (rect, resp) = ui.allocate_exact_size(vec2(6.0 + 22.0 + 8.0 + name_g.size().x + 26.0, 32.0), Sense::click());
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
-    ui.painter().rect_filled(rect, t.corner_small(), w::mix(egui::Color32::TRANSPARENT, t.surface_hover, hover));
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(4.0, 5.0), vec2(34.0, 34.0))));
-    w::avatar(&mut child, t, &art::avatar(me.avatar_hash.as_deref()), 34.0, Some(color));
-    let x = rect.left() + 46.0;
+    ui.painter().rect_filled(rect, t.corner_small(), w::mix(t.raised, t.surface_hover, hover));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(6.0, 5.0), vec2(22.0, 22.0))));
+    w::avatar(&mut child, t, &art::avatar(me.avatar_hash.as_deref()), 22.0, Some(color));
     let p = ui.painter();
-    p.galley(egui::pos2(x, rect.center().y - name_g.size().y + 1.0), name_g, t.text);
-    p.galley(egui::pos2(x, rect.center().y + 1.0), status_g, color);
-    p.text(rect.right_center() - vec2(10.0, 0.0), Align2::CENTER_CENTER, icons::CARET_DOWN, w::font(12.0), t.text_faint);
+    p.galley(egui::pos2(rect.left() + 36.0, rect.center().y - name_g.size().y / 2.0), name_g, name_color);
+    p.text(rect.right_center() - vec2(12.0, 0.0), Align2::CENTER_CENTER, icons::CARET_DOWN, w::font(12.0), t.text_faint);
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     egui::Popup::menu(&resp).width(230.0).show(|ui| {
         crate::offline_ui::account_items(app, ui, t);
@@ -682,50 +684,77 @@ fn account_menu(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Ac
 }
 
 fn status_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme) {
-    let rect = ui.max_rect();
-    ui.painter().hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, t.border));
+    let bar = ui.max_rect();
+    // Left: offline note and the game being played.
     ui.horizontal_centered(|ui| {
-        let dl = ui.add(egui::Label::new(w::text(format!("{}  {}", icons::DOWNLOAD, t!("Downloads")), 12.5, t.text_dim)).sense(Sense::click()));
-        if dl.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-            app.navigate("downloads".into(), None);
-        }
-        // Same state as the Downloads page: what's downloading and what's waiting.
-        let active = app.state.downloads.values().find(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)).cloned();
-        let waiting = app.state.download_queue.iter().filter(|id| active.as_ref().is_none_or(|d| d.app_id != **id)).count();
-        match &active {
-            Some(d) => {
-                let name = app.state.app_name(d.app_id).unwrap_or("").to_string();
-                let pct = d.disk_done as f64 * 100.0 / d.disk_total.max(1) as f64;
-                let text = if d.paused { t!("{game}: paused at {pct}%", game = name, pct = format!("{pct:.0}")) } else { t!("{game}: {pct}%", game = name, pct = format!("{pct:.0}")) };
-                ui.label(w::text(text, 12.5, t.accent));
-                w::progress(ui, t, (pct / 100.0) as f32, 90.0);
-                if waiting > 0 {
-                    ui.label(w::text(t!("+{n} queued", n = waiting), 12.5, t.text_faint));
-                }
-            }
-            None if waiting > 0 => {
-                ui.label(w::text(t!("{n} queued", n = waiting), 12.5, t.text_faint));
-            }
-            None => {
-                ui.label(w::text(t!("Nothing in the queue"), 12.5, t.text_faint));
-            }
-        }
         crate::offline_ui::status_note(app, ui, t);
         if let Some(id) = app.state.playing {
-            ui.add_space(16.0);
             let name = app.state.app_name(id).unwrap_or("").to_string();
             ui.label(w::text(format!("{}  {}", icons::CONTROLLER, t!("Playing {game}", game = name)), 12.5, t.in_game));
-            ui.label(w::text(t!("· Shift+Tab opens the overlay"), 12.5, t.text_faint));
+            if cfg!(windows) {
+                ui.label(w::text(t!("· Shift+Tab opens the overlay"), 12.5, t.text_faint));
+            }
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let online = app.state.friend_list().iter().filter(|p| p.state != PersonaState::Offline).count();
-            let label = format!("{}  {}  ·  {}", icons::CHATS, t!("Friends & Chat"), t!("{n} online", n = online));
+            let label = format!("{}  {}", icons::CHATS, t!("Friends & Chat"));
             let r = ui.add(egui::Label::new(w::text_medium(label, 12.5, t.text_dim)).sense(Sense::click()));
             if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 app.friends_window.open = !app.friends_window.open;
             }
         });
     });
+    downloads_control(app, ui, t, bar);
+}
+
+/// Center of the bottom bar, like Steam's "Manage downloads": the game
+/// downloading and a thin progress line, nothing else. Numbers (percent,
+/// queue) are in the tooltip and on the Downloads page.
+fn downloads_control(app: &mut SteamApp, ui: &mut Ui, t: &Theme, bar: Rect) {
+    let active = app.state.downloads.values().find(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)).cloned();
+    let waiting = app.state.download_queue.iter().filter(|id| active.as_ref().is_none_or(|d| d.app_id != **id)).count();
+    let progress = active.as_ref().map(|d| (d.disk_done as f64 / d.disk_total.max(1) as f64).clamp(0.0, 1.0) as f32);
+    let label = match &active {
+        Some(d) => app.state.app_name(d.app_id).unwrap_or("").to_string(),
+        None => t!("Downloads").to_string(),
+    };
+    let paused = active.as_ref().is_some_and(|d| d.paused);
+    let galley = ui.painter().layout_no_wrap(label, w::font_medium(12.5), egui::Color32::PLACEHOLDER);
+    let width = (galley.size().x + 52.0).clamp(160.0, 340.0);
+    let rect = Rect::from_center_size(bar.center(), vec2(width, 26.0));
+    let resp = ui.interact(rect, ui.scope_id().with("downloads-control"), Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
+    let p = ui.painter();
+    if hover > 0.0 {
+        p.rect_filled(rect, t.corner_small(), t.raised.gamma_multiply(hover));
+    }
+    let busy = active.is_some();
+    let icon_c = if busy && !paused { t.accent } else { t.text_dim };
+    let text_c = if busy { w::mix(t.text_dim, t.text, 0.6 + 0.4 * hover) } else { w::mix(t.text_dim, t.text, hover) };
+    // Icon and name centered together; long names are cut to fit.
+    let text_w = galley.size().x.min(width - 44.0);
+    let left = rect.center().x - (text_w + 22.0) / 2.0;
+    let y = rect.center().y - if busy { 1.5 } else { 0.0 };
+    p.text(egui::pos2(left + 7.0, y), Align2::CENTER_CENTER, if paused { "\u{E39E}" } else { icons::DOWNLOAD }, w::font(13.0), icon_c);
+    let clip = Rect::from_min_max(egui::pos2(left + 22.0, rect.top()), egui::pos2(left + 22.0 + text_w, rect.bottom()));
+    ui.painter_at(clip).galley(egui::pos2(left + 22.0, y - galley.size().y / 2.0), galley, text_c);
+    if let Some(f) = progress {
+        let track = Rect::from_min_size(egui::pos2(rect.left() + 10.0, rect.bottom() - 4.0), vec2(rect.width() - 20.0, 2.0));
+        p.rect_filled(track, egui::CornerRadius::same(1), t.raised);
+        let fill = Rect::from_min_size(track.min, vec2(track.width() * f, track.height()));
+        p.rect_filled(fill, egui::CornerRadius::same(1), if paused { t.text_faint } else { t.accent });
+    }
+    let tip = match (&active, progress) {
+        (Some(_), Some(f)) => {
+            let pct = format!("{:.0}", f * 100.0);
+            let state = if paused { t!("Paused at {pct}%", pct = pct) } else { t!("{pct}% downloaded", pct = pct) };
+            if waiting > 0 { format!("{state} · {}", t!("+{n} queued", n = waiting)) } else { state }
+        }
+        _ if waiting > 0 => t!("{n} queued", n = waiting),
+        _ => t!("Nothing in the queue").to_string(),
+    };
+    if resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        app.navigate("downloads".into(), None);
+    }
 }
 
 pub fn status_color(t: &Theme, p: &Persona) -> egui::Color32 {
@@ -1128,7 +1157,7 @@ pub fn friend_dialogs(app: &mut SteamApp, ctx: &egui::Context) {
                                 (t!("Anti-cheat"), if s.vac { "VAC".to_string() } else { "—".to_string() }),
                                 (t!("Password"), if s.password { t!("Yes").to_string() } else { t!("No").to_string() }),
                             ] {
-                                ui.label(w::text_bold(k.to_uppercase(), 10.5, t.text_faint));
+                                ui.label(w::caption_text(&t, k));
                                 ui.add(egui::Label::new(w::text(v, 13.0, t.text)).truncate());
                                 ui.end_row();
                             }

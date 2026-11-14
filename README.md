@@ -18,6 +18,28 @@
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2FB36B?style=flat-square">
 </p>
 
+# SteamOnRust-Linux
+
+A Linux fork of [SteamInRust](https://github.com/madonchik123/SteamInRust).
+What it changes:
+
+- **Builds and runs on Linux** (Wayland and X11): `cargo build --release -p steam-rs`,
+  then run `target/release/steam-rs`.
+- **Games start through the official Steam client** (native games in its runtime,
+  Windows games through Proton), since SteamInRust's own steamclient is a Windows DLL.
+  Steam must be installed and signed in once.
+- **NEVKO theme** (the default), after the [NEVKO-UI](https://github.com/dotFelixan/NEVKO-UI)
+  Steam skin: flat slate controls, Steam blue only for what's active, sentence-case labels.
+- The interface is labelled "Steam" and shows Steam's logo, read at runtime from your own
+  Steam install (nothing of Valve's is bundled).
+- A quieter download bar, library icons that load, and collections hidden unless turned on
+  in Settings → Library.
+
+Not on Linux: trailer playback (Windows Media Foundation), the in-game overlay (D3D11),
+the tray icon and `steam://` link registration.
+
+---
+
 # SteamInRust
 
 **The Steam desktop client, rewritten in Rust.** Store, library, downloads,

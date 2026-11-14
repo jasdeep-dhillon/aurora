@@ -15,6 +15,7 @@ mod offline_ui;
 mod overlay;
 mod shell;
 mod tray;
+mod steam_art;
 mod updater;
 
 fn main() -> eframe::Result {
@@ -37,14 +38,15 @@ fn main() -> eframe::Result {
         )
         .init();
 
+    steam_art::install_logo();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("SteamInRust")
+            .with_title(i18n::BRAND)
             // Starts at sign-in size; the app resizes itself after sign-in.
             .with_inner_size([720.0, 470.0])
             // Our own title bar (see chrome.rs) instead of the Windows one.
             .with_decorations(false)
-            .with_icon(std::sync::Arc::new(egui::IconData { rgba: ui::brand::icon_rgba(256), width: 256, height: 256 })),
+            .with_icon(std::sync::Arc::new(steam_art::window_icon(256))),
         ..Default::default()
     };
     eframe::run_native("SteamInRust", options, Box::new(move |cc| Ok(Box::new(app::SteamApp::new(cc, link)))))

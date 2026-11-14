@@ -139,7 +139,7 @@ fn all(hv: &mut HubView, ui: &mut Ui, t: &Theme, io: &mut Io, app: AppId) {
         }
     }
     ui.horizontal(|ui| {
-        ui.label(w::text_bold(t!("MOST POPULAR THIS WEEK"), 12.0, t.text_faint));
+        ui.label(w::caption_text(&t, t!("MOST POPULAR THIS WEEK")));
     });
     ui.add_space(4.0);
     if mixed.is_empty() {
@@ -393,7 +393,7 @@ pub(super) fn guides(hv: &mut HubView, ui: &mut Ui, t: &Theme, io: &mut Io, app:
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-        ui.label(w::text_bold(t!("CATEGORY"), 11.0, t.text_faint));
+        ui.label(w::caption_text(&t, t!("CATEGORY")));
         for tag in GUIDE_CATEGORIES {
             let on = l.tags.contains(tag);
             if w::chip(ui, t, &category_label(tag), on).clicked() {
@@ -565,7 +565,7 @@ pub(super) fn item(hv: &mut HubView, ui: &mut Ui, t: &Theme, io: &mut Io, id: u6
             media(hv, ui, t, io, &it);
             if !it.description.trim().is_empty() {
                 ui.add_space(14.0);
-                ui.label(w::text_bold(t!("DESCRIPTION"), 12.0, t.text_faint));
+                ui.label(w::caption_text(&t, t!("DESCRIPTION")));
                 ui.add_space(4.0);
                 let doc = rich::parse(&it.description);
                 if let Some(link) = rich::show(ui, t, &doc, 14.0) {
@@ -657,7 +657,7 @@ fn media(hv: &mut HubView, ui: &mut Ui, t: &Theme, io: &mut Io, it: &hub::Item) 
 
 fn change_notes(hv: &mut HubView, ui: &mut Ui, t: &Theme, it: &hub::Item) {
     ui.horizontal(|ui| {
-        ui.label(w::text_bold(t!("CHANGE NOTES"), 12.0, t.text_faint));
+        ui.label(w::caption_text(&t, t!("CHANGE NOTES")));
         ui.label(w::text(t!("{n} in total", n = it.change_total.max(it.change_notes.len() as u32)), 11.5, t.text_faint));
     });
     ui.add_space(4.0);
@@ -749,7 +749,7 @@ fn item_side(hv: &mut HubView, ui: &mut Ui, t: &Theme, io: &mut Io, it: &hub::It
     });
     if !e.tags.is_empty() {
         ui.add_space(12.0);
-        ui.label(w::text_bold(t!("TAGS"), 11.0, t.text_faint));
+        ui.label(w::caption_text(&t, t!("TAGS")));
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(5.0, 5.0);
             for tag in &e.tags {
@@ -759,7 +759,7 @@ fn item_side(hv: &mut HubView, ui: &mut Ui, t: &Theme, io: &mut Io, it: &hub::It
     }
     if !it.required.is_empty() {
         ui.add_space(12.0);
-        ui.label(w::text_bold(t!("REQUIRED ITEMS"), 11.0, t.text_faint));
+        ui.label(w::caption_text(&t, t!("REQUIRED ITEMS")));
         ui.label(w::text(t!("This item needs all of these to work."), 12.0, t.text_dim));
         ui.add_space(4.0);
         for r in &it.required {
@@ -820,7 +820,7 @@ fn comments(hv: &mut HubView, ui: &mut Ui, t: &Theme, io: &mut Io, id: u64, crea
     let start = hv.pages.get(&key).copied().unwrap_or(0);
     let have = io.state.hub.comments.contains_key(&id);
     hv.ask(io, format!("{key}@{start}"), have && start == 0, || Request::FileComments { file_id: id, creator, start });
-    ui.label(w::text_bold(t!("COMMENTS"), 12.0, t.text_faint));
+    ui.label(w::caption_text(&t, t!("COMMENTS")));
     ui.add_space(4.0);
     let data = match io.state.hub.comments.get(&id) {
         None => {
@@ -958,7 +958,7 @@ fn guide_body(hv: &mut HubView, ui: &mut Ui, t: &Theme, io: &mut Io, it: &hub::I
                 if !g.sections.is_empty() {
                     w::card(t).show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.label(w::text_bold(t!("GUIDE INDEX"), 11.5, t.text_faint));
+                        ui.label(w::caption_text(&t, t!("GUIDE INDEX")));
                         ui.add_space(4.0);
                         for (i, s) in g.sections.iter().enumerate() {
                             let r = ui.add(egui::Label::new(w::text(&s.title, 13.0, t.text_dim)).truncate().sense(Sense::click()));
@@ -988,7 +988,7 @@ fn guide_body(hv: &mut HubView, ui: &mut Ui, t: &Theme, io: &mut Io, it: &hub::I
             });
             if !it.entry.tags.is_empty() {
                 ui.add_space(12.0);
-                ui.label(w::text_bold(t!("CATEGORY"), 11.0, t.text_faint));
+                ui.label(w::caption_text(&t, t!("CATEGORY")));
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(5.0, 5.0);
                     for tag in &it.entry.tags {

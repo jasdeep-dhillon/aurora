@@ -114,7 +114,7 @@ impl Extension for Settings {
             .resizable(false)
             .frame(egui::Frame::new().fill(t.chrome).inner_margin(Margin { left: 14, right: 10, top: 22, bottom: 10 }))
             .show(ui, |ui| {
-                ui.label(w::text_bold(t!("SETTINGS"), 18.0, t.accent));
+                ui.label(w::text_bold(t!("Settings"), 18.0, t.text));
                 ui.add_space(12.0);
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for entry in SECTIONS {
@@ -126,12 +126,13 @@ impl Extension for Settings {
                             continue;
                         };
                         let on = self.section == s;
-                        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
+                        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
                         if on || resp.hovered() {
-                            ui.painter().rect_filled(r, t.corner_small(), if on { t.surface_hover } else { t.surface });
+                            ui.painter().rect_filled(r, t.corner_small(), if on { w::active_fill(&t) } else { t.raised });
                         }
-                        ui.painter().text(egui::pos2(r.left() + 18.0, r.center().y), egui::Align2::CENTER_CENTER, icon, w::font(17.0), if on { t.text } else { t.text_dim });
-                        ui.painter().text(egui::pos2(r.left() + 40.0, r.center().y), egui::Align2::LEFT_CENTER, i18n::tr_dyn(label), w::font_medium(14.0), if on { t.text } else { t.text_dim });
+                        let c = if on { t.accent } else if resp.hovered() { t.text } else { t.text_dim };
+                        ui.painter().text(egui::pos2(r.left() + 18.0, r.center().y), egui::Align2::CENTER_CENTER, icon, w::font(16.0), c);
+                        ui.painter().text(egui::pos2(r.left() + 40.0, r.center().y), egui::Align2::LEFT_CENTER, i18n::tr_dyn(label), w::font_medium(13.5), c);
                         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                             self.section = s;
                             self.acct.open(Default::default());
@@ -330,7 +331,7 @@ fn security(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, pages: &mut super::settings_a
     }
 }
 
-fn switch(ui: &mut Ui, t: &Theme, title: &str, body: &str, value: &mut bool) {
+pub(crate) fn switch(ui: &mut Ui, t: &Theme, title: &str, body: &str, value: &mut bool) {
     egui::Frame::new().fill(t.surface).corner_radius(t.corner_small()).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -358,9 +359,7 @@ fn notifications(ui: &mut Ui, t: &Theme, flags: &SharedFlags) {
 
 fn library(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
     w::page_title(ui, t, t!("Library"), None);
-    if info_row(ui, t, t!("Collections"), t!("Steam's Favorites and Hidden are imported automatically"), Some(t!("Open library"))) {
-        ctx.navigate("library", None);
-    }
+    ctx.settings_for("library", ui);
     if info_row(ui, t, t!("Add a non-Steam game"), "", Some(t!("Open library"))) {
         ctx.navigate("library", None);
     }

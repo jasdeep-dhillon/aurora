@@ -1681,3 +1681,8 @@
 "DLC choice saved. Apply now to download or remove it, or it applies on the next update." = "Выбор DLC сохранён. Нажмите «Применить», чтобы загрузить или удалить их сейчас, иначе он применится при следующем обновлении."
 "Restarts the running download with your DLC choice" = "Перезапускает текущую загрузку с вашим выбором DLC"
 "Downloads ticked DLC and removes unticked DLC" = "Загружает отмеченные DLC и удаляет неотмеченные"
+"Paused at {pct}%" = "Пауза на {pct}%"
+"{pct}% downloaded" = "Загружено {pct}%"
+"Runs through Steam" = "Запускается через Steam"
+"Show collections" = "Показывать коллекции"
+"Collection filters and the new collection button in the library sidebar, and the Add to collection menu on games." = "Фильтры коллекций и кнопка новой коллекции на боковой панели библиотеки, а также меню «Добавить в коллекцию» у игр."

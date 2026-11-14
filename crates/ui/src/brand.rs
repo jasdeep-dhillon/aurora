@@ -72,3 +72,16 @@ fn shade(x: f32, y: f32) -> [f32; 4] {
     }
     [c[0], c[1], c[2], 1.0]
 }
+
+static LOGO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Show this image (an egui image URI, e.g. `file:///…png`) wherever the
+/// logo appears, instead of the drawn mark. Set once at startup; the image
+/// should be a light monochrome mark (it is tinted with the text color).
+pub fn set_logo(uri: String) {
+    let _ = LOGO.set(uri);
+}
+
+pub fn logo_uri() -> Option<&'static str> {
+    LOGO.get().map(String::as_str)
+}

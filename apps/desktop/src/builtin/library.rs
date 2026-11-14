@@ -118,6 +118,9 @@ struct Saved {
     hidden: BTreeSet<AppId>,
     custom: Vec<CustomGame>,
     collections: Vec<Collection>,
+    /// Collection chips, the "+ Collection" button and "Add to collection"
+    /// (off by default; Settings → Library turns them back on).
+    show_collections: bool,
     /// Kept across restarts so a shortcut still appears if the app was
     /// closed during the download.
     pending_shortcuts: BTreeMap<AppId, std::path::PathBuf>,
@@ -220,6 +223,7 @@ pub struct Library {
     install_dialog: Option<InstallDialog>,
     /// Games to put on the desktop once their install finishes.
     collections: Vec<Collection>,
+    show_collections: bool,
     adv: AdvFilters,
     /// Naming a new collection (with a game to put in it), or renaming one.
     naming: Option<(Option<usize>, String, Option<AppId>)>,
@@ -340,6 +344,12 @@ impl Extension for Library {
         }
     }
 
+    fn settings(&mut self, ui: &mut Ui, ctx: &mut Ctx) -> bool {
+        let t = ctx.theme.clone();
+        super::settings::switch(ui, &t, t!("Show collections"), t!("Collection filters and the new collection button in the library sidebar, and the Add to collection menu on games."), &mut self.show_collections);
+        true
+    }
+
     fn save(&self) -> Option<String> {
         serde_json::to_string(&Saved {
             tile: self.tile,
@@ -348,6 +358,7 @@ impl Extension for Library {
             hidden: self.hidden.clone(),
             custom: self.custom.clone(),
             collections: self.collections.clone(),
+            show_collections: self.show_collections,
             pending_shortcuts: self.shortcut_after_install.clone(),
         })
         .ok()
@@ -361,6 +372,7 @@ impl Extension for Library {
         self.hidden = saved.hidden;
         self.custom = saved.custom;
         self.collections = saved.collections;
+        self.show_collections = saved.show_collections;
         self.shortcut_after_install = saved.pending_shortcuts;
     }
 }
@@ -497,9 +509,9 @@ impl Library {
                     let file = c.name.rsplit(['/', '%']).next().unwrap_or(&c.name);
                     ui.label(w::text_semibold(file, 13.5, t.text)).on_hover_text(&c.name);
                     ui.columns(2, |cols| {
-                        cols[0].label(w::text_bold(t!("ON THIS PC"), 10.5, t.text_faint));
+                        cols[0].label(w::caption_text(&t, t!("ON THIS PC")));
                         cols[0].label(w::text(format!("{} · {}", ui::date(c.local_time), ui::bytes(c.local_size)), 12.5, t.text));
-                        cols[1].label(w::text_bold(t!("IN STEAM CLOUD"), 10.5, t.text_faint));
+                        cols[1].label(w::caption_text(&t, t!("IN STEAM CLOUD")));
                         cols[1].label(w::text(format!("{} · {}", ui::date(c.cloud_time), ui::bytes(c.cloud_size)), 12.5, t.text));
                     });
                 });
@@ -644,6 +656,7 @@ impl Library {
                     sub(ui, icons::TRASH, t!("Uninstall…"), MenuAct::Uninstall);
                 });
             }
+            if self.show_collections {
             ui.menu_button(format!("{}   {}", icons::STACK, t!("Add to collection")), |ui| {
                 ui.set_min_width(200.0);
                 for (i, c) in self.collections.iter().enumerate() {
@@ -658,6 +671,7 @@ impl Library {
                 }
                 item(ui, icons::PLUS, t!("New collection…"), MenuAct::NewCollection);
             });
+            }
             ui.separator();
             item(ui, icons::STORE, t!("Store page"), MenuAct::Store);
             item(ui, icons::INFO, t!("Get help with this game"), MenuAct::Help);
@@ -831,7 +845,7 @@ impl Library {
         kinds.dedup();
         let group = |ui: &mut Ui, title: &str| {
             ui.add_space(6.0);
-            ui.label(w::text_bold(title.to_uppercase(), 11.0, t.text_faint));
+            ui.label(w::caption_text(t, title));
         };
         let f = &mut self.adv;
         ui.horizontal(|ui| {
@@ -925,7 +939,11 @@ impl Library {
                 .width(720.0)
                 .show(|ui| self.adv_panel(ui, t, ctx));
         });
-        // Collections.
+        // Collections (only when turned on in Settings → Library).
+        if !self.show_collections && matches!(self.filter, Filter::Collection(_)) {
+            self.filter = Filter::All;
+        }
+        if self.show_collections {
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
@@ -954,6 +972,7 @@ impl Library {
                 self.filter = Filter::All;
             }
         });
+        }
         ui.add_space(8.0);
         let items = self.filtered(ctx);
         let favs: Vec<&Entry> = items.iter().filter(|e| self.favorites.contains(&e.app_id)).collect();
@@ -1348,7 +1367,7 @@ impl Library {
                             if let Some(o) = &owned {
                                 let (mode, why) = match client::launch_mode_cached(o, &g.install_dir) {
                                     client::LaunchMode::SteamInRust => (t!("SteamInRust"), t!("Achievements, cloud saves and friends work through SteamInRust.").to_string()),
-                                    client::LaunchMode::OfficialSteam { anti_cheat } => (t!("Runs through Steam (anti-cheat)"), t!("Uses {name}: starts through the official Steam client, which opens in the background.", name = anti_cheat)),
+                                    client::LaunchMode::OfficialSteam { anti_cheat } => (if cfg!(windows) { t!("Runs through Steam (anti-cheat)") } else { t!("Runs through Steam") }, t!("Uses {name}: starts through the official Steam client, which opens in the background.", name = anti_cheat)),
                                     client::LaunchMode::NoSteam { reason } => (t!("Starts without Steam"), i18n::tr_dyn(&reason)),
                                 };
                                 ui.add_space(20.0);
@@ -1561,7 +1580,7 @@ impl Library {
         // Notes.
         w::card(t).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(w::text_bold(t!("NOTES"), 12.0, t.text_faint));
+            ui.label(w::caption_text(&t, t!("NOTES")));
             ui.add_space(4.0);
             let s = self.games.entry(id).or_default();
             ui.add(egui::TextEdit::multiline(&mut s.notes).hint_text(t!("Write a note for yourself…")).desired_rows(3).desired_width(f32::INFINITY));
@@ -1572,7 +1591,7 @@ impl Library {
         let friends: Vec<_> = ctx.state.friend_list().into_iter().filter(|p| p.game_app_id == Some(id)).collect();
         w::card(t).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(w::text_bold(t!("FRIENDS PLAYING NOW"), 12.0, t.text_faint));
+            ui.label(w::caption_text(&t, t!("FRIENDS PLAYING NOW")));
             ui.add_space(4.0);
             if friends.is_empty() {
                 ui.label(w::text(t!("None of your friends are playing this right now."), 13.0, t.text_faint));
@@ -1591,7 +1610,7 @@ impl Library {
             if !items.is_empty() {
                 w::card(t).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(w::text_bold(t!("STEAM WORKSHOP"), 12.0, t.text_faint));
+                    ui.label(w::caption_text(&t, t!("STEAM WORKSHOP")));
                     ui.add_space(4.0);
                     let total: u64 = items.iter().map(|i| i.size).sum();
                     ui.label(w::text(t!("{n} items · {size}", n = items.len(), size = ui::bytes(total)), 13.5, t.text));
@@ -1611,14 +1630,14 @@ impl Library {
         // Details.
         w::card(t).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(w::text_bold(t!("DETAILS"), 12.0, t.text_faint));
+            ui.label(w::caption_text(&t, t!("DETAILS")));
             ui.add_space(4.0);
             egui::Grid::new("game-details").num_columns(2).spacing(vec2(14.0, 6.0)).show(ui, |ui| {
-                ui.label(w::text_bold(t!("APP ID"), 10.5, t.text_faint));
+                ui.label(w::caption_text(&t, t!("APP ID")));
                 ui.label(w::text(id.to_string(), 13.0, t.text));
                 ui.end_row();
                 if let Some(n) = self.current_players(id) {
-                    ui.label(w::text_bold(t!("PLAYING NOW"), 10.5, t.text_faint));
+                    ui.label(w::caption_text(&t, t!("PLAYING NOW")));
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
@@ -1631,16 +1650,16 @@ impl Library {
                 }
                 if let Some(g) = installed {
                     let (build, branch) = local::manage::installed_build(g);
-                    ui.label(w::text_bold(t!("BUILD"), 10.5, t.text_faint));
+                    ui.label(w::caption_text(&t, t!("BUILD")));
                     ui.label(w::text(format!("{build}{}", if branch != "public" { format!(" ({branch})") } else { String::new() }), 13.0, t.text));
                     ui.end_row();
-                    ui.label(w::text_bold(t!("LAST UPDATED"), 10.5, t.text_faint));
+                    ui.label(w::caption_text(&t, t!("LAST UPDATED")));
                     ui.label(w::text(g.last_updated.map(news::date).unwrap_or_else(|| "—".into()), 13.0, t.text));
                     ui.end_row();
                 }
                 if let Some(o) = owned {
                     if !o.branches.is_empty() {
-                        ui.label(w::text_bold(t!("VERSIONS"), 10.5, t.text_faint));
+                        ui.label(w::caption_text(&t, t!("VERSIONS")));
                         ui.label(w::text(o.branches.len().to_string(), 13.0, t.text));
                         ui.end_row();
                     }

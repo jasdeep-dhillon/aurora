@@ -77,7 +77,7 @@ impl Library {
 
     /// The updates feed on a game's page.
     pub(super) fn updates_feed(&mut self, ui: &mut Ui, t: &Theme, id: AppId) {
-        ui.label(w::text_bold(t!("UPDATES AND NEWS"), 12.0, t.text_faint));
+        ui.label(w::caption_text(&t, t!("UPDATES AND NEWS")));
         ui.add_space(6.0);
         let Some(events) = self.events(id) else {
             for _ in 0..3 {
@@ -92,7 +92,7 @@ impl Library {
             return;
         }
         for (i, e) in events.iter().enumerate() {
-            ui.label(w::text_semibold(date(e.time).to_uppercase(), 12.0, t.text_dim));
+            ui.label(w::caption_text(&t, &date(e.time)));
             ui.add_space(4.0);
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 160.0), Sense::click());
             let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
@@ -152,7 +152,7 @@ impl Library {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.label(w::text_bold(i18n::tr_dyn(e.kind.label()).to_uppercase(), 11.5, kind_color(t, e.kind)));
-                        ui.label(w::text_semibold(t!("PUBLISHED"), 11.5, t.text_dim));
+                        ui.label(w::caption_text(&t, t!("PUBLISHED")));
                         ui.label(w::text(date(e.time), 12.0, t.text_faint));
                     });
                     ui.add(egui::Label::new(w::text_bold(&e.title, 24.0, t.accent)).wrap());

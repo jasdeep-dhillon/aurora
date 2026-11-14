@@ -91,14 +91,14 @@ impl Store {
         let f = &mut self.filters;
         w::card(t).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(w::text_bold(t!("SORT BY"), 11.0, t.text_faint));
+            ui.label(w::caption_text(&t, t!("SORT BY")));
             egui::ComboBox::from_id_salt("browse-sort").selected_text(i18n::tr_dyn(f.sort.label())).width(200.0).show_ui(ui, |ui| {
                 for s in Sort::ALL {
                     ui.selectable_value(&mut f.sort, s, i18n::tr_dyn(s.label()));
                 }
             });
             ui.add_space(10.0);
-            ui.label(w::text_bold(t!("PRICE"), 11.0, t.text_faint));
+            ui.label(w::caption_text(&t, t!("PRICE")));
             let options: [(Option<u32>, bool, &str); 6] = [
                 (None, false, "Any price"),
                 (None, true, "Free"),
@@ -116,14 +116,14 @@ impl Store {
             }
             w::check(ui, t, &mut f.only_discounted, t!("Special offers only"));
             ui.add_space(10.0);
-            ui.label(w::text_bold(t!("REVIEWS"), 11.0, t.text_faint));
+            ui.label(w::caption_text(&t, t!("REVIEWS")));
             for (min, label) in [(None, "Any reviews"), (Some(7), "Mostly positive and up"), (Some(8), "Very positive and up")] {
                 if w::radio(ui, t, f.min_review_score == min, i18n::tr_dyn(label)).clicked() {
                     f.min_review_score = min;
                 }
             }
             ui.add_space(10.0);
-            ui.label(w::text_bold(t!("TYPE"), 11.0, t.text_faint));
+            ui.label(w::caption_text(&t, t!("TYPE")));
             w::check(ui, t, &mut f.games, t!("Games"));
             w::check(ui, t, &mut f.dlc, t!("DLC"));
             w::check(ui, t, &mut f.software, t!("Software"));
@@ -141,7 +141,7 @@ impl Store {
         ui.add_space(10.0);
         w::card(t).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(w::text_bold(t!("TAGS"), 11.0, t.text_faint));
+            ui.label(w::caption_text(&t, t!("TAGS")));
             // Tags picked elsewhere (a game page, the search below) first,
             // so every active tag is visible and can be turned off.
             let extra: Vec<u32> = self.filters.tags.iter().copied().filter(|t| !TAGS.contains(t)).collect();

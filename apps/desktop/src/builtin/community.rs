@@ -353,7 +353,7 @@ impl Community {
                 // Left menu.
                 ui.allocate_ui_with_layout(vec2(220.0, ui.available_height()), Layout::top_down(Align::Min), |ui| {
                     ui.set_width(220.0);
-                    ui.label(w::text_bold(t!("FRIENDS"), 11.5, t.text_faint));
+                    ui.label(w::caption_text(&t, t!("FRIENDS")));
                     ui.add_space(4.0);
                     let items = [
                         (FriendsTab::Friends, icons::USER, t!("Your friends"), friends_n),
@@ -402,7 +402,7 @@ impl Community {
 
     fn friends_grid(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, total: usize) {
         ui.horizontal(|ui| {
-            ui.label(w::text_bold(t!("YOUR FRIENDS"), 13.0, t.text));
+            ui.label(w::text_bold(w::sentence_case(t!("YOUR FRIENDS")), 15.0, t.text));
             ui.label(w::text_bold(total.to_string(), 13.0, t.accent));
         });
         ui.add_space(8.0);
@@ -524,7 +524,7 @@ impl Community {
         let code = (ctx.state.steam_id & 0xFFFF_FFFF).to_string();
         w::panel(t).show(ui, |ui| {
             ui.set_width(ui.available_width().min(620.0));
-            ui.label(w::text_bold(t!("YOUR FRIEND CODE"), 11.5, t.text_faint));
+            ui.label(w::caption_text(&t, t!("YOUR FRIEND CODE")));
             ui.horizontal(|ui| {
                 ui.label(w::text_bold(&code, 24.0, t.text));
                 if w::button(ui, t, Some(icons::COPY), t!("Copy"), w::Kind::Secondary, w::Size::Sm).clicked() {
@@ -537,7 +537,7 @@ impl Community {
         ui.add_space(12.0);
         w::panel(t).show(ui, |ui| {
             ui.set_width(ui.available_width().min(620.0));
-            ui.label(w::text_bold(t!("ADD BY FRIEND CODE OR PROFILE LINK"), 11.5, t.text_faint));
+            ui.label(w::caption_text(&t, t!("ADD BY FRIEND CODE OR PROFILE LINK")));
             ui.add_space(4.0);
             let target = parse_friend(&self.add);
             ui.horizontal(|ui| {

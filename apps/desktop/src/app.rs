@@ -437,6 +437,18 @@ impl SteamApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
+    /// Hide the main window in the tray. Linux has no usable tray icon to
+    /// bring it back (tray-icon there needs a GTK loop and sends no clicks),
+    /// so it only minimizes and keeps drawing.
+    fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        if cfg!(windows) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.hidden = true;
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+    }
+
     fn handle_links(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         use crate::links::Link;
         while let Ok(l) = self.links.try_recv() {
@@ -538,8 +550,7 @@ impl SteamApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if tray {
             self.confirm_exit = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            self.hidden = true;
+            self.hide_to_tray(&ctx);
         } else if cancel {
             self.confirm_exit = false;
         }
@@ -586,11 +597,11 @@ impl eframe::App for SteamApp {
         self.handle_links(&ctx, &mut actions);
 
         // Closing the window hides it in the tray (like Steam) unless "Exit" was chosen.
+        // Linux has no tray icon, so closing quits there.
         let signed_in_now = self.state.phase == Phase::LoggedIn;
-        if ctx.input(|i| i.viewport().close_requested()) && self.prefs.close_to_tray && signed_in_now && !self.exiting {
+        if cfg!(windows) && ctx.input(|i| i.viewport().close_requested()) && self.prefs.close_to_tray && signed_in_now && !self.exiting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            self.hidden = true;
+            self.hide_to_tray(&ctx);
         } else if ctx.input(|i| i.viewport().close_requested()) && !self.exiting && self.downloading() {
             // Closing for real while something downloads: ask first.
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);

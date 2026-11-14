@@ -83,14 +83,29 @@ fn load(src: &str) -> HashMap<String, &'static str> {
         .collect()
 }
 
+/// The name the interface shows for the app.
+pub const BRAND: &str = "Steam";
+
+/// "SteamInRust" in interface text becomes [`BRAND`]. Each changed string is
+/// built once and kept (there are only so many labels).
+fn rebrand(s: &'static str) -> &'static str {
+    if !s.contains("SteamInRust") {
+        return s;
+    }
+    static CACHE: OnceLock<std::sync::Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+    cache.entry(s).or_insert_with(|| Box::leak(s.replace("SteamInRust", BRAND).into_boxed_str()))
+}
+
 /// Translate a fixed English string.
 pub fn tr(english: &'static str) -> &'static str {
-    table(language()).and_then(|t| t.get(english).copied()).unwrap_or(english)
+    rebrand(table(language()).and_then(|t| t.get(english).copied()).unwrap_or(english))
 }
 
 /// Translate a string only known at runtime (e.g. an error from the engine).
 pub fn tr_dyn(english: &str) -> String {
-    table(language()).and_then(|t| t.get(english).map(|s| s.to_string())).unwrap_or_else(|| english.to_string())
+    let s = table(language()).and_then(|t| t.get(english).map(|s| s.to_string())).unwrap_or_else(|| english.to_string());
+    s.replace("SteamInRust", BRAND)
 }
 
 /// Translate and fill `{name}` placeholders.

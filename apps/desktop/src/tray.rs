@@ -63,12 +63,18 @@ pub struct Tray {
 impl Tray {
     pub fn new(ctx: &egui::Context) -> Self {
         let (tx, rx) = mpsc::channel();
-        let icon = TrayIconBuilder::new()
-            .with_tooltip("SteamInRust")
-            .with_icon(tray_icon::Icon::from_rgba(ui::brand::icon_rgba(32), 32, 32).expect("valid icon"))
-            .build()
-            .map_err(|e| tracing::warn!("tray icon unavailable: {e}"))
-            .ok();
+        // On Linux tray-icon panics without a running GTK loop and never
+        // reports clicks, so there is no tray icon there.
+        let icon = cfg!(windows)
+            .then(|| {
+                TrayIconBuilder::new()
+                    .with_tooltip("SteamInRust")
+                    .with_icon(tray_icon::Icon::from_rgba(ui::brand::icon_rgba(32), 32, 32).expect("valid icon"))
+                    .build()
+                    .map_err(|e| tracing::warn!("tray icon unavailable: {e}"))
+                    .ok()
+            })
+            .flatten();
         let (events_tx, repaint) = (tx.clone(), ctx.clone());
         TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
             let cmd = match e {
@@ -115,6 +121,11 @@ impl Tray {
 
 /// Keep the menu window alive (hidden when closed) and feed it fresh data.
 pub fn show(app: &mut SteamApp, ctx: &egui::Context) {
+    // No tray on Linux, and a "hidden" viewport shows there as an empty
+    // black window that can't be closed.
+    if !cfg!(windows) {
+        return;
+    }
     let open = {
         let mut m = app.tray.menu.lock().unwrap();
         m.data = snapshot(app);

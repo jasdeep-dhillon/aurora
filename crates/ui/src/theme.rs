@@ -37,7 +37,7 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::midnight()
+        Self::nevko()
     }
 }
 
@@ -47,7 +47,36 @@ const fn hex(rgb: u32) -> Color32 {
 
 impl Theme {
     pub fn presets() -> Vec<Theme> {
-        vec![Self::midnight(), Self::aurora(), Self::classic(), Self::oled(), Self::daylight()]
+        vec![Self::nevko(), Self::midnight(), Self::aurora(), Self::classic(), Self::oled(), Self::daylight()]
+    }
+
+    /// After the NEVKO-UI Steam skin (github.com/dotFelixan/NEVKO-UI): one
+    /// deep slate for the chrome, flat grey-blue controls with no borders,
+    /// and Steam blue used only for what is active.
+    pub fn nevko() -> Self {
+        Self {
+            name: "NEVKO".into(),
+            dark: true,
+            bg: hex(0x1A2129),
+            chrome: hex(0x161D25),
+            surface: hex(0x20272F),
+            surface_hover: hex(0x2E3540),
+            raised: hex(0x272D36),
+            border: hex(0x232A33),
+            text: hex(0xDFE3E6),
+            text_dim: hex(0x9198A1),
+            text_faint: hex(0x6B727C),
+            accent: hex(0x1A9FFF),
+            accent_2: hex(0x1A9FFF),
+            on_accent: hex(0xFFFFFF),
+            play: hex(0x4CAF50),
+            online: hex(0x57B8F7),
+            in_game: hex(0x4CD18A),
+            away: hex(0x7FA6C4),
+            danger: hex(0xE64A35),
+            discount: hex(0x4C6B22),
+            radius: 9,
+        }
     }
 
     /// Default: inky blue-black, electric blue to violet accent.
@@ -200,7 +229,7 @@ impl Theme {
         w.inactive.fg_stroke = Stroke::new(1.0, self.text);
         w.hovered.bg_fill = self.surface_hover;
         w.hovered.weak_bg_fill = self.surface_hover;
-        w.hovered.bg_stroke = Stroke::new(1.0, self.accent.linear_multiply(0.5));
+        w.hovered.bg_stroke = Stroke::new(1.0, self.border);
         w.hovered.fg_stroke = Stroke::new(1.5, self.text);
         w.hovered.expansion = 0.0;
         w.active.bg_fill = self.accent.linear_multiply(0.5);

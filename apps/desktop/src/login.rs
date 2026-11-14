@@ -71,7 +71,7 @@ pub fn show(app: &mut SteamApp, ui: &mut Ui) {
         strip.add_space(12.0);
         w::logo(&mut strip, &t, 16.0);
         strip.add_space(2.0);
-        strip.label(w::text_semibold("SteamInRust", 12.5, t.text_dim));
+        strip.label(w::text_semibold(i18n::BRAND, 12.5, t.text_dim));
         strip.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             crate::chrome::window_buttons(ui, &t, BAR, false);
@@ -221,7 +221,7 @@ fn saved(app: &mut SteamApp, ui: &mut Ui, t: &Theme) {
 }
 
 fn label(ui: &mut Ui, t: &Theme, text: &str) {
-    ui.label(w::text_bold(text.to_uppercase(), 11.5, t.accent));
+    ui.label(w::caption_text(t, text));
     ui.add_space(-2.0);
 }
 

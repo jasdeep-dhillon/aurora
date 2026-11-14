@@ -918,7 +918,7 @@ impl Store {
                     let info = self.browse_info(id);
                     egui::Grid::new("app-facts").num_columns(2).spacing(vec2(14.0, 6.0)).show(ui, |ui| {
                         if let Some(r) = info.as_ref().and_then(|i| i.reviews.clone()) {
-                            ui.label(w::text_bold(t!("REVIEWS"), 10.5, t.text_faint));
+                            ui.label(w::caption_text(&t, t!("REVIEWS")));
                             ui.horizontal(|ui| {
                                 ui.label(w::text_semibold(i18n::tr_dyn(&r.label), 13.5, review_color(t, r.score)));
                                 ui.label(w::text(t!("({percent}% of {count})", percent = r.percent_positive, count = thousands(r.count)), 12.5, t.text_faint));
@@ -928,13 +928,13 @@ impl Store {
                             fact(ui, t, t!("REVIEWS"), &format!("{} {}", icons::THUMBS_UP, thousands(r)));
                         }
                         if let Some(m) = d.metacritic {
-                            ui.label(w::text_bold(t!("METACRITIC"), 10.5, t.text_faint));
+                            ui.label(w::caption_text(&t, t!("METACRITIC")));
                             let col = if m >= 75 { Color32::from_rgb(0x66, 0xCC, 0x33) } else if m >= 50 { t.away } else { t.danger };
                             w::pill(ui, &m.to_string(), Color32::BLACK, col);
                             ui.end_row();
                         }
                         if let Some(n) = self.current_players(id) {
-                            ui.label(w::text_bold(t!("PLAYING NOW"), 10.5, t.text_faint));
+                            ui.label(w::caption_text(&t, t!("PLAYING NOW")));
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
                                 let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
@@ -950,7 +950,7 @@ impl Store {
                             if names.is_empty() {
                                 continue;
                             }
-                            ui.label(w::text_bold(label.to_uppercase(), 10.5, t.text_faint));
+                            ui.label(w::caption_text(t, label));
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing.x = 0.0;
                                 for (i, name) in names.iter().enumerate() {
@@ -1254,7 +1254,7 @@ fn tag_chip(ui: &mut Ui, t: &Theme, name: &str) -> egui::Response {
 }
 
 fn fact(ui: &mut Ui, t: &Theme, label: &str, value: &str) {
-    ui.label(w::text_bold(label.to_uppercase(), 10.5, t.text_faint));
+    ui.label(w::caption_text(t, label));
     ui.add(egui::Label::new(w::text(value, 13.0, t.text)).truncate());
     ui.end_row();
 }
