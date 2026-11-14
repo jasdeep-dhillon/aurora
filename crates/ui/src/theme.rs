@@ -248,7 +248,7 @@ impl Theme {
             s.spacing.item_spacing = egui::vec2(8.0, 8.0);
             s.spacing.button_padding = egui::vec2(14.0, 7.0);
             s.spacing.interact_size.y = 32.0;
-            s.spacing.menu_margin = egui::Margin::same(8);
+            s.spacing.menu_margin = egui::Margin::same(10);
             s.spacing.scroll.bar_width = 6.0;
             s.spacing.scroll.floating = true;
             s.spacing.scroll.bar_inner_margin = 2.0;
