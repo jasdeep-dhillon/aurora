@@ -14,6 +14,7 @@ use local::manage::{Progress, VerifyReport};
 use model::{AppId, InstalledGame, art};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use ui::{Theme, icons, widgets as w};
 
@@ -52,6 +53,20 @@ fn yes() -> bool {
 
 enum Dialog {
     Uninstall,
+    /// One-time notice before the first Steam-DRM game launches: it starts
+    /// through a background Steam instance. Play confirms and launches.
+    DrmNotice { id: AppId, install_dir: PathBuf, args: String },
+}
+
+/// A Steam-DRM (SteamStub) game: it starts through a background Steam instance
+/// (the headless host on Linux, the official client elsewhere), which is what
+/// the one-time notice is about.
+fn is_steam_drm(mode: &client::LaunchMode) -> bool {
+    match mode {
+        client::LaunchMode::HeadlessHost => true,
+        client::LaunchMode::OfficialSteam { anti_cheat } => anti_cheat == client::STEAM_DRM,
+        _ => false,
+    }
 }
 
 /// Library filters like Steam's: any choice within a group, every group must match.
@@ -336,6 +351,7 @@ impl Extension for Library {
             (None, None) => self.home(ui, &t, ctx),
         });
         self.add_dialog(ui, &t, ctx);
+        self.drm_notice(ui, &t, ctx);
         self.reader(ui, &t, ctx);
         self.install_window(ui, &t, ctx);
         self.properties_window(ui, &t, ctx);
@@ -702,7 +718,7 @@ impl Library {
             MenuAct::Play => {
                 if let Some(g) = local {
                     let args = self.games.get(&id).map(|s| s.args.clone()).unwrap_or_default();
-                    ctx.send(Command::Launch { app_id: id, install_dir: g.install_dir.clone(), args });
+                    self.launch_or_notice(ctx, id, g.install_dir.clone(), args);
                 }
             }
             MenuAct::Stop => ctx.send(Command::StopGame { app_id: id }),
@@ -1367,7 +1383,7 @@ impl Library {
                                 let r = w::button(ui, t, Some(icons::PLAY), t!("Play"), w::Kind::Play, w::Size::Lg);
                                 if r.clicked() {
                                     let args = self.games.get(&id).map(|s| s.args.clone()).unwrap_or_default();
-                                    ctx.send(Command::Launch { app_id: id, install_dir: g.install_dir.clone(), args });
+                                    self.launch_or_notice(ctx, id, g.install_dir.clone(), args);
                                 }
                             }
                             None if owned.is_some() => {
@@ -1828,6 +1844,18 @@ impl Library {
     }
 
     /// The game's main button, like Steam's: Play, Update, or what's running.
+    /// Start a game, or — the first time a Steam-DRM game is launched — show
+    /// the one-time notice about the background Steam instance first.
+    fn launch_or_notice(&mut self, ctx: &mut Ctx, id: AppId, install_dir: PathBuf, args: String) {
+        let is_drm = ctx.state.apps.as_ref().and_then(|a| a.get(&id)).is_some_and(|o| is_steam_drm(&client::launch_mode_cached(o, &install_dir)));
+        let acked = self.flags.as_ref().is_some_and(|f| f.lock().unwrap().drm_host_ack);
+        if is_drm && !acked {
+            self.dialog = Some(Dialog::DrmNotice { id, install_dir, args });
+        } else {
+            ctx.send(Command::Launch { app_id: id, install_dir, args });
+        }
+    }
+
     fn play_button(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, g: &InstalledGame) {
         let id = g.app_id;
         let busy = ctx.state.downloads.get(&id).filter(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)).cloned();
@@ -1847,7 +1875,62 @@ impl Library {
             }
         } else if w::button(ui, t, Some(icons::PLAY), t!("Play"), w::Kind::Play, w::Size::Lg).clicked() {
             let args = self.games.get(&id).map(|s| s.args.clone()).unwrap_or_default();
-            ctx.send(Command::Launch { app_id: id, install_dir: g.install_dir.clone(), args });
+            self.launch_or_notice(ctx, id, g.install_dir.clone(), args);
+        }
+    }
+
+    /// One-time notice before a Steam-DRM game first launches.
+    fn drm_notice(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+        let Some(Dialog::DrmNotice { id, install_dir, args }) = &self.dialog else { return };
+        let (id, install_dir, args) = (*id, install_dir.clone(), args.clone());
+        let name = ctx.state.app_name(id).unwrap_or_default().to_string();
+        let steam_root = local::find_steam_root();
+        let (mut close, mut play) = (false, false);
+        ui::widgets::modal(ui.ctx(), egui::Id::new(("drm-notice", id))).show(ui.ctx(), |ui| {
+            ui.set_width(480.0);
+            ui.label(w::text(icons::SHIELD, 28.0, t.accent));
+            ui.label(w::text_bold(t!("Before {name} starts", name = name), 20.0, t.text));
+            ui.add_space(6.0);
+            let body = if cfg!(windows) {
+                t!("{name} is protected by Steam DRM, so SteamInRust starts the official Steam client minimized in the background (no window) and closes it again when you quit the game.", name = name)
+            } else {
+                t!("{name} is protected by Steam DRM. SteamInRust starts a limited, windowless copy of your own Steam — no store, friends or web browser — signs in, and closes it again when you quit the game.", name = name)
+            };
+            ui.add(egui::Label::new(w::text(body, 14.0, t.text_dim)).wrap());
+            ui.add_space(10.0);
+            match &steam_root {
+                Some(r) => {
+                    ui.label(w::text(t!("Using your Steam install:"), 12.5, t.text_faint));
+                    ui.label(w::text(r.display().to_string(), 12.5, t.text).monospace());
+                }
+                None => {
+                    ui.add(egui::Label::new(w::text(format!("{}  {}", icons::WARNING, t!("No Steam install found. Install Steam and sign in to it once, then try again.")), 13.0, t.away)).wrap());
+                }
+            }
+            ui.add_space(8.0);
+            #[cfg(not(windows))]
+            ui.add(egui::Label::new(w::text(t!("Close the official Steam first if it's open — only one Steam can run at a time."), 12.5, t.text_faint)).wrap());
+            ui.add(egui::Label::new(w::text(t!("This signs in with your own Steam account through an unofficial client; use it at your own risk."), 12.5, t.text_faint)).wrap());
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let can = steam_root.is_some();
+                if ui.add_enabled_ui(can, |ui| w::button(ui, t, Some(icons::PLAY), t!("Play"), w::Kind::Play, w::Size::Md)).inner.clicked() {
+                    play = true;
+                    close = true;
+                }
+                if w::button(ui, t, None, t!("Cancel"), w::Kind::Secondary, w::Size::Md).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if play {
+            if let Some(f) = &self.flags {
+                f.lock().unwrap().drm_host_ack = true;
+            }
+            ctx.send(Command::Launch { app_id: id, install_dir, args });
+        }
+        if close {
+            self.dialog = None;
         }
     }
 

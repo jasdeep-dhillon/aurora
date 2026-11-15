@@ -1697,3 +1697,14 @@
 "My profile" = "Мой профиль"
 "Start games through the official Steam client" = "Запускать игры через официальный клиент Steam"
 "Off: games start here, natively or with Proton, and only anti-cheat games use Steam. Turn on for games that won't run without Steam." = "Выкл.: игры запускаются здесь, нативно или через Proton, и только игры с античитом используют Steam. Включите для игр, которые не запускаются без Steam."
+
+# Steam-DRM games on the headless host / background Steam (Linux & Windows)
+"Steam DRM (no window)" = "Steam DRM (без окна)"
+"Starts a limited, windowless instance of your own installed Steam in the background, with no store or friends. It signs in and closes when the game does." = "Запускает в фоне ограниченный экземпляр вашего установленного Steam без окна, без магазина и друзей. Выполняет вход и закрывается вместе с игрой."
+"Before {name} starts" = "Перед запуском {name}"
+"{name} is protected by Steam DRM, so SteamInRust starts the official Steam client minimized in the background (no window) and closes it again when you quit the game." = "{name} защищена Steam DRM, поэтому SteamInRust запускает официальный клиент Steam свёрнутым в фоне (без окна) и закрывает его, когда вы выходите из игры."
+"{name} is protected by Steam DRM. SteamInRust starts a limited, windowless copy of your own Steam — no store, friends or web browser — signs in, and closes it again when you quit the game." = "{name} защищена Steam DRM. SteamInRust запускает ограниченную копию вашего Steam без окна — без магазина, друзей и веб-браузера — выполняет вход и закрывает её, когда вы выходите из игры."
+"Using your Steam install:" = "Используется ваша установка Steam:"
+"No Steam install found. Install Steam and sign in to it once, then try again." = "Установка Steam не найдена. Установите Steam, войдите в него один раз и повторите попытку."
+"Close the official Steam first if it's open — only one Steam can run at a time." = "Сначала закройте официальный Steam, если он открыт — одновременно может работать только один Steam."
+"This signs in with your own Steam account through an unofficial client; use it at your own risk." = "Вход выполняется с вашей учётной записью Steam через неофициальный клиент; используйте на свой страх и риск."

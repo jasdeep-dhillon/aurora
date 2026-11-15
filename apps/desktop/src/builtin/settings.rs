@@ -64,6 +64,8 @@ pub struct AppFlags {
     pub toast_notifications: bool,
     /// Multiple of egui's scroll distance per wheel notch / touchpad move.
     pub scroll_speed: f32,
+    /// The one-time Steam-DRM launch notice has been shown and accepted.
+    pub drm_host_ack: bool,
 }
 
 pub type SharedFlags = std::sync::Arc<std::sync::Mutex<AppFlags>>;
