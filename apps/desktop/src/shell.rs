@@ -64,16 +64,6 @@ fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
     crate::chrome::drag_area(ui, rect.expand2(vec2(10.0, 0.0)), true);
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        ui.add_enabled_ui(!app.back.is_empty(), |ui| {
-            if w::icon_button_sized(ui, t, icons::ARROW_LEFT, t!("Back"), false, 0, CTRL).clicked() {
-                app.go_back();
-            }
-        });
-        ui.add_enabled_ui(!app.forward.is_empty(), |ui| {
-            if w::icon_button_sized(ui, t, icons::ARROW_RIGHT, t!("Forward"), false, 0, CTRL).clicked() {
-                app.go_forward();
-            }
-        });
         ui.add_space(4.0);
         app_menu(app, ui, t, actions);
         ui.add_space(6.0);
@@ -123,24 +113,17 @@ fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
             }
             friends_hover(app, ui, t, &fr, actions);
             ui.add_space(8.0);
-            // Shrinks, then collapses to an icon, so it never covers the tabs.
-            let room = ui.available_width() - 16.0;
-            if room >= 180.0 {
-                let r = w::search_sized(ui, t, &mut app.search, t!("Search"), room.min(320.0), CTRL);
-                if r.has_focus() {
-                    app.search_open = true;
+            // Back and forward, right of the tabs (right-to-left: forward first).
+            ui.add_enabled_ui(!app.forward.is_empty(), |ui| {
+                if w::icon_button_sized(ui, t, icons::ARROW_RIGHT, t!("Forward"), false, 0, CTRL).clicked() {
+                    app.go_forward();
                 }
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if enter && !app.search.trim().is_empty() {
-                    actions.push(Action::Navigate { page: "store".into(), arg: Some(format!("search:{}", app.search.trim())) });
-                    app.search_open = false;
+            });
+            ui.add_enabled_ui(!app.back.is_empty(), |ui| {
+                if w::icon_button_sized(ui, t, icons::ARROW_LEFT, t!("Back"), false, 0, CTRL).clicked() {
+                    app.go_back();
                 }
-                if app.search_open && !app.search.trim().is_empty() {
-                    search_results(app, ui.ctx(), r.rect, t, actions);
-                }
-            } else if room >= 40.0 && w::icon_button_sized(ui, t, icons::SEARCH, t!("Search"), false, 0, CTRL).clicked() {
-                actions.push(Action::Navigate { page: "store".into(), arg: None });
-            }
+            });
         });
     });
 }
@@ -617,9 +600,6 @@ fn app_menu(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action
         if item(ui, icons::DOWNLOAD, t!("Downloads")) {
             actions.push(Action::Navigate { page: "downloads".into(), arg: None });
         }
-        if item(ui, icons::BACKPACK, t!("Inventory")) {
-            actions.push(Action::Navigate { page: "inventory".into(), arg: None });
-        }
         if item(ui, icons::INFO, t!("Steam Support")) {
             actions.push(Action::Navigate { page: "support".into(), arg: None });
         }
@@ -645,67 +625,6 @@ fn app_menu(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action
             app.request_exit(ui.ctx());
         }
     });
-}
-
-/// One search box for everything: your games, your friends, and the store.
-fn search_results(app: &mut SteamApp, ctx: &egui::Context, anchor: Rect, t: &Theme, actions: &mut Vec<Action>) {
-    let q = app.search.trim().to_lowercase();
-    let games: Vec<(model::AppId, String)> = crate::builtin::entries(&app.state, &app.local)
-        .into_iter()
-        .filter(|e| e.name.to_lowercase().contains(&q))
-        .take(5)
-        .map(|e| (e.app_id, e.name.to_string()))
-        .collect();
-    let friends: Vec<Persona> = app.state.friend_list().into_iter().filter(|p| p.name.to_lowercase().contains(&q)).take(4).collect();
-    let mut close = false;
-    let area = egui::Area::new(egui::Id::unique("global-search"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(anchor.left_bottom() + vec2(0.0, 6.0))
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(t.raised)
-                .stroke(Stroke::new(1.0, t.border))
-                .corner_radius(t.corner())
-                .shadow(egui::Shadow { offset: [0, 10], blur: 28, spread: 0, color: egui::Color32::from_black_alpha(140) })
-                .inner_margin(Margin::same(8))
-                .show(ui, |ui| {
-                    ui.set_width(anchor.width().max(320.0));
-                    let row = |ui: &mut Ui, icon: &str, text: &str| {
-                        ui.add(egui::Button::new(w::text_medium(format!("{icon}   {text}"), 13.5, t.text)).frame(false).min_size(vec2(ui.available_width(), 32.0))).clicked()
-                    };
-                    if !games.is_empty() {
-                        w::caption(ui, t, t!("Your games"));
-                        for (id, name) in &games {
-                            if row(ui, icons::CONTROLLER, name) {
-                                actions.push(Action::Navigate { page: "library".into(), arg: Some(id.to_string()) });
-                                close = true;
-                            }
-                        }
-                    }
-                    if !friends.is_empty() {
-                        w::caption(ui, t, t!("Friends"));
-                        for p in &friends {
-                            if row(ui, icons::USER, &p.name) {
-                                actions.push(Action::OpenChat(p.steam_id));
-                                close = true;
-                            }
-                        }
-                    }
-                    w::caption(ui, t, t!("Store"));
-                    if row(ui, icons::STORE, &t!("Search the store for “{q}”", q = app.search.trim())) {
-                        actions.push(Action::Navigate { page: "store".into(), arg: Some(format!("search:{}", app.search.trim())) });
-                        close = true;
-                    }
-                });
-        });
-    // Close when clicking anywhere else.
-    let clicked_outside = ctx.input(|i| i.pointer.any_click()) && !area.response.hovered() && !ctx.pointer_hover_pos().is_some_and(|p| anchor.contains(p));
-    if close || clicked_outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-        app.search_open = false;
-        if close {
-            app.search.clear();
-        }
-    }
 }
 
 /// "Activate a product" dialog (product keys).
@@ -771,7 +690,8 @@ fn account_menu(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Ac
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
     ui.painter().rect_filled(rect, t.corner_small(), w::mix(t.raised, t.surface_hover, hover));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(6.0, (CTRL - 24.0) / 2.0), vec2(24.0, 24.0))));
-    w::avatar(&mut child, t, &art::avatar(me.avatar_hash.as_deref()), 24.0, Some(color));
+    // Square, rounded like the rest of the controls.
+    w::avatar_rounded(&mut child, t, &art::avatar(me.avatar_hash.as_deref()), 24.0, Some(color), t.corner_small());
     let p = ui.painter();
     p.galley(egui::pos2(rect.left() + 38.0, rect.center().y - name_g.size().y / 2.0), name_g, name_color);
     p.text(rect.right_center() - vec2(12.0, 0.0), Align2::CENTER_CENTER, icons::CARET_DOWN, w::font(12.0), t.text_faint);

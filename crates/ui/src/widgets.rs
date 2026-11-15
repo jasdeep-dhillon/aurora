@@ -561,13 +561,18 @@ pub fn field(ui: &mut Ui, t: &Theme, label: &str, value: &mut String, password: 
 
 /// Round avatar with an optional presence dot.
 pub fn avatar(ui: &mut Ui, t: &Theme, url: &str, size: f32, status: Option<Color32>) -> Response {
+    avatar_rounded(ui, t, url, size, status, CornerRadius::same((size / 2.0) as u8))
+}
+
+/// Like [`avatar`], with its own corner rounding (e.g. the theme's, to sit
+/// inside a button).
+pub fn avatar_rounded(ui: &mut Ui, t: &Theme, url: &str, size: f32, status: Option<Color32>, radius: CornerRadius) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     if !ui.is_rect_visible(rect) {
         return resp;
     }
-    let radius = CornerRadius::same((size / 2.0) as u8);
     if !paint_cover(ui, rect, url, radius) {
-        ui.painter().circle_filled(rect.center(), size / 2.0, t.surface_hover);
+        ui.painter().rect_filled(rect, radius, t.surface_hover);
     }
     if let Some(c) = status {
         let r = (size * 0.14).max(4.0);

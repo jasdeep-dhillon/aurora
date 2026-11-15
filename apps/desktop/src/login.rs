@@ -98,9 +98,10 @@ pub fn show(app: &mut SteamApp, ui: &mut Ui) {
     });
 }
 
-/// Steam's sign-in look: a dark gradient with a soft glow, no game art.
+/// A simple top-to-bottom gradient: a hint of the accent color fading into
+/// the background.
 fn background(ui: &Ui, t: &Theme, rect: Rect) {
-    w::gradient(ui.painter(), rect, t.chrome, t.bg, true);
+    w::gradient(ui.painter(), rect, w::mix(t.bg, t.accent, 0.16), t.bg, false);
 }
 
 /// Small splash while a saved account signs in.
@@ -169,13 +170,14 @@ fn saved(app: &mut SteamApp, ui: &mut Ui, t: &Theme) {
                 for &i in chunk {
                     let (rect, resp) = ui.allocate_exact_size(tile, Sense::click());
                     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
-                    ui.painter().rect_filled(rect, t.corner(), w::mix(Color32::TRANSPARENT, t.surface_hover, hover));
+                    // Every account sits in a grey box; its border lights up on hover.
+                    ui.painter().rect_filled(rect, t.corner(), t.raised);
+                    ui.painter().rect_stroke(rect, t.corner(), Stroke::new(1.5, w::mix(t.border, t.accent, hover)), egui::StrokeKind::Inside);
                     let pic = Rect::from_center_size(pos2(rect.center().x, rect.top() + 56.0), vec2(92.0, 92.0));
                     if let Some(acc) = accounts.get(i) {
                         if !w::paint_cover(ui, pic, &model::art::avatar_full(acc.avatar_hash.as_deref()), CornerRadius::same(8)) {
                             w::skeleton(ui, t, pic, CornerRadius::same(8));
                         }
-                        ui.painter().rect_stroke(pic, CornerRadius::same(8), Stroke::new(2.0, w::mix(Color32::TRANSPARENT, t.accent, hover)), egui::StrokeKind::Outside);
                         let name = if acc.persona_name.is_empty() { &acc.account_name } else { &acc.persona_name };
                         ui.painter().text(pos2(rect.center().x, pic.bottom() + 18.0), Align2::CENTER_CENTER, name, w::font_semibold(13.5), t.text);
                         ui.painter().text(pos2(rect.center().x, pic.bottom() + 35.0), Align2::CENTER_CENTER, &acc.account_name, w::font(11.5), t.text_faint);
@@ -183,7 +185,7 @@ fn saved(app: &mut SteamApp, ui: &mut Ui, t: &Theme) {
                         let x = Rect::from_center_size(pic.right_top() + vec2(-2.0, 2.0), vec2(22.0, 22.0));
                         let xr = ui.interact(x, egui::Id::unique(("forget", i)), Sense::click());
                         if hover > 0.5 || xr.hovered() {
-                            ui.painter().circle_filled(x.center(), 11.0, if xr.hovered() { t.danger } else { t.raised });
+                            ui.painter().circle_filled(x.center(), 11.0, if xr.hovered() { t.danger } else { t.surface_hover });
                             ui.painter().text(x.center(), Align2::CENTER_CENTER, icons::X, w::font(11.0), t.text);
                         }
                         if xr.on_hover_text(t!("Remove from this PC")).clicked() {
@@ -192,8 +194,7 @@ fn saved(app: &mut SteamApp, ui: &mut Ui, t: &Theme) {
                             login = Some(acc.account_name.clone());
                         }
                     } else {
-                        ui.painter().rect_filled(pic, CornerRadius::same(8), t.raised);
-                        ui.painter().rect_stroke(pic, CornerRadius::same(8), Stroke::new(1.0, w::mix(t.border, t.accent, hover)), egui::StrokeKind::Inside);
+                        ui.painter().rect_filled(pic, CornerRadius::same(8), t.surface_hover);
                         ui.painter().text(pic.center(), Align2::CENTER_CENTER, icons::PLUS, w::font(30.0), w::mix(t.text_dim, t.accent, hover));
                         ui.painter().text(pos2(rect.center().x, pic.bottom() + 18.0), Align2::CENTER_CENTER, t!("Add account"), w::font_semibold(13.5), t.text_dim);
                         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {

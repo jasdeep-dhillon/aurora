@@ -102,14 +102,12 @@ pub struct SteamApp {
     /// An open friend dialog (nickname, server info, remove, block) and the
     /// window it belongs to.
     pub friend_dialog: Option<(egui::ViewportId, crate::shell::FriendDialog)>,
-    pub search: String,
     /// Back/forward navigation stacks of (page, arg).
     pub back: Vec<(String, Option<String>)>,
     pub forward: Vec<(String, Option<String>)>,
     pub current_arg: Option<String>,
     pub overlay: crate::overlay::Overlay,
     pub demo: bool,
-    pub search_open: bool,
     pub activate: Option<Activate>,
     /// Set by "Exit" so closing really quits instead of hiding to the tray.
     pub exiting: bool,
@@ -221,13 +219,11 @@ impl SteamApp {
             toasts: Vec::new(),
             friend_filter: String::new(),
             friend_dialog: None,
-            search: String::new(),
             back: Vec::new(),
             forward: Vec::new(),
             current_arg: None,
             overlay,
             demo,
-            search_open: false,
             activate: None,
             exiting: false,
             cart_count: None,
