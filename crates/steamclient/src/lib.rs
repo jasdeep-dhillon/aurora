@@ -145,6 +145,9 @@ fn create_interface(version: usize, err: usize) -> usize {
         unsafe { (err as *mut i32).write_unaligned(1) };
     }
     if !p.is_null() {
+        // Our threads start below: never let the DLL be unloaded under them.
+        static PINNED: std::sync::Once = std::sync::Once::new();
+        PINNED.call_once(win::pin_self);
         // Load the session now so GetAppID and friends are right from the start.
         if state::ensure_session() {
             // Draw the Shift+Tab overlay inside the game (see overlay/).

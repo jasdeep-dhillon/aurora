@@ -80,6 +80,20 @@ pub fn load_real_steamclient() -> usize {
     0
 }
 
+/// Keep this DLL loaded for good. Old steam_api versions FreeLibrary it when
+/// their init fails (or at shutdown) while our threads still run in it, which
+/// crashed the game instead of letting it show its own message.
+#[cfg(windows)]
+pub fn pin_self() {
+    const FROM_ADDRESS: u32 = 0x4;
+    const PIN: u32 = 0x1;
+    let mut module = std::ptr::null_mut();
+    unsafe { GetModuleHandleExW(FROM_ADDRESS | PIN, pin_self as *const u16, &mut module) };
+}
+
+#[cfg(not(windows))]
+pub fn pin_self() {}
+
 /// File name (no folder, lower case) of the loaded module holding `addr`;
 /// `None` if no module does (heap, or code mapped by hand).
 #[cfg(windows)]
