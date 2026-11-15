@@ -139,6 +139,9 @@ pub struct SteamApp {
     window_mode: Option<WindowMode>,
     /// A window size waiting to be centered once the monitor size is known.
     center_window: Option<[f32; 2]>,
+    /// A window size asked for but not reached yet: (size, resizable, frames
+    /// waited).
+    pending_size: Option<([f32; 2], bool, u32)>,
     pub tray: crate::tray::Tray,
     flags: crate::builtin::settings::SharedFlags,
     pub friends_window: crate::friends_window::FriendsWindow,
@@ -258,6 +261,7 @@ impl SteamApp {
             confirm_exit: false,
             window_mode: None,
             center_window: None,
+            pending_size: None,
             tray: crate::tray::Tray::new(&cc.egui_ctx),
             flags,
             friends_window: Default::default(),
@@ -702,7 +706,12 @@ impl eframe::App for SteamApp {
                 WindowMode::SignIn => ([560.0, 400.0], [560.0, 400.0], false),
                 WindowMode::Splash => ([380.0, 250.0], [380.0, 250.0], false),
             };
-            ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(resizable));
+            // Locking the size (Resizable(false)) pins it to whatever it is
+            // at that moment, so a fixed-size window is locked only once it
+            // has its size (see `pending_size` below).
+            if resizable {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min.into()));
             // Main: restore the last size/position/maximized. Sign-in and
             // splash: always small and centered on the main display.
@@ -710,16 +719,39 @@ impl eframe::App for SteamApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.prefs.win_size.unwrap_or(size).into()));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
                 self.center_window = None;
+                self.pending_size = None;
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
                 let size = if mode == WindowMode::Main { self.prefs.win_size.unwrap_or(size) } else { size };
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.into()));
+                self.pending_size = Some((size, resizable, 0));
                 // Restore a saved main-window position, else center once the
                 // monitor size is known (it can be unknown on this frame).
                 match (mode, self.prefs.win_pos) {
                     (WindowMode::Main, Some(pos)) => ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos.into())),
                     _ => self.center_window = Some(size),
                 }
+            }
+        }
+        // The compositor ignores a new size while the window is still
+        // maximized (it starts that way when the last session ended
+        // maximized): ask again until the window has it, then lock it.
+        if let Some((size, resizable, tries)) = self.pending_size {
+            let (now, maximized) = ctx.input(|i| (i.viewport().inner_rect.map(|r| r.size()), i.viewport().maximized.unwrap_or(false)));
+            let done = now.is_some_and(|s| (s - egui::Vec2::from(size)).abs().max_elem() < 2.0);
+            if done || tries >= 120 {
+                if !resizable {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(false));
+                }
+                self.pending_size = None;
+            } else {
+                if maximized {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                } else if tries % 10 == 9 {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.into()));
+                }
+                self.pending_size = Some((size, resizable, tries + 1));
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
             }
         }
         // Center when a size is pending and the monitor size has arrived.
@@ -772,6 +804,9 @@ impl eframe::App for SteamApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.prefs.ext_data = self.registry.save_all().into_iter().collect();
         eframe::set_value(storage, "prefs", &self.prefs);
+        // eframe restores its own "window" entry even with persist_window
+        // off; an old maximized one reopened sign-in full screen. Blank it.
+        storage.set_string("window", String::new());
     }
 
     /// Dropping a tokio runtime waits for every blocking task to return: a
