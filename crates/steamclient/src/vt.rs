@@ -98,10 +98,11 @@ mod x86 {
         fn VirtualAlloc(addr: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
     }
 
-    const SIZE: usize = 48;
+    const SIZE: usize = 80;
 
-    /// thiscall -> cdecl(this, args...) -> `ret bytes`, one per slot.
-    pub fn trampolines(targets: &[(Fp, u16)]) -> Vec<Fp> {
+    /// thiscall -> cdecl(this, args...) -> `ret bytes`, one per slot. With a
+    /// trace id, the call is logged first (see `trace::called`).
+    pub fn trampolines(targets: &[(Fp, u16, Option<u32>)]) -> Vec<Fp> {
         // MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE
         let mem = unsafe { VirtualAlloc(std::ptr::null_mut(), targets.len() * SIZE, 0x3000, 0x40) } as *mut u8;
         if mem.is_null() {
@@ -110,8 +111,8 @@ mod x86 {
         targets
             .iter()
             .enumerate()
-            .map(|(i, &(target, bytes))| {
-                let code = code(target as u32, bytes);
+            .map(|(i, &(target, bytes, trace))| {
+                let code = code(target as u32, bytes, trace);
                 unsafe {
                     let at = mem.add(i * SIZE);
                     std::ptr::copy_nonoverlapping(code.as_ptr(), at, code.len());
@@ -121,9 +122,17 @@ mod x86 {
             .collect()
     }
 
-    fn code(target: u32, bytes: u16) -> Vec<u8> {
+    fn code(target: u32, bytes: u16, trace: Option<u32>) -> Vec<u8> {
         let k = bytes as u32;
         let mut c = vec![0x55, 0x89, 0xE5, 0x56, 0x57, 0x51]; // push ebp; mov ebp,esp; push esi; push edi; push ecx
+        if let Some(id) = trace {
+            // push [ebp+16]; push [ebp+12]; push [ebp+8]; push id; call trace::called; add esp,16
+            c.extend_from_slice(&[0xFF, 0x75, 0x10, 0xFF, 0x75, 0x0C, 0xFF, 0x75, 0x08, 0x68]);
+            c.extend_from_slice(&id.to_le_bytes());
+            c.push(0xB8);
+            c.extend_from_slice(&(crate::trace::called as usize as u32).to_le_bytes());
+            c.extend_from_slice(&[0xFF, 0xD0, 0x83, 0xC4, 0x10]);
+        }
         c.extend_from_slice(&[0x81, 0xEC]); // sub esp, k
         c.extend_from_slice(&k.to_le_bytes());
         c.extend_from_slice(&[0x89, 0xE7, 0x8D, 0x75, 0x08, 0xB9]); // mov edi,esp; lea esi,[ebp+8]; mov ecx, k/4
@@ -145,7 +154,7 @@ mod x86 {
 
         #[test]
         fn thiscall_reaches_cdecl() {
-            let t = super::trampolines(&[(sum as super::Fp, 16)]);
+            let t = super::trampolines(&[(sum as super::Fp, 16, None)]);
             let f: F = unsafe { std::mem::transmute(t[0]) };
             assert_eq!(unsafe { f(100 as *mut u8, 1, 1 << 40, 2.0) }, 100 + 1 + (1 << 40) + 2);
         }
@@ -185,11 +194,14 @@ pub fn get(version: &str) -> *mut c_void {
     let slots: Vec<Fp> = match layout32(version) {
         Some((kind, methods)) => {
             crate::log!("interface {version} ({kind}, {} methods, 32-bit)", methods.len());
-            let targets: Vec<(Fp, u16)> = methods
+            let targets: Vec<(Fp, u16, Option<u32>)> = methods
                 .iter()
                 .map(|(m, bytes)| match *bytes {
-                    UNKNOWN => (zero as Fp, 0),
-                    b => (crate::ifaces::imp(kind, m).unwrap_or_else(|| stub(kind, m)), b),
+                    UNKNOWN => (zero as Fp, 0, None),
+                    b => match crate::ifaces::imp(kind, m) {
+                        Some(f) => (f, b, crate::trace::call_id(kind, m)),
+                        None => (stub(kind, m), b, None),
+                    },
                 })
                 .collect();
             x86::trampolines(&targets)
@@ -204,7 +216,7 @@ pub fn get(version: &str) -> *mut c_void {
     #[cfg(not(target_arch = "x86"))]
     slots.extend(std::iter::repeat_n(zero as Fp, 64));
     #[cfg(target_arch = "x86")]
-    slots.extend(x86::trampolines(&[(zero as Fp, 0); 64]));
+    slots.extend(x86::trampolines(&[(zero as Fp, 0, None); 64]));
     let vtable = Box::leak(slots.into_boxed_slice()).as_ptr();
     let obj = Box::leak(Box::new(Object { vtable })) as *mut Object as usize;
     objects.insert(version.to_string(), obj);

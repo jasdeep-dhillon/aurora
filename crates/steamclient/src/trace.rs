@@ -33,6 +33,30 @@ pub fn export(name: &str, args: [usize; 3], result: usize) {
     }
 }
 
+/// Names of implemented methods whose 32-bit calls are logged.
+static CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// With tracing on, an id for logging calls to an implemented method (the
+/// 32-bit trampolines call [`called`] with it before the method).
+#[cfg_attr(not(target_arch = "x86"), allow(dead_code))]
+pub fn call_id(kind: &str, method: &str) -> Option<u32> {
+    if !on() {
+        return None;
+    }
+    let mut calls = CALLS.lock().unwrap_or_else(|e| e.into_inner());
+    calls.push(format!("{kind}::{method}"));
+    Some(calls.len() as u32 - 1)
+}
+
+/// Logged first: the method and its first three stack arguments.
+#[cfg_attr(not(target_arch = "x86"), allow(dead_code))]
+pub extern "C" fn called(id: u32, a: u32, b: u32, c: u32) {
+    let name = CALLS.lock().map(|n| n.get(id as usize).cloned()).ok().flatten().unwrap_or_default();
+    if first_times(&format!("call {name}")) {
+        crate::log!("call {name}({a:#x}, {b:#x}, {c:#x})");
+    }
+}
+
 /// Names of the traced stub slots handed out so far.
 static NAMES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
