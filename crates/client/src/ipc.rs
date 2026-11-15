@@ -1,7 +1,9 @@
 //! The app's side of the pipe that games with our steamclient DLL talk to
 //! (see `crates/steamclient`).
 //!
-//! [`Server`] accepts connections on a per-run pipe name. Every request
+//! [`Server`] accepts connections on a per-run pipe name (Windows), or on a
+//! loopback TCP port elsewhere: games running with Proton reach it through
+//! Wine's sockets (see `launch::linux`). Every request
 //! carries the token SteamInRust gave that launch; known tokens become a
 //! [`Call`] for the online loop in `session.rs`, which answers from its own
 //! state and the CM connection (helpers below: user stats, storing stats,
@@ -66,10 +68,11 @@ fn random_hex() -> String {
 impl Server {
     /// Start listening. Must run inside the tokio runtime.
     pub fn start() -> (Server, mpsc::UnboundedReceiver<Call>) {
-        let name = format!(r"\\.\pipe\steaminrust-{}-{}", std::process::id(), &random_hex()[..12]);
         let tokens: Tokens = Arc::default();
         let (tx, rx) = mpsc::unbounded_channel();
         // Also the in-game overlay's pipe, which checks the same launch tokens.
+        #[cfg(windows)]
+        let name = format!(r"\\.\pipe\steaminrust-{}-{}", std::process::id(), &random_hex()[..12]);
         #[cfg(windows)]
         let task = {
             let t = tokens.clone();
@@ -77,10 +80,18 @@ impl Server {
             let games = accept(name.clone(), tokens.clone(), tx);
             Some(tokio::spawn(async move { tokio::join!(games, overlay) }).abort_handle())
         };
+        // Loopback only; the launch token keeps other local programs out.
         #[cfg(not(windows))]
-        let task = {
-            drop(tx);
-            None
+        let (name, task) = match std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|l| {
+            l.set_nonblocking(true)?;
+            let addr = l.local_addr()?;
+            Ok((tokio::net::TcpListener::from_std(l)?, addr))
+        }) {
+            Ok((listener, addr)) => (format!("tcp:{addr}"), Some(tokio::spawn(accept_tcp(listener, tokens.clone(), tx)).abort_handle())),
+            Err(e) => {
+                tracing::warn!("steamclient socket: {e}");
+                (String::new(), None)
+            }
         };
         (Server { name, tokens, task }, rx)
     }
@@ -149,8 +160,27 @@ async fn accept(name: String, tokens: Tokens, tx: mpsc::UnboundedSender<Call>) {
     }
 }
 
-#[cfg(windows)]
-async fn serve_one(pipe: tokio::net::windows::named_pipe::NamedPipeServer, tokens: Tokens, tx: mpsc::UnboundedSender<Call>) {
+#[cfg(not(windows))]
+async fn accept_tcp(listener: tokio::net::TcpListener, tokens: Tokens, tx: mpsc::UnboundedSender<Call>) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, peer)) if peer.ip().is_loopback() => {
+                let _ = stream.set_nodelay(true);
+                tokio::spawn(serve_one(stream, tokens.clone(), tx.clone()));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("steamclient socket: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+async fn serve_one<S>(pipe: S, tokens: Tokens, tx: mpsc::UnboundedSender<Call>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+{
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     let (r, mut w) = tokio::io::split(pipe);
@@ -185,7 +215,6 @@ async fn serve_one(pipe: tokio::net::windows::named_pipe::NamedPipeServer, token
 }
 
 /// Hand over queued events, waiting up to 20 s for the first one.
-#[cfg(windows)]
 async fn poll(tokens: &Tokens, token: &str) -> Vec<GameEvent> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {

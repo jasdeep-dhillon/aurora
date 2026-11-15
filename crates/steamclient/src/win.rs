@@ -9,6 +9,7 @@ use std::ffi::c_void;
 unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+    fn GetModuleHandleExW(flags: u32, name: *const u16, module: *mut *mut c_void) -> i32;
 }
 
 #[cfg(windows)]
@@ -57,7 +58,17 @@ pub fn load_real_steamclient() -> usize {
     let file = if cfg!(target_pointer_width = "64") { "steamclient64.dll" } else { "steamclient.dll" };
     let path = format!("{}\\{}", root.replace('/', "\\"), file);
     let w = wide(&path);
-    unsafe { LoadLibraryW(w.as_ptr()) as usize }
+    let module = unsafe { LoadLibraryW(w.as_ptr()) };
+    // In a Proton prefix SteamInRust may have put this DLL in the Steam
+    // folder itself: forwarding to ourselves would loop forever.
+    const FROM_ADDRESS: u32 = 0x4;
+    const UNCHANGED_REFCOUNT: u32 = 0x2;
+    let mut ours = std::ptr::null_mut();
+    let found = unsafe { GetModuleHandleExW(FROM_ADDRESS | UNCHANGED_REFCOUNT, load_real_steamclient as *const u16, &mut ours) };
+    if found != 0 && module == ours {
+        return 0;
+    }
+    module as usize
 }
 
 #[cfg(not(windows))]

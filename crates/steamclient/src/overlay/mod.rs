@@ -46,6 +46,11 @@ pub fn start() {
                 return;
             }
             let Some((pipe, token)) = crate::ipc::target() else { return };
+            // Proton games (loopback socket): no in-game overlay under Wine yet.
+            if pipe.starts_with("tcp:") {
+                crate::log!("overlay: not under Proton");
+                return;
+            }
             let _ = std::thread::Builder::new().name("sir-overlay".into()).spawn(move || {
                 if d3d11::install() {
                     shared::run(wire::pipe_name(&pipe), token);

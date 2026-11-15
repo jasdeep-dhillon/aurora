@@ -10,6 +10,10 @@
 //!   silently and runs the game, so Steam and the anti-cheat work normally.
 //! - **No Steam** ([`LaunchMode::NoSteam`]): when our DLL can't serve the
 //!   game (32-bit games, DLL missing), it starts plain, as before.
+//!
+//! On Linux, Windows games run with Proton get our DLL too, inside their
+//! Wine prefix (see [`linux::client_shim`]); native Linux games start
+//! without Steam features for now.
 
 use model::{AppId, OwnedApp};
 use std::path::{Path, PathBuf};
@@ -43,6 +47,7 @@ pub fn mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
             return LaunchMode::OfficialSteam { anti_cheat: "Steam for Linux".into() };
         }
         return match linux::plan(app, install_dir) {
+            Ok(p) if linux::client_dll(&p, install_dir).is_some() => LaunchMode::SteamInRust,
             Ok(p) => LaunchMode::NoSteam { reason: p.describe() },
             Err(_) => LaunchMode::OfficialSteam { anti_cheat: "Steam for Linux".into() },
         };
@@ -219,6 +224,13 @@ pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, extra_args: &s
     if let Some(log) = std::env::var_os("STEAMINRUST_STEAMCLIENT_LOG") {
         cmd.env(crate::ipc::protocol::ENV_LOG, log);
     }
+    // Proton: a Steam folder whose legacycompat/ DLLs are ours, which Proton
+    // copies into the prefix (no in-game overlay under Wine yet).
+    #[cfg(not(windows))]
+    {
+        let root = local::find_steam_root().ok_or("Steam Play needs a Steam install for Proton")?;
+        cmd.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", linux::client_shim(&root)?).env("STEAMINRUST_NO_INGAME_OVERLAY", "1");
+    }
     cmd.spawn().map_err(|e| format!("could not start {}: {e}", app.name))
 }
 
@@ -343,6 +355,10 @@ static SWAP: Mutex<Option<Swap>> = Mutex::new(None);
 
 /// Point steam_api at our DLL (64-bit or 32-bit) for one launch.
 pub fn swap_begin(token: &str, dll: &Path, is64: bool, account_id: u32) -> Result<(), String> {
+    // Linux: Proton's own prefix registry already points at the DLL.
+    if cfg!(not(windows)) {
+        return Ok(());
+    }
     let mut swap = SWAP.lock().unwrap();
     let state = swap.get_or_insert_with(|| Swap {
         saved: Saved {
@@ -477,6 +493,9 @@ pub fn repair_registry() {
 
 /// Is the game's executable 64-bit? (`None`: no executable / not a program.)
 pub fn exe_is_64bit(app: &OwnedApp, install_dir: &Path) -> Option<bool> {
+    #[cfg(not(windows))]
+    return pe_is_64bit(&linux::plan(app, install_dir).ok()?.exe(install_dir));
+    #[allow(unreachable_code)]
     pe_is_64bit(&executable(app, install_dir)?)
 }
 
@@ -960,9 +979,79 @@ mod linux {
         Ok(Plan { option: windows.clone(), tool: Some(tool), steam_root: Some(root) })
     }
 
+    /// Our steamclient DLL for a Proton game (matching its bitness), unless
+    /// it's a native game, the DLL isn't there, or
+    /// `STEAMINRUST_PROTON_CLIENT=0` turns this off.
+    pub fn client_dll(plan: &Plan, install_dir: &Path) -> Option<PathBuf> {
+        if !plan.uses_proton() || std::env::var("STEAMINRUST_PROTON_CLIENT").as_deref() == Ok("0") {
+            return None;
+        }
+        super::steamclient_dll(super::pe_is_64bit(&plan.exe(install_dir))?)
+    }
+
+    /// A stand-in for the Steam folder, given to Proton as
+    /// `STEAM_COMPAT_CLIENT_INSTALL_PATH`: every entry links to the real
+    /// one, except `legacycompat/steamclient{,64}.dll`, which are ours.
+    /// Proton copies those two into the prefix's Steam folder on every
+    /// launch, and the game's steam_api loads them from there. A later
+    /// launch through Steam itself copies Valve's back.
+    pub fn client_shim(root: &Path) -> Result<PathBuf, String> {
+        let dir = directories::ProjectDirs::from("dev", "SteamInRust", "SteamInRust").ok_or("no data folder")?.data_dir().join("proton-steam");
+        let compat = dir.join("legacycompat");
+        std::fs::create_dir_all(&compat).map_err(|e| format!("{}: {e}", compat.display()))?;
+        link_entries(root, &dir, &["legacycompat"])?;
+        let _ = link_entries(&root.join("legacycompat"), &compat, &["steamclient.dll", "steamclient64.dll"]);
+        for (is64, name) in [(true, "steamclient64.dll"), (false, "steamclient.dll")] {
+            let dst = compat.join(name);
+            match super::steamclient_dll(is64) {
+                Some(src) if !up_to_date(&src, &dst) => {
+                    let tmp = compat.join(format!(".{name}.tmp"));
+                    std::fs::copy(&src, &tmp).and_then(|_| std::fs::rename(&tmp, &dst)).map_err(|e| format!("{}: {e}", dst.display()))?;
+                }
+                Some(_) => {}
+                // No DLL of that bitness: Proton copies nothing, the prefix keeps what it has.
+                None => {
+                    let _ = std::fs::remove_file(&dst);
+                }
+            }
+        }
+        Ok(dir)
+    }
+
+    /// Symlink each entry of `from` into `to` (except `skip`), fixing links
+    /// that point elsewhere (Steam moved).
+    fn link_entries(from: &Path, to: &Path, skip: &[&str]) -> Result<(), String> {
+        let entries = std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))?;
+        for e in entries.flatten() {
+            let name = e.file_name();
+            if skip.iter().any(|s| name == *s) {
+                continue;
+            }
+            let link = to.join(&name);
+            if std::fs::read_link(&link).is_ok_and(|t| t == e.path()) {
+                continue;
+            }
+            if std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()) {
+                let _ = std::fs::remove_file(&link);
+            }
+            let _ = std::os::unix::fs::symlink(e.path(), &link);
+        }
+        Ok(())
+    }
+
+    /// `dst` is a copy of `src` made after `src` last changed.
+    fn up_to_date(src: &Path, dst: &Path) -> bool {
+        let (Ok(s), Ok(d)) = (std::fs::metadata(src), std::fs::metadata(dst)) else { return false };
+        s.len() == d.len() && matches!((s.modified(), d.modified()), (Ok(sm), Ok(dm)) if dm >= sm)
+    }
+
     impl Plan {
         pub fn uses_proton(&self) -> bool {
             self.tool.is_some()
+        }
+
+        pub fn exe(&self, install_dir: &Path) -> PathBuf {
+            install_dir.join(normalize(&self.option.executable))
         }
 
         pub fn describe(&self) -> String {

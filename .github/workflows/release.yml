@@ -144,6 +144,20 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Proton games on Linux run with the same steamclient DLLs as Windows
+      # (see client::launch): put this commit's into the Linux archive.
+      - name: Add the steamclient DLLs to the Linux archive
+        if: needs.windows.result == 'success'
+        run: |
+          name=SteamOnRust-Linux-x86_64
+          mkdir -p work && tar -C work -xzf dist/$name.tar.gz
+          unzip -j -o dist/*-portable.zip steamclient.dll steamclient32.dll -d dlls
+          cp dlls/steamclient.dll work/$name/steamclient64.dll
+          if [ -f dlls/steamclient32.dll ]; then cp dlls/steamclient32.dll work/$name/; fi
+          tar -C work -czf dist/$name.tar.gz $name
+          (cd dist && sha256sum $name.tar.gz > $name.tar.gz.sha256)
+          tar -tzf dist/$name.tar.gz
+
       - name: Release notes
         env:
           VERSION: ${{ needs.version.outputs.version }}

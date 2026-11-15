@@ -263,7 +263,10 @@ pub fn ensure_session() -> bool {
                 g.stats.load(stats);
             }
             let (app, me, ok) = (s.app_id, s.steam_id, s.stats.is_some());
-            g.session = Some(*s);
+            let mut s = *s;
+            s.install_dir = host_path(&s.install_dir);
+            s.steam_root = host_path(&s.steam_root);
+            g.session = Some(s);
             crate::lobby::start_events();
             g.post(cb::USER_STATS_RECEIVED, user_stats_received(app, if ok { RESULT_OK } else { RESULT_FAIL }, me));
             true
@@ -344,4 +347,10 @@ mod tests {
         assert_eq!(v.len(), 24);
         assert_eq!(u64::from_le_bytes(v[16..24].try_into().unwrap()), 76561197960287930);
     }
+}
+
+/// A folder SteamInRust named, as this process sees it. Under Proton the
+/// app sends Linux paths; Wine shows the Linux root as drive Z:.
+fn host_path(p: &str) -> String {
+    if cfg!(windows) && p.starts_with('/') { format!("Z:{}", p.replace('/', "\\")) } else { p.to_string() }
 }
