@@ -2198,7 +2198,6 @@ impl Online {
                 });
                 return Ok(());
             }
-            #[cfg(not(windows))]
             crate::LaunchMode::HeadlessHost => {
                 // The user's own Steam engine, headless, runs it; we follow
                 // along like the official-client case (the engine sends its
@@ -2217,8 +2216,6 @@ impl Online {
                 });
                 return Ok(());
             }
-            #[cfg(windows)]
-            crate::LaunchMode::HeadlessHost => unreachable!("HeadlessHost is Linux-only"),
             crate::LaunchMode::SteamInRust => {
                 let token = self.ipc.register(app_id);
                 let is64 = launch::exe_is_64bit(app, dir).unwrap_or(true);

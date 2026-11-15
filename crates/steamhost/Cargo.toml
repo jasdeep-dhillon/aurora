@@ -1,6 +1,6 @@
 [package]
 name = "steamhost"
-description = "Hosts Valve's own, unmodified steamclient.so without steamui/steamwebhelper (Linux)"
+description = "Hosts Valve's own, unmodified steamclient without steamui/steamwebhelper (Linux, Windows)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

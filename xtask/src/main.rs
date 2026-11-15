@@ -99,10 +99,13 @@ fn package() -> Result {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
 
-    cargo(&root, &["build", "--release", "-p", "steam-rs", "-p", "steamclient"], &[], None)?;
+    cargo(&root, &["build", "--release", "-p", "steam-rs", "-p", "steamclient", "-p", "steamhost"], &[], None)?;
     let release = root.join("target").join("release");
     copy(&release.join("steam-rs.exe"), &stage.join("steam-rs.exe"))?;
     copy(&release.join("steamclient.dll"), &stage.join("steamclient.dll"))?;
+    // The headless Steam host for Steam-DRM games (loads the user's own
+    // steamclient64.dll; nothing of Valve's is bundled).
+    copy(&release.join("steamhost.exe"), &stage.join("steamhost.exe"))?;
 
     // The same DLL for 32-bit games, when a 32-bit MinGW is around.
     if gcc32().is_some() {

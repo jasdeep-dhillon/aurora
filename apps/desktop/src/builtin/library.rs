@@ -59,7 +59,7 @@ enum Dialog {
 }
 
 /// A Steam-DRM (SteamStub) game: it starts through a background Steam instance
-/// (the headless host on Linux, the official client elsewhere), which is what
+/// (the headless host, or the official client when that can't run), which is what
 /// the one-time notice is about.
 fn is_steam_drm(mode: &client::LaunchMode) -> bool {
     match mode {
@@ -1891,10 +1891,11 @@ impl Library {
             ui.label(w::text(icons::SHIELD, 28.0, t.accent));
             ui.label(w::text_bold(t!("Before {name} starts", name = name), 20.0, t.text));
             ui.add_space(6.0);
-            let body = if cfg!(windows) {
-                t!("{name} is protected by Steam DRM, so SteamInRust starts the official Steam client minimized in the background (no window) and closes it again when you quit the game.", name = name)
-            } else {
+            let headless = ctx.state.apps.as_ref().and_then(|a| a.get(&id)).is_some_and(|o| client::launch_mode_cached(o, &install_dir) == client::LaunchMode::HeadlessHost);
+            let body = if headless {
                 t!("{name} is protected by Steam DRM. SteamInRust starts a limited, windowless copy of your own Steam — no store, friends or web browser — signs in, and closes it again when you quit the game.", name = name)
+            } else {
+                t!("{name} is protected by Steam DRM, so SteamInRust starts the official Steam client minimized in the background (no window) and closes it again when you quit the game.", name = name)
             };
             ui.add(egui::Label::new(w::text(body, 14.0, t.text_dim)).wrap());
             ui.add_space(10.0);
@@ -1908,8 +1909,9 @@ impl Library {
                 }
             }
             ui.add_space(8.0);
-            #[cfg(not(windows))]
-            ui.add(egui::Label::new(w::text(t!("Close the official Steam first if it's open — only one Steam can run at a time."), 12.5, t.text_faint)).wrap());
+            if headless {
+                ui.add(egui::Label::new(w::text(t!("Close the official Steam first if it's open — only one Steam can run at a time."), 12.5, t.text_faint)).wrap());
+            }
             ui.add(egui::Label::new(w::text(t!("This signs in with your own Steam account through an unofficial client; use it at your own risk."), 12.5, t.text_faint)).wrap());
             ui.add_space(12.0);
             ui.horizontal(|ui| {
