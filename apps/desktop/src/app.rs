@@ -172,6 +172,9 @@ impl SteamApp {
                 repaint.request_repaint();
             }),
         );
+        // Tell the session the setting before it signs in and would otherwise
+        // resume saved downloads on its own.
+        client.send(Command::SetAutoDownloads(prefs.auto_updates));
 
         // `--no-local`: don't read this PC's Steam library (clean demo screenshots).
         let local = if std::env::args().any(|a| a == "--no-local") {
@@ -619,6 +622,9 @@ impl eframe::App for SteamApp {
             let f = *self.flags.lock().unwrap();
             self.prefs.close_to_tray = f.close_to_tray;
             self.prefs.ask_account = f.ask_account;
+            if self.prefs.auto_updates != f.auto_updates {
+                self.client.send(Command::SetAutoDownloads(f.auto_updates));
+            }
             self.prefs.auto_updates = f.auto_updates;
             self.prefs.toast_messages = f.toast_messages;
             self.prefs.toast_notifications = f.toast_notifications;

@@ -372,6 +372,9 @@ struct Online {
     unconnected_play: HashMap<AppId, (u64, bool)>,
     /// The running download was paused because the connection dropped.
     auto_paused: bool,
+    /// Automatic downloads are allowed (the "Automatic updates" setting). When
+    /// off, downloads aren't resumed by themselves on startup.
+    auto_downloads: bool,
     /// The offline cache needs writing; when it was last written.
     cache_dirty: bool,
     cache_saved: std::time::Instant,
@@ -478,6 +481,7 @@ async fn online(
         persona_state: PersonaState::Online,
         unconnected_play: HashMap::new(),
         auto_paused: false,
+        auto_downloads: true,
         cache_dirty: false,
         cache_saved: std::time::Instant::now(),
         cloud_flushing: Default::default(),
@@ -894,6 +898,14 @@ async fn online(
                     st.with_progress(app_id, |p| p.paused.store(true, std::sync::atomic::Ordering::Relaxed));
                 }
                 Some(Command::ResumeDownload { app_id }) => st.with_progress(app_id, |p| p.paused.store(false, std::sync::atomic::Ordering::Relaxed)),
+                Some(Command::SetAutoDownloads(on)) => {
+                    st.auto_downloads = on;
+                    // Turned back on: pick up anything saved and get it going
+                    // (restore_downloads skips anything already in flight).
+                    if on {
+                        st.restore_downloads(sink, &dl_tx);
+                    }
+                }
                 Some(Command::CancelDownload { app_id }) => {
                     st.queue.retain(|q| q.app_id != app_id);
                     st.with_progress(app_id, |p| p.cancel.store(true, std::sync::atomic::Ordering::Relaxed));
@@ -1557,6 +1569,13 @@ impl Online {
     }
 
     fn restore_downloads(&mut self, sink: &Sink, done: &mpsc::UnboundedSender<(AppId, Result<String, String>)>) {
+        // With automatic downloads off, don't resume by ourselves on startup;
+        // the saved list stays on disk and comes back when they're turned on
+        // again (or the player starts the game).
+        if !self.auto_downloads {
+            tracing::info!("automatic downloads are off; not resuming saved downloads");
+            return;
+        }
         let Ok(text) = std::fs::read_to_string(self.downloads_path()) else { return };
         let Ok(list) = serde_json::from_str::<Vec<crate::download::InstallRequest>>(&text) else { return };
         for req in list {

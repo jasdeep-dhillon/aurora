@@ -155,6 +155,9 @@ pub enum Command {
     PauseDownload { app_id: AppId },
     ResumeDownload { app_id: AppId },
     CancelDownload { app_id: AppId },
+    /// Whether downloads may resume by themselves on startup ("Automatic
+    /// updates"). Sent at launch and whenever the setting changes.
+    SetAutoDownloads(bool),
     /// Measure every download region from this PC.
     ProbeRegions,
     /// Download from this Steam region (`None` = automatic), or prefer one
