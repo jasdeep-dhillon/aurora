@@ -688,9 +688,9 @@ async fn online(
                     let _ = st.launch(app_id, &install_dir, &args, sink, &exit_tx);
                 }
                 Some(Command::ProbeRegions) => {
-                    let sink = sink.clone();
+                    let (sink, root) = (sink.clone(), st.steam_root.clone());
                     tokio::spawn(async move {
-                        sink(Event::Regions(crate::regions::probe().await));
+                        sink(Event::Regions(crate::regions::probe(root).await));
                     });
                 }
                 Some(Command::DownloadRegion { cell_id, host }) => {

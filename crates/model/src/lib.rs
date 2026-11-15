@@ -704,7 +704,8 @@ pub struct SteamCollection {
     pub dynamic: bool,
 }
 
-/// A Steam download region with the connection time measured from this PC.
+/// A Steam download region with the download speed (and connection time)
+/// measured from this PC.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DownloadRegion {
     /// 0 for a partner CDN (pick it by `host`).
@@ -716,11 +717,24 @@ pub struct DownloadRegion {
     pub load: u32,
     /// Best TCP connect time; `None` if unreachable.
     pub ping_ms: Option<u32>,
+    /// Measured download speed in KB/s (one real game chunk); 0 if that
+    /// download failed, `None` when it wasn't measured.
+    #[serde(default)]
+    pub speed_kbps: Option<u32>,
 }
 
 impl DownloadRegion {
-    /// Rough download speed from ping and load: 0 slow .. 3 fastest.
+    /// Download speed, 0 slow .. 3 fastest: measured when possible, else
+    /// guessed from ping and load.
     pub fn speed_tier(&self) -> u8 {
+        if let Some(kbps) = self.speed_kbps {
+            return match kbps {
+                k if k >= 30_000 => 3,
+                k if k >= 10_000 => 2,
+                k if k >= 3_000 => 1,
+                _ => 0,
+            };
+        }
         let base: u8 = match self.ping_ms {
             Some(p) if p < 30 => 3,
             Some(p) if p < 80 => 2,

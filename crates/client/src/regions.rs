@@ -1,5 +1,10 @@
-//! Download regions: every Steam content-server region, with a measured
-//! connection time from this PC, sorted fastest first.
+//! Download regions: every Steam content-server region, with the download
+//! speed measured from this PC, sorted fastest first.
+//!
+//! Speed, not ping: the regions with the shortest connection times (and the
+//! partner CDNs) each download the same real game chunk, one after another,
+//! and are ranked by how fast that went. The chunk comes from a manifest in
+//! Steam's `depotcache`; without one, the list falls back to ping order.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -48,9 +53,53 @@ fn code(host: &str) -> Option<String> {
     (letters.len() >= 3).then_some(letters.to_lowercase())
 }
 
-/// Look up every region and time a connection to one server in each.
-pub async fn probe() -> Vec<model::DownloadRegion> {
-    let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap_or_default();
+/// How many of the lowest-ping regions get a speed test (CDNs always do).
+const SPEED_TESTS: usize = 10;
+
+/// A chunk to test with: (depot, sha, compressed size), between 256 KB and
+/// 4 MB, the biggest found in the first manifests of `<steam_root>/depotcache`.
+fn test_chunk(steam_root: &std::path::Path) -> Option<(u32, Vec<u8>, u32)> {
+    let mut files: Vec<_> = std::fs::read_dir(steam_root.join("depotcache")).ok()?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "manifest")).collect();
+    files.sort();
+    let mut best: Option<(u32, Vec<u8>, u32)> = None;
+    for path in files.iter().take(40) {
+        let Some(depot) = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.split('_').next()).and_then(|d| d.parse().ok()) else { continue };
+        let Some(m) = std::fs::read(path).ok().and_then(|b| depot::Manifest::parse(&b).ok()) else { continue };
+        for c in m.files.iter().flat_map(|f| &f.chunks) {
+            if (256 << 10..=4 << 20).contains(&c.compressed) && best.as_ref().is_none_or(|b| c.compressed > b.2) {
+                best = Some((depot, c.sha.clone(), c.compressed));
+            }
+        }
+        if best.as_ref().is_some_and(|b| b.2 >= 1 << 20) {
+            break;
+        }
+    }
+    best
+}
+
+/// KB/s for downloading the test chunk from `host`, best of two on the same
+/// connection (the first one also pays for TLS and TCP slow start); 0 if
+/// the server didn't deliver it.
+async fn speed(http: &reqwest::Client, host: &str, chunk: &(u32, Vec<u8>, u32)) -> u32 {
+    let hex: String = chunk.1.iter().map(|b| format!("{b:02x}")).collect();
+    let url = format!("https://{host}/depot/{}/chunk/{hex}", chunk.0);
+    let mut best = 0;
+    for _ in 0..2 {
+        let start = Instant::now();
+        let got = tokio::time::timeout(Duration::from_secs(8), async { http.get(&url).send().await?.error_for_status()?.bytes().await }).await;
+        let Ok(Ok(body)) = got else { break };
+        if (body.len() as u32) < chunk.2 / 2 {
+            break;
+        }
+        best = best.max((body.len() as f64 / 1024.0 / start.elapsed().as_secs_f64().max(0.001)) as u32);
+    }
+    best
+}
+
+/// Look up every region, time a connection to one server in each, then
+/// measure download speed from the closest ones.
+pub async fn probe(steam_root: Option<std::path::PathBuf>) -> Vec<model::DownloadRegion> {
+    let http = reqwest::Client::builder().user_agent("Valve/Steam HTTP Client 1.0").timeout(Duration::from_secs(10)).build().unwrap_or_default();
     // 1) Which regions exist.
     let mut found: BTreeMap<u32, (String, u32)> = BTreeMap::new(); // cell -> (host, load)
     let mut cdns: BTreeMap<String, u32> = BTreeMap::new(); // partner CDN host -> load
@@ -104,11 +153,30 @@ pub async fn probe() -> Vec<model::DownloadRegion> {
         }
         let code = code(&host).unwrap_or_default();
         let name = cdn.unwrap_or_else(|| city(&code));
-        model::DownloadRegion { cell_id: cell, name, code, host, load, ping_ms: best }
+        model::DownloadRegion { cell_id: cell, name, code, host, load, ping_ms: best, speed_kbps: None }
     }))
     .await;
     let mut out: Vec<model::DownloadRegion> = timed;
     out.sort_by_key(|r| (r.ping_ms.unwrap_or(u32::MAX), r.load));
+    // 3) Download speed, one server at a time so they don't share the line.
+    let chunk = match steam_root {
+        Some(root) => tokio::task::spawn_blocking(move || test_chunk(&root)).await.ok().flatten(),
+        None => None,
+    };
+    if let Some(chunk) = &chunk {
+        let mut tested = 0;
+        for r in out.iter_mut().filter(|r| r.ping_ms.is_some()) {
+            if r.cell_id != 0 && tested >= SPEED_TESTS {
+                continue;
+            }
+            tested += usize::from(r.cell_id != 0);
+            r.speed_kbps = Some(speed(&http, &r.host, chunk).await);
+        }
+        tracing::info!("download regions: speed-tested with a {} KB chunk of depot {}", chunk.2 / 1024, chunk.0);
+        // Measured ones first, fastest first; then the untested ones in ping
+        // order; servers that failed the test last.
+        out.sort_by_key(|r| (r.speed_kbps == Some(0), r.speed_kbps.is_none(), std::cmp::Reverse(r.speed_kbps.unwrap_or(0))));
+    }
     // One entry per city: keep the fastest.
     let mut seen = std::collections::HashSet::new();
     out.retain(|r| seen.insert(r.name.clone()));

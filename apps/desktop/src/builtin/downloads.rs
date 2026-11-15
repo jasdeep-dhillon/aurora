@@ -445,7 +445,7 @@ impl Downloads {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(w::text_semibold(t!("Download region"), 14.5, t.text));
-                    ui.label(w::text(t!("Measured from this PC: the closest servers usually download fastest."), 12.5, t.text_dim));
+                    ui.label(w::text(t!("Measured from this PC: each region downloads a piece of a real game, fastest first."), 12.5, t.text_dim));
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add_enabled_ui(!self.probing, |ui| {
@@ -459,7 +459,7 @@ impl Downloads {
             ui.add_space(8.0);
             let mut pick: Option<String> = None;
             let current = self.settings.region.clone();
-            let mut option = |ui: &mut Ui, id: String, name: String, ping: Option<u32>, tier: Option<u8>| {
+            let mut option = |ui: &mut Ui, id: String, name: String, ping: Option<u32>, speed: Option<u32>, tier: Option<u8>| {
                 let on = current == id;
                 let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
                 if on || resp.hovered() {
@@ -478,7 +478,7 @@ impl Downloads {
                         1 => (t!("Average"), t.away),
                         _ => (t!("Slow"), t.text_faint),
                     };
-                    // Speed bars + label, then ping.
+                    // Speed bars + label, then the measured speed (or ping).
                     let x = r.right() - 200.0;
                     for i in 0..4u8 {
                         let bar = Rect::from_min_size(egui::pos2(x + i as f32 * 6.0, r.center().y + 5.0 - (i as f32 + 1.0) * 3.0), vec2(4.0, (i as f32 + 1.0) * 3.0));
@@ -486,17 +486,19 @@ impl Downloads {
                     }
                     ui.painter().text(egui::pos2(x + 30.0, r.center().y), egui::Align2::LEFT_CENTER, label, w::font(12.5), color);
                 }
-                let ping_text = match ping {
-                    Some(ms) => format!("{ms} ms"),
-                    None if tier.is_some() => t!("unreachable").to_string(),
-                    None => String::new(),
+                let ping_text = match (speed, ping) {
+                    (Some(0), _) => t!("didn't download").to_string(),
+                    (Some(kb), _) => format!("{:.1} MB/s", kb as f32 / 1024.0),
+                    (None, Some(ms)) => format!("{ms} ms"),
+                    (None, None) if tier.is_some() => t!("unreachable").to_string(),
+                    (None, None) => String::new(),
                 };
                 ui.painter().text(egui::pos2(r.right() - 12.0, r.center().y), egui::Align2::RIGHT_CENTER, ping_text, w::font(12.5), t.text_dim);
                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     pick = Some(id);
                 }
             };
-            option(ui, "auto".into(), t!("Automatic (recommended)").to_string(), None, None);
+            option(ui, "auto".into(), t!("Automatic (recommended)").to_string(), None, None, None);
             match &self.regions {
                 None => {
                     ui.horizontal(|ui| {
@@ -508,7 +510,7 @@ impl Downloads {
                     // The whole list, fastest first (no tiny scroll box).
                     for r in list {
                         let id = if r.cell_id == 0 { format!("host:{}", r.host) } else { r.cell_id.to_string() };
-                        option(ui, id, r.name.clone(), r.ping_ms, Some(r.speed_tier()));
+                        option(ui, id, r.name.clone(), r.ping_ms, r.speed_kbps, Some(r.speed_tier()));
                     }
                 }
             }
