@@ -38,6 +38,11 @@ pub fn mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
     if let Some(ac) = anti_cheat(app, install_dir) {
         return LaunchMode::OfficialSteam { anti_cheat: ac };
     }
+    // Steam DRM checks with Valve's client before the game even starts
+    // ("Application load error 3:0000065432" with ours); only Steam can run it.
+    if launch_exe(app, install_dir).is_some_and(|exe| has_steam_drm(&exe)) {
+        return LaunchMode::OfficialSteam { anti_cheat: STEAM_DRM.into() };
+    }
     // Linux: SteamInRust starts the game itself, natively or with Proton.
     // The official client only for anti-cheat (above), when the player asks
     // for it, or when there's no way to run the game here.
@@ -164,6 +169,45 @@ fn executable(app: &OwnedApp, install_dir: &Path) -> Option<PathBuf> {
     Some(install_dir.join(normalize(&opt.executable)))
 }
 
+/// What [`LaunchMode::OfficialSteam`] names for DRM-wrapped games.
+pub const STEAM_DRM: &str = "Steam DRM";
+
+/// The program Play starts (on Linux, the one the plan picked).
+fn launch_exe(app: &OwnedApp, install_dir: &Path) -> Option<PathBuf> {
+    #[cfg(not(windows))]
+    return linux::plan(app, install_dir).ok().map(|p| p.exe(install_dir));
+    #[allow(unreachable_code)]
+    executable(app, install_dir)
+}
+
+/// Wrapped with Steam's DRM (SteamStub), which adds a `.bind` section to the
+/// executable.
+fn has_steam_drm(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let read = || -> Option<bool> {
+        let mut f = std::fs::File::open(path).ok()?;
+        let mut mz = [0u8; 64];
+        f.read_exact(&mut mz).ok()?;
+        if &mz[..2] != b"MZ" {
+            return None;
+        }
+        let pe = u32::from_le_bytes(mz[60..64].try_into().ok()?) as u64;
+        f.seek(SeekFrom::Start(pe)).ok()?;
+        let mut hdr = [0u8; 24];
+        f.read_exact(&mut hdr).ok()?;
+        if &hdr[..4] != b"PE\0\0" {
+            return None;
+        }
+        let sections = u16::from_le_bytes([hdr[6], hdr[7]]) as usize;
+        let optional = u16::from_le_bytes([hdr[20], hdr[21]]) as i64;
+        f.seek(SeekFrom::Current(optional)).ok()?;
+        let mut table = vec![0u8; sections.min(96) * 40];
+        f.read_exact(&mut table).ok()?;
+        Some(table.chunks(40).any(|s| &s[..8] == b".bind\0\0\0"))
+    };
+    read().unwrap_or(false)
+}
+
 /// 64-bit Windows executable? `None` if unreadable or not a PE file.
 fn pe_is_64bit(path: &Path) -> Option<bool> {
     use std::io::{Read, Seek, SeekFrom};
@@ -225,11 +269,21 @@ pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, extra_args: &s
         cmd.env(crate::ipc::protocol::ENV_LOG, log);
     }
     // Proton: a Steam folder whose legacycompat/ DLLs are ours, which Proton
-    // copies into the prefix (no in-game overlay under Wine yet).
+    // copies into the prefix. Proton's Wine also swaps any "steamclient64"
+    // the game loads for its own bridge to the Steam client (lsteamclient)
+    // unless PROTON_DISABLE_LSTEAMCLIENT is set. That bridge is also what
+    // writes the registry entry naming the DLL, so a prefix without it yet
+    // keeps the bridge for this one launch. No in-game overlay under Wine yet.
     #[cfg(not(windows))]
     {
         let root = local::find_steam_root().ok_or("Steam Play needs a Steam install for Proton")?;
         cmd.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", linux::client_shim(&root)?).env("STEAMINRUST_NO_INGAME_OVERLAY", "1");
+        let user_reg = local::compat::compat_data(install_dir, app.app_id).map(|d| d.join("pfx").join("user.reg"));
+        if user_reg.and_then(|p| std::fs::read_to_string(p).ok()).is_some_and(|r| r.contains("\"SteamClientDll64\"")) {
+            cmd.env("PROTON_DISABLE_LSTEAMCLIENT", "1");
+        } else {
+            tracing::info!("{}: new Proton prefix, Steam features from our steamclient from the next launch", app.name);
+        }
     }
     cmd.spawn().map_err(|e| format!("could not start {}: {e}", app.name))
 }
@@ -1337,6 +1391,40 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal PE file with the given section names.
+    fn pe_with_sections(names: &[&str]) -> Vec<u8> {
+        let mut f = vec![0u8; 64];
+        f[..2].copy_from_slice(b"MZ");
+        f[60..64].copy_from_slice(&64u32.to_le_bytes());
+        f.extend_from_slice(b"PE\0\0");
+        let mut coff = [0u8; 20];
+        coff[..2].copy_from_slice(&0x8664u16.to_le_bytes());
+        coff[2..4].copy_from_slice(&(names.len() as u16).to_le_bytes());
+        coff[16..18].copy_from_slice(&240u16.to_le_bytes());
+        f.extend_from_slice(&coff);
+        f.extend(std::iter::repeat_n(0u8, 240));
+        for n in names {
+            let mut s = [0u8; 40];
+            s[..n.len()].copy_from_slice(n.as_bytes());
+            f.extend_from_slice(&s);
+        }
+        f
+    }
+
+    #[test]
+    fn finds_steam_drm_section() {
+        let dir = std::env::temp_dir().join(format!("sir-drm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (wrapped, plain) = (dir.join("wrapped.exe"), dir.join("plain.exe"));
+        std::fs::write(&wrapped, pe_with_sections(&[".text", ".rdata", ".bind"])).unwrap();
+        std::fs::write(&plain, pe_with_sections(&[".text", ".rdata", ".binder"])).unwrap();
+        assert!(has_steam_drm(&wrapped));
+        assert!(!has_steam_drm(&plain));
+        assert!(!has_steam_drm(&dir.join("missing.exe")));
+        assert_eq!(pe_is_64bit(&wrapped), Some(true));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn splits_quoted_args() {
