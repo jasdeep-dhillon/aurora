@@ -10,7 +10,8 @@ on:
 
 jobs:
   linux:
-    runs-on: ubuntu-24.04
+    # The oldest supported runner: binaries need the glibc they're built on.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -33,6 +34,19 @@ jobs:
       # DRM games); tests for the crates that are platform-neutral.
       - name: Build
         run: cargo build --release --locked -p steam-rs -p steamhost
+
+      # Ubuntu 22.04 has glibc 2.35, so the binaries also start on older
+      # distros (Ubuntu 22.04, Mint 21, Debian 12). Fail if one needs newer.
+      - name: Check the glibc the binaries need
+        run: |
+          max=2.35
+          for f in target/release/steam-rs target/release/steamhost; do
+            need=$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n1)
+            echo "$f needs glibc $need"
+            if [ "$(printf '%s\n%s\n' "$need" "$max" | sort -V | tail -n1)" != "$max" ]; then
+              echo "::error::$f needs glibc $need, newer than $max"; exit 1
+            fi
+          done
 
       - name: Test
         run: cargo test --release --locked -p i18n -p ui -p vdf -p model -p store
