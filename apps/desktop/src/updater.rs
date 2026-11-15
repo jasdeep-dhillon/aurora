@@ -14,7 +14,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use ui::{Theme, icons, widgets as w};
 
-const REPO: &str = "madonchik123/SteamInRust";
+const REPO: &str = "mollie2999/SteamOnRust-Linux";
 const EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[derive(Clone, Debug)]

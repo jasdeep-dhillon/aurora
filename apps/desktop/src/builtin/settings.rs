@@ -612,7 +612,7 @@ fn about(ui: &mut Ui, t: &Theme) {
         });
         ui.add_space(10.0);
         ui.label(w::text(t!("Not affiliated with Valve. Steam is a trademark of Valve Corporation."), 12.5, t.text_faint));
-        ui.label(w::text(t!("Fonts: Inter (OFL). Icons: Phosphor (MIT). Protocol definitions: SteamTracking/Protobufs."), 12.5, t.text_faint));
+        ui.label(w::text(t!("Fonts: Geist and Inter (OFL). Icons: Phosphor (MIT). Protocol definitions: SteamTracking/Protobufs."), 12.5, t.text_faint));
         let dir = client::store::config_dir();
         ui.add_space(10.0);
         ui.horizontal(|ui| {

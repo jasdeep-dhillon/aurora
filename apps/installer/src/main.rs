@@ -52,10 +52,10 @@ fn main() -> eframe::Result {
     let icon = Arc::new(egui::IconData { rgba: ui::brand::icon_rgba(256), width: 256, height: 256 });
     let viewport = match mode {
         // Steam's updater: a small borderless dark window.
-        Mode::Update => egui::ViewportBuilder::default().with_title("Updating SteamInRust").with_inner_size([420.0, 150.0]).with_resizable(false).with_decorations(false).with_icon(icon),
+        Mode::Update => egui::ViewportBuilder::default().with_title(format!("Updating {}", i18n::BRAND)).with_inner_size([420.0, 150.0]).with_resizable(false).with_decorations(false).with_icon(icon),
         // The wizard: a normal window with the Windows title bar.
         _ => egui::ViewportBuilder::default()
-            .with_title(if mode == Mode::Uninstall { "SteamInRust Uninstall" } else { "SteamInRust Setup" })
+            .with_title(format!("{} {}", i18n::BRAND, if mode == Mode::Uninstall { "Uninstall" } else { "Setup" }))
             .with_inner_size([500.0, 390.0])
             .with_resizable(false)
             .with_maximize_button(false)

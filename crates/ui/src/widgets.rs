@@ -770,19 +770,10 @@ pub fn progress(ui: &mut Ui, t: &Theme, value: f32, width: f32) {
     ui.painter().rect_filled(fill, CornerRadius::same(3), t.accent);
 }
 
-/// The app mark: a diamond drawn as a shape.
+/// The Aurora mark, tinted with the theme's text color.
 pub fn logo(ui: &mut Ui, t: &Theme, size: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    if let Some(uri) = crate::brand::logo_uri() {
-        egui::Image::new(uri).tint(t.text).paint_at(ui, rect);
-        return resp;
-    }
-    let c = rect.center();
-    let r = size / 2.0;
-    let pts = |s: f32| vec![c - vec2(0.0, s), c + vec2(s, 0.0), c + vec2(0.0, s), c - vec2(s, 0.0)];
-    ui.painter().add(egui::Shape::convex_polygon(pts(r), t.accent, Stroke::NONE));
-    ui.painter().add(egui::Shape::convex_polygon(pts(r * 0.62), t.accent_2, Stroke::NONE));
-    ui.painter().add(egui::Shape::convex_polygon(pts(r * 0.26), t.bg, Stroke::NONE));
+    egui::Image::from_bytes(crate::brand::LOGO_URI, crate::brand::LOGO_SVG).tint(t.text).paint_at(ui, rect);
     resp
 }
 

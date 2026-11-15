@@ -367,7 +367,7 @@ fn keep_ticking(app: &mut SteamApp, ctx: &egui::Context) {
     }
     let app = AppPtr(app);
     let builder = egui::ViewportBuilder::default()
-        .with_title("SteamInRust overlay timer")
+        .with_title(format!("{} overlay timer", i18n::BRAND))
         .with_decorations(false)
         .with_transparent(true)
         .with_taskbar(false)
@@ -437,7 +437,7 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
     // went black). One pixel short keeps it a normal see-through window.
     let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1920.0, 1080.0));
     let builder = egui::ViewportBuilder::default()
-        .with_title("SteamInRust Overlay")
+        .with_title(format!("{} Overlay", i18n::BRAND))
         .with_decorations(false)
         .with_transparent(true)
         .with_always_on_top()

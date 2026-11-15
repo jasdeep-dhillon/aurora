@@ -227,9 +227,10 @@ impl Theme {
         v.selection.bg_fill = self.accent.linear_multiply(0.35);
         v.selection.stroke = Stroke::new(1.0, self.accent);
         v.text_cursor.stroke = Stroke::new(2.0, self.accent);
-        if self.dark {
-            // egui's dark default (2c - c²) thickens every edge pixel, which
-            // reads as jagged at 1x; a gentle gamma keeps text smooth.
+        if self.dark && cfg!(target_os = "linux") {
+            // Linux: egui's dark default (2c - c²) thickens every edge pixel,
+            // which reads as jagged at 1x; a gentle gamma keeps text smooth.
+            // Other systems keep egui's defaults.
             v.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Gamma(0.75);
         }
 
@@ -304,6 +305,10 @@ const PHOSPHOR: &[u8] = include_bytes!("../assets/Phosphor.ttf");
 /// so edges are smoothly anti-aliased instead of crunchy at 1x.
 fn text_tweak() -> egui::epaint::text::FontTweak {
     use egui::epaint::text::{FontTweak, HintingTarget, SmoothHinting};
+    if !cfg!(target_os = "linux") {
+        // Only Linux gets the tuned text; elsewhere egui's defaults.
+        return FontTweak::default();
+    }
     FontTweak {
         hinting: Some(true),
         hinting_target: HintingTarget::Smooth(SmoothHinting { light: true, symmetric_rendering: true, preserve_linear_metrics: true }),
@@ -334,7 +339,8 @@ pub fn install_fonts_with(ctx: &egui::Context, lcd: bool) {
     }
     // Icons are drawn from their outlines unhinted, exactly as the SVGs
     // would be: the auto-hinter otherwise bends them onto the pixel grid.
-    let icons = egui::FontData::from_static(PHOSPHOR).tweak(FontTweak { hinting: Some(false), ..Default::default() }).lcd(lcd);
+    let icon_tweak = if cfg!(target_os = "linux") { FontTweak { hinting: Some(false), ..Default::default() } } else { FontTweak::default() };
+    let icons = egui::FontData::from_static(PHOSPHOR).tweak(icon_tweak).lcd(lcd);
     fonts.font_data.insert("phosphor".into(), Arc::new(icons));
     // System fonts for scripts Geist and Inter don't cover, so game names in Chinese,
     // Japanese, Korean, Thai, Arabic, Hindi… show instead of empty boxes.

@@ -139,7 +139,7 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context) {
         (pos2((m.anchor.x - size.x).max(0.0), (m.anchor.y - size.y).max(0.0)), size)
     };
     let builder = ViewportBuilder::default()
-        .with_title("SteamInRust")
+        .with_title(i18n::BRAND)
         .with_decorations(false)
         .with_always_on_top()
         .with_taskbar(false)

@@ -84,7 +84,7 @@ fn load(src: &str) -> HashMap<String, &'static str> {
 }
 
 /// The name the interface shows for the app.
-pub const BRAND: &str = "Steam";
+pub const BRAND: &str = "Aurora";
 
 /// "SteamInRust" in interface text becomes [`BRAND`]. Each changed string is
 /// built once and kept (there are only so many labels).

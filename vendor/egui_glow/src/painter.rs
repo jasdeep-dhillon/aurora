@@ -200,11 +200,13 @@ impl Painter {
             )?;
             let frag_src = |declaration: &str, dual_source: bool| {
                 format!(
-                    "{}\n#define NEW_SHADER_INTERFACE {}\n#define DITHERING {}\n#define DUAL_SOURCE {}\n{}\n{}",
+                    "{}\n#define NEW_SHADER_INTERFACE {}\n#define DITHERING {}\n#define DUAL_SOURCE {}\n#define LCD_TEXT {}\n{}\n{}",
                     declaration,
                     shader_version.is_new_shader_interface() as i32,
                     dithering as i32,
                     dual_source as i32,
+                    // Only Linux has LCD text; elsewhere exactly upstream's shader.
+                    cfg!(target_os = "linux") as i32,
                     shader_prefix,
                     FRAG_SRC
                 )
@@ -225,7 +227,10 @@ impl Painter {
             // text) is core in desktop OpenGL 3.3 / GLSL 3.30. Anywhere else,
             // or if that shader fails to build, LCD texels render as grayscale.
             let gl_version = gl.version();
+            // Linux only: elsewhere the app keeps upstream's rendering
+            // (LCD text is off there too), whatever the GPU driver does.
             let wants_dual_source = !cfg!(target_arch = "wasm32")
+                && cfg!(target_os = "linux")
                 && !gl_version.is_embedded
                 && (gl_version.major, gl_version.minor) >= (3, 3);
             let dual_program = if wants_dual_source {

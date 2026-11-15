@@ -134,8 +134,10 @@ pub struct SteamApp {
 impl SteamApp {
     pub fn new(cc: &eframe::CreationContext<'_>, link: Option<String>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        // Subpixel text unless turned off (e.g. for a BGR or rotated screen).
-        ui::install_fonts_with(&cc.egui_ctx, std::env::var("STEAMRS_LCD").as_deref() != Ok("0"));
+        // Subpixel text on Linux unless turned off (e.g. for a BGR or rotated
+        // screen). Other systems keep grayscale text: only Linux gets the
+        // per-channel blending (see vendor/egui_glow).
+        ui::install_fonts_with(&cc.egui_ctx, cfg!(target_os = "linux") && std::env::var("STEAMRS_LCD").as_deref() != Ok("0"));
         let mut prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
         prefs.theme = prefs.theme.refreshed();
         // `--lang=en` / `--lang=ru` overrides the saved choice (screenshots, testing).

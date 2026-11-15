@@ -282,7 +282,7 @@
 "Open" = "Открыть"
 "A native Steam client written in Rust." = "Нативный клиент Steam на Rust."
 "Not affiliated with Valve. Steam is a trademark of Valve Corporation." = "Не связано с Valve. Steam — товарный знак Valve Corporation."
-"Fonts: Inter (OFL). Icons: Phosphor (MIT). Protocol definitions: SteamTracking/Protobufs." = "Шрифты: Inter (OFL). Иконки: Phosphor (MIT). Описания протокола: SteamTracking/Protobufs."
+"Fonts: Geist and Inter (OFL). Icons: Phosphor (MIT). Protocol definitions: SteamTracking/Protobufs." = "Шрифты: Geist и Inter (OFL). Иконки: Phosphor (MIT). Описания протокола: SteamTracking/Protobufs."
 "Data folder: {path}" = "Папка данных: {path}"
 "While a game you started from SteamInRust is running, press Shift+Tab to open the overlay: friends, quick chat and notes. It's a separate always-on-top window that never touches the game's process, so it's safe with anti-cheat. It shows over windowed and borderless games; exclusive fullscreen hides it." = "Пока запущена игра, открытая через SteamInRust, нажмите Shift+Tab: друзья, быстрый чат и заметки. Это отдельное окно поверх всех, оно не вмешивается в процесс игры и безопасно для античитов. Работает в оконном и полноэкранном режиме без рамки; в эксклюзивном полноэкранном режиме не видно."
 "Close to tray" = "Сворачивать в трей при закрытии"

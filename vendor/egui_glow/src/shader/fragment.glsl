@@ -10,9 +10,11 @@
 
 uniform sampler2D u_sampler;
 
+#if LCD_TEXT
 // 1 while drawing with the font atlas, whose LCD glyph texels hold per-subpixel
 // coverage as (r, g, b, 0) (see epaint `FontData::lcd`).
 uniform int u_font_atlas;
+#endif
 
 #if NEW_SHADER_INTERFACE
     in vec4 v_rgba_in_gamma;
@@ -56,10 +58,12 @@ vec3 dither_interleaved(vec3 rgb, float levels) {
 void main() {
     vec4 texture_in_gamma = texture2D(u_sampler, v_tc);
 
+#if LCD_TEXT
     // Premultiplied colors never have color without alpha, so such a texel in
     // the font atlas is LCD subpixel coverage.
     bool lcd = u_font_atlas != 0 && texture_in_gamma.a == 0.0
         && texture_in_gamma.r + texture_in_gamma.g + texture_in_gamma.b > 0.0;
+#endif
 
 #if DUAL_SOURCE
     // dst = src0 + (1 - src1) * dst, per channel.
@@ -76,10 +80,12 @@ void main() {
         blend = vec4(frag_color_gamma.a);
     }
 #else
+#if LCD_TEXT
     if (lcd) {
         // No per-channel blending available: fall back to grayscale coverage.
         texture_in_gamma = vec4(dot(texture_in_gamma.rgb, vec3(1.0 / 3.0)));
     }
+#endif
     // We multiply the colors in gamma space, because that's the only way to get text to look right.
     vec4 frag_color_gamma = v_rgba_in_gamma * texture_in_gamma;
 #endif

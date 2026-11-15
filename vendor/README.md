@@ -22,8 +22,10 @@ looks jagged next to other apps at 1x.
   output for dual-source blending (`GL_ONE_MINUS_SRC1_COLOR`). LCD texels, only
   while drawing with the font atlas (`u_font_atlas`), blend per channel; every
   other pixel blends exactly as before.
-- If dual-source blending is unavailable or that shader fails to build, the
-  original shader is used and LCD texels are drawn as grayscale.
+- Linux only: on Windows and macOS the app keeps upstream's shader and
+  grayscale text. On Linux, if dual-source blending is unavailable or that
+  shader fails to build, the original shader is used and LCD texels are drawn
+  as grayscale.
 
 ## Upgrading egui
 
