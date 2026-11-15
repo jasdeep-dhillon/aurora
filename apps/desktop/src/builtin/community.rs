@@ -353,7 +353,7 @@ impl Community {
                 // Left menu.
                 ui.allocate_ui_with_layout(vec2(220.0, ui.available_height()), Layout::top_down(Align::Min), |ui| {
                     ui.set_width(220.0);
-                    ui.label(w::caption_text(&t, t!("FRIENDS")));
+                    ui.label(w::caption_text(&t, &format!("{}  {}", icons::USERS, w::sentence_case(t!("FRIENDS")))));
                     ui.add_space(4.0);
                     let items = [
                         (FriendsTab::Friends, icons::USER, t!("Your friends"), friends_n),
@@ -403,7 +403,7 @@ impl Community {
 
     fn friends_grid(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, total: usize) {
         ui.horizontal(|ui| {
-            ui.label(w::text_bold(w::sentence_case(t!("YOUR FRIENDS")), 15.0, t.text));
+            ui.label(w::text_bold(format!("{}  {}", icons::USER, w::sentence_case(t!("YOUR FRIENDS"))), 15.0, t.text));
             ui.label(w::text_bold(total.to_string(), 13.0, t.accent));
         });
         ui.add_space(8.0);

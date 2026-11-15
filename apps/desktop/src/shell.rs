@@ -901,7 +901,8 @@ pub fn status_color(t: &Theme, p: &Persona) -> egui::Color32 {
     }
     match p.state {
         PersonaState::Offline | PersonaState::Invisible => t.text_faint,
-        PersonaState::Away | PersonaState::Snooze | PersonaState::Busy => t.away,
+        PersonaState::Busy => t.danger,
+        PersonaState::Away | PersonaState::Snooze => t.away,
         _ => t.online,
     }
 }

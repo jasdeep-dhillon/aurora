@@ -72,7 +72,7 @@ impl Theme {
             play: hex(0x4CAF50),
             online: hex(0x57B8F7),
             in_game: hex(0x4CD18A),
-            away: hex(0x7FA6C4),
+            away: hex(0xE8B04B),
             danger: hex(0xE64A35),
             discount: hex(0x4C6B22),
             radius: 9,

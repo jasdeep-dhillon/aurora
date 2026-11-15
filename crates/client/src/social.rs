@@ -139,7 +139,7 @@ pub async fn delete_comment_service(conn: &net::Connection, steam_id: SteamId, c
         gidcomment: Some(comment_id),
         undelete: Some(false),
     };
-    let _: DeleteCommentFromThreadResponse = conn.call("Community.DeleteCommentFromThread#1", &req).await.map_err(|e| e.to_string())?;
+    let _: DeleteCommentFromThreadResponse = conn.call("Community.DeleteCommentFromThread#1", &req).await.map_err(|e| format!("{e} ({e:?})"))?;
     Ok(())
 }
 

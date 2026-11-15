@@ -247,7 +247,7 @@ impl Extension for Inventory {
                 self.listings_page(ui, &t, ctx);
                 return;
             }
-            ui.add_space(12.0);
+            ui.add_space(18.0);
 
             let Some(inv) = ctx.state.inventories.get(&(owner, app, cx)).cloned() else {
                 skeleton_grid(ui, &t);
@@ -266,14 +266,22 @@ impl Extension for Inventory {
                 return;
             }
 
-            // Toolbar: search, quick filters, game filters, prices, sort.
+            // Toolbar in its own panel (apart from the game buttons above):
+            // search | quick filters | tags and prices | sort.
+            let divider = |ui: &mut Ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(1.0, 22.0), Sense::hover());
+                ui.painter().vline(r.center().x, r.y_range(), egui::Stroke::new(1.0, t.surface_hover));
+            };
+            egui::Frame::new().fill(t.surface).corner_radius(t.corner()).inner_margin(Margin::symmetric(12, 10)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                 w::search(ui, &t, &mut self.search, &t!("Search items"), 240.0);
-                ui.add_space(6.0);
+                divider(ui);
                 w::toggle_chip(ui, &t, t!("Tradable"), &mut self.tradable_only);
                 w::toggle_chip(ui, &t, t!("Marketable"), &mut self.marketable_only);
                 w::toggle_chip(ui, &t, t!("Group duplicates"), &mut self.group);
+                divider(ui);
                 let active: usize = self.tags.values().map(|v| v.len()).sum();
                 let label = if active > 0 { format!("{}  {} ({active})", icons::FUNNEL, t!("Filters")) } else { format!("{}  {}", icons::FUNNEL, t!("Filters")) };
                 let r = w::chip(ui, &t, &label, active > 0).on_hover_text(t!("Filter by this game's own item tags"));
@@ -284,12 +292,15 @@ impl Extension for Inventory {
                 if w::chip(ui, &t, &format!("{}  {}", icons::COINS, t!("Show prices")), self.show_prices).on_hover_text(t!("Look up each item's market price (a few per second, so Steam doesn't block it)")).clicked() {
                     self.show_prices = !self.show_prices;
                 }
+                divider(ui);
+                ui.label(w::text(t!("Sort"), 13.0, t.text_faint));
                 w::segmented(ui, &t, &mut self.sort, &[(Sort::Newest, &t!("Newest")), (Sort::Name, &t!("Name")), (Sort::Kind, &t!("Type")), (Sort::Price, &t!("Price"))]);
+            });
             });
             if self.sort == Sort::Price {
                 self.show_prices = true;
             }
-            ui.add_space(12.0);
+            ui.add_space(16.0);
 
             let q = self.search.trim().to_lowercase();
             let prices = &ctx.state.market_prices;
@@ -380,9 +391,10 @@ impl Extension for Inventory {
                         ui.label(w::text(t!("No items match your filters."), 13.5, t.text_faint));
                         return;
                     }
-                    let tile = 96.0;
-                    let gap = 8.0;
-                    let cols = (((grid_w + gap) / (tile + gap)).floor() as usize).max(1);
+                    // Few, large tiles: 6 per row (5 when narrower).
+                    let gap = 12.0;
+                    let cols = if grid_w >= 900.0 { 6 } else if grid_w >= 520.0 { 5 } else { 3 };
+                    let tile = ((grid_w - gap * (cols - 1) as f32) / cols as f32).floor();
                     let rows = items.len().div_ceil(cols);
                     egui::ScrollArea::vertical().id_salt(("inv", owner, app)).auto_shrink([false, false]).show_rows(ui, tile + gap, rows, |ui, range| {
                         for row in range {
@@ -602,11 +614,13 @@ fn item_tile(ui: &mut Ui, t: &Theme, item: &InventoryItem, count: u64, price: Op
 }
 
 fn skeleton_grid(ui: &mut Ui, t: &Theme) {
-    let tile = 96.0;
-    let cols = ((ui.available_width() + 8.0) / (tile + 8.0)).floor().max(1.0) as usize;
-    for _ in 0..3 {
+    // Same layout as the real grid: 6 large tiles per row.
+    let (gap, cols) = (12.0, 6usize);
+    let tile = ((ui.available_width() * 0.75 - gap * (cols - 1) as f32) / cols as f32).floor().max(60.0);
+    for _ in 0..2 {
         ui.horizontal(|ui| {
-            for _ in 0..cols.min(10) {
+            ui.spacing_mut().item_spacing.x = gap;
+            for _ in 0..cols {
                 let (r, _) = ui.allocate_exact_size(vec2(tile, tile), Sense::hover());
                 w::skeleton(ui, t, r, t.corner_small());
             }
