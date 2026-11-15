@@ -1708,3 +1708,5 @@
 "No Steam install found. Install Steam and sign in to it once, then try again." = "Установка Steam не найдена. Установите Steam, войдите в него один раз и повторите попытку."
 "Close the official Steam first if it's open — only one Steam can run at a time." = "Сначала закройте официальный Steam, если он открыт — одновременно может работать только один Steam."
 "This signs in with your own Steam account through an unofficial client; use it at your own risk." = "Вход выполняется с вашей учётной записью Steam через неофициальный клиент; используйте на свой страх и риск."
+"Proton version" = "Версия Proton"
+"Which Proton runs your Windows games (including Steam-DRM games). Automatic follows Steam's own choice per game." = "Какой Proton запускает ваши игры для Windows (включая игры с Steam DRM). «Автоматически» следует выбору самого Steam для каждой игры."

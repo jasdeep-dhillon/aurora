@@ -367,6 +367,35 @@ fn library(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
     if info_row(ui, t, t!("Add a non-Steam game"), "", Some(t!("Open library"))) {
         ctx.navigate("library", None);
     }
+    #[cfg(not(windows))]
+    proton_version(ui, t);
+}
+
+/// Linux: pick which Proton SteamInRust runs Windows games with.
+#[cfg(not(windows))]
+fn proton_version(ui: &mut Ui, t: &Theme) {
+    let builds = client::proton_builds();
+    if builds.is_empty() {
+        return;
+    }
+    ui.add_space(12.0);
+    w::card(t).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(w::text_semibold(t!("Proton version"), 15.0, t.text));
+        ui.add(egui::Label::new(w::text(t!("Which Proton runs your Windows games (including Steam-DRM games). Automatic follows Steam's own choice per game."), 12.5, t.text_dim)).wrap());
+        ui.add_space(6.0);
+        let current = client::proton_override();
+        ui.horizontal_wrapped(|ui| {
+            if w::chip(ui, t, t!("Automatic"), current.is_none()).clicked() {
+                client::set_proton_override(None);
+            }
+            for (name, display) in &builds {
+                if w::chip(ui, t, display, current.as_deref() == Some(name.as_str())).clicked() {
+                    client::set_proton_override(Some(name.clone()));
+                }
+            }
+        });
+    });
 }
 
 fn downloads(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, flags: &SharedFlags) {

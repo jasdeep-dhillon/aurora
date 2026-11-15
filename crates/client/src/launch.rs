@@ -1122,6 +1122,29 @@ fn prefer_official() -> bool {
     PREFER_OFFICIAL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Linux: a Proton/compat tool (its internal name) the player chose in
+/// SteamInRust to run Windows games with, instead of Steam's pick.
+static PROTON_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Force a specific Proton for every Proton launch; `None`/empty = automatic.
+pub fn set_proton_override(name: Option<String>) {
+    *PROTON_OVERRIDE.lock().unwrap() = name.filter(|s| !s.is_empty());
+}
+
+/// The forced Proton's internal name, if the player chose one.
+pub fn proton_override() -> Option<String> {
+    PROTON_OVERRIDE.lock().unwrap().clone()
+}
+
+/// The installed Proton/compat tools as (internal name, display name), for a
+/// chooser. Empty off Linux or without a Steam install.
+pub fn proton_builds() -> Vec<(String, String)> {
+    match local::find_steam_root() {
+        Some(root) => local::compat::compat_tools(&root).into_iter().map(|t| (t.name, t.display)).collect(),
+        None => Vec::new(),
+    }
+}
+
 /// Linux: the Windows user folder in the Proton prefix of a game that runs
 /// with Proton (for Steam Cloud), once the prefix exists.
 pub fn proton_user_dir(app: &OwnedApp, install_dir: &Path) -> Option<PathBuf> {
@@ -1174,7 +1197,12 @@ mod linux {
             .or_else(|| app.launch.iter().filter(usable).find(|o| o.os_list.is_empty()))
             .ok_or_else(|| format!("{} has no launch option for this system", app.name))?;
         let root = root.ok_or("Steam Play needs a Steam install for Proton")?;
-        let tool = compat::tool_for(&root, app.app_id).ok_or("No Proton is installed. Install one in Steam (Library → Tools → Proton).")?;
+        // The player's choice in SteamInRust wins, then Steam's mapping, then
+        // the best installed Proton.
+        let tool = super::proton_override()
+            .and_then(|name| compat::compat_tools(&root).into_iter().find(|t| t.name.eq_ignore_ascii_case(&name)))
+            .or_else(|| compat::tool_for(&root, app.app_id))
+            .ok_or("No Proton is installed. Install one in Steam (Library → Tools → Proton).")?;
         if !install_dir.join(normalize(&windows.executable)).exists() {
             return Err(format!("{} isn't installed completely", app.name));
         }

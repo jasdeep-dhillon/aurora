@@ -46,6 +46,10 @@ pub struct Prefs {
     /// start through a background Steam instance).
     #[serde(default)]
     pub drm_host_ack: bool,
+    /// Linux: a Proton/compat tool (internal name) chosen to run Windows games
+    /// with, instead of Steam's pick. `None` follows Steam's choice.
+    #[serde(default)]
+    pub proton_override: Option<String>,
 }
 
 fn yes() -> bool {
@@ -75,6 +79,7 @@ impl Default for Prefs {
             favorite_friends: Vec::new(),
             scroll_speed: 2.0,
             drm_host_ack: false,
+            proton_override: None,
         }
     }
 }
@@ -188,6 +193,7 @@ impl SteamApp {
             scroll_speed: prefs.scroll_speed,
             drm_host_ack: prefs.drm_host_ack,
         }));
+        client::set_proton_override(prefs.proton_override.clone());
         let mut registry = crate::builtin::registry(rt.handle().clone(), cc.egui_ctx.clone(), flags.clone());
         for id in &prefs.disabled {
             registry.set_enabled(id, false);
@@ -618,6 +624,7 @@ impl eframe::App for SteamApp {
             self.prefs.toast_notifications = f.toast_notifications;
             self.prefs.scroll_speed = f.scroll_speed;
             self.prefs.drm_host_ack = f.drm_host_ack;
+            self.prefs.proton_override = client::proton_override();
             if self.prefs.cloud != f.cloud {
                 self.prefs.cloud = f.cloud;
                 self.client.send(Command::CloudSettings { steam_root: Some(self.local.steam_root.clone()), disabled: if f.cloud { vec![] } else { self.state.apps.as_ref().map(|a| a.keys().copied().collect()).unwrap_or_default() } });
