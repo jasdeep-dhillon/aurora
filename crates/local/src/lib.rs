@@ -5,6 +5,8 @@
 
 pub mod manage;
 
+pub mod compat;
+
 use model::{AppId, InstallState, InstalledGame, LocalAccount};
 use std::collections::HashMap;
 use std::fs;

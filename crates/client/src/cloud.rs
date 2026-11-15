@@ -41,6 +41,10 @@ pub struct Target {
     pub steam_root: Option<PathBuf>,
     pub config: Option<CloudConfig>,
     pub cell_id: u32,
+    /// Linux, a game run with Proton: its Windows user folder inside the
+    /// Proton prefix (`…/pfx/drive_c/users/steamuser`), where its Windows
+    /// save locations really are.
+    pub prefix_user: Option<PathBuf>,
 }
 
 impl Target {
@@ -57,6 +61,23 @@ impl Target {
     /// Folder for a Steam root name like "WinMyDocuments" or "%GameInstall%".
     fn root_dir(&self, root: &str) -> Option<PathBuf> {
         let key = root.trim_matches('%').to_lowercase();
+        // A Proton game: Windows folders are inside its prefix.
+        if let Some(u) = &self.prefix_user {
+            let sub = match key.as_str() {
+                "winmydocuments" => Some("Documents"),
+                "winappdatalocal" => Some("AppData/Local"),
+                "winappdataroaming" => Some("AppData/Roaming"),
+                "winappdatalocallow" => Some("AppData/LocalLow"),
+                "winsavedgames" => Some("Saved Games"),
+                "winpictures" => Some("Pictures"),
+                "winvideos" => Some("Videos"),
+                "winmusic" => Some("Music"),
+                _ => None,
+            };
+            if let Some(sub) = sub {
+                return Some(u.join(sub));
+            }
+        }
         let user = directories::UserDirs::new();
         let base = directories::BaseDirs::new();
         let home = base.as_ref().map(|b| b.home_dir().to_path_buf());
@@ -71,6 +92,10 @@ impl Target {
             "winvideos" => user.as_ref()?.video_dir()?.to_path_buf(),
             "winmusic" => user.as_ref()?.audio_dir()?.to_path_buf(),
             "steamclouddocuments" => self.remote_dir(),
+            // Steam's Linux roots, for native Linux games.
+            "linuxhome" => home?,
+            "linuxxdgdatahome" => base.as_ref()?.data_dir().to_path_buf(),
+            "linuxxdgconfighome" => base.as_ref()?.config_dir().to_path_buf(),
             _ => return None,
         })
     }
@@ -153,6 +178,9 @@ fn canonical_root(root: &str) -> String {
         "winappdataroaming" => "WinAppDataRoaming".into(),
         "winappdatalocallow" => "WinAppDataLocalLow".into(),
         "winsavedgames" => "WinSavedGames".into(),
+        "linuxhome" => "LinuxHome".into(),
+        "linuxxdgdatahome" => "LinuxXdgDataHome".into(),
+        "linuxxdgconfighome" => "LinuxXdgConfigHome".into(),
         _ => root.trim_matches('%').to_string(),
     }
 }
@@ -592,7 +620,7 @@ mod tests {
         assert!(glob("*.sav", "slot1.SAV"));
         assert!(glob("save?.dat", "save3.dat"));
         assert!(!glob("*.sav", "slot1.bak"));
-        let t = Target { app_id: 10, steam_id: 76561197960265729, install_dir: PathBuf::from("C:/Games/X"), steam_root: Some(PathBuf::from("C:/Steam")), config: None, cell_id: 0 };
+        let t = Target { app_id: 10, steam_id: 76561197960265729, install_dir: PathBuf::from("C:/Games/X"), steam_root: Some(PathBuf::from("C:/Steam")), config: None, cell_id: 0 , prefix_user: None };
         assert_eq!(t.local_path("%GameInstall%saves/a.sav").unwrap(), PathBuf::from("C:/Games/X").join("saves").join("a.sav"));
         assert_eq!(t.local_path("profile.dat").unwrap(), PathBuf::from("C:/Steam/userdata/1/10/remote/profile.dat"));
         assert_eq!(t.expand("{Steam3AccountID}/x"), "1/x");

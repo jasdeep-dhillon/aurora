@@ -2134,7 +2134,8 @@ impl Online {
 
     fn cloud_target_any(&self, app_id: AppId, install_dir: &std::path::Path) -> Option<crate::cloud::Target> {
         let config = self.apps.get(&app_id)?.cloud.clone()?;
-        Some(crate::cloud::Target { app_id, steam_id: self.me, install_dir: install_dir.to_path_buf(), steam_root: self.steam_root.clone(), config: Some(config), cell_id: self.cell_id })
+        let prefix_user = launch::proton_user_dir(self.apps.get(&app_id)?, install_dir);
+        Some(crate::cloud::Target { app_id, steam_id: self.me, install_dir: install_dir.to_path_buf(), steam_root: self.steam_root.clone(), config: Some(config), cell_id: self.cell_id, prefix_user })
     }
 
     fn launch(

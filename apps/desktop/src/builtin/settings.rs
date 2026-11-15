@@ -403,7 +403,7 @@ fn accessibility(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
 /// value runs off to an end. While dragging it shows a draft value and
 /// applies it on release; a click or the arrow keys apply at once.
 fn zoom_slider(ui: &mut Ui, ctx: &mut Ctx) {
-    let id = egui::Id::new("zoom-slider-draft");
+    let id = egui::Id::unique("zoom-slider-draft");
     let mut zoom: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(ctx.zoom);
     let r = ui.add(egui::Slider::new(&mut zoom, 0.8..=1.6).step_by(0.05).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
     if r.dragged() {

@@ -121,6 +121,8 @@ struct Saved {
     /// Collection chips, the "+ Collection" button and "Add to collection"
     /// (off by default; Settings → Library turns them back on).
     show_collections: bool,
+    /// Linux: start every game through the official Steam client.
+    through_steam: bool,
     /// Kept across restarts so a shortcut still appears if the app was
     /// closed during the download.
     pending_shortcuts: BTreeMap<AppId, std::path::PathBuf>,
@@ -224,6 +226,7 @@ pub struct Library {
     /// Games to put on the desktop once their install finishes.
     collections: Vec<Collection>,
     show_collections: bool,
+    through_steam: bool,
     adv: AdvFilters,
     /// Naming a new collection (with a game to put in it), or renaming one.
     naming: Option<(Option<usize>, String, Option<AppId>)>,
@@ -347,6 +350,13 @@ impl Extension for Library {
     fn settings(&mut self, ui: &mut Ui, ctx: &mut Ctx) -> bool {
         let t = ctx.theme.clone();
         super::settings::switch(ui, &t, t!("Show collections"), t!("Collection filters and the new collection button in the library sidebar, and the Add to collection menu on games."), &mut self.show_collections);
+        if !cfg!(windows) {
+            let before = self.through_steam;
+            super::settings::switch(ui, &t, t!("Start games through the official Steam client"), t!("Off: games start here, natively or with Proton, and only anti-cheat games use Steam. Turn on for games that won't run without Steam."), &mut self.through_steam);
+            if self.through_steam != before {
+                client::launch_through_steam(self.through_steam);
+            }
+        }
         true
     }
 
@@ -359,6 +369,7 @@ impl Extension for Library {
             custom: self.custom.clone(),
             collections: self.collections.clone(),
             show_collections: self.show_collections,
+            through_steam: self.through_steam,
             pending_shortcuts: self.shortcut_after_install.clone(),
         })
         .ok()
@@ -373,6 +384,8 @@ impl Extension for Library {
         self.custom = saved.custom;
         self.collections = saved.collections;
         self.show_collections = saved.show_collections;
+        self.through_steam = saved.through_steam;
+        client::launch_through_steam(self.through_steam);
         self.shortcut_after_install = saved.pending_shortcuts;
     }
 }

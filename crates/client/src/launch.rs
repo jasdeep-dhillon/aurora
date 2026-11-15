@@ -34,11 +34,26 @@ pub fn mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
     if let Some(ac) = anti_cheat(app, install_dir) {
         return LaunchMode::OfficialSteam { anti_cheat: ac };
     }
-    // Our steamclient is a Windows DLL; on Linux the official client runs
-    // every game (native ones in its runtime, Windows ones through Proton).
-    if !cfg!(windows) {
-        return LaunchMode::OfficialSteam { anti_cheat: "Steam for Linux".into() };
+    // Linux: SteamInRust starts the game itself, natively or with Proton.
+    // The official client only for anti-cheat (above), when the player asks
+    // for it, or when there's no way to run the game here.
+    #[cfg(not(windows))]
+    {
+        if prefer_official() {
+            return LaunchMode::OfficialSteam { anti_cheat: "Steam for Linux".into() };
+        }
+        return match linux::plan(app, install_dir) {
+            Ok(p) => LaunchMode::NoSteam { reason: p.describe() },
+            Err(_) => LaunchMode::OfficialSteam { anti_cheat: "Steam for Linux".into() },
+        };
     }
+    #[cfg(windows)]
+    return windows_mode(app, install_dir);
+}
+
+/// Windows: our steamclient DLL when it can serve the game.
+#[cfg(windows)]
+fn windows_mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
     let Some(exe) = executable(app, install_dir) else {
         return LaunchMode::NoSteam { reason: "no launch option for this system".into() };
     };
@@ -208,6 +223,13 @@ pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, extra_args: &s
 }
 
 fn command(app: &OwnedApp, install_dir: &Path, extra_args: &str) -> Result<Command, String> {
+    #[cfg(not(windows))]
+    {
+        let mut cmd = linux::plan(app, install_dir)?.command(app, install_dir);
+        cmd.args(split_args(extra_args));
+        return Ok(cmd);
+    }
+    #[allow(unreachable_code)]
     let opt = app
         .launch
         .iter()
@@ -865,6 +887,139 @@ pub fn restore_login_later() {
     });
 }
 
+// ------------------------------------------------- Linux: native or Proton
+
+static PREFER_OFFICIAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Linux: start every game through the official Steam client (for games
+/// that refuse to run without it). Off by default.
+pub fn set_prefer_official(on: bool) {
+    PREFER_OFFICIAL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn prefer_official() -> bool {
+    PREFER_OFFICIAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Linux: the Windows user folder in the Proton prefix of a game that runs
+/// with Proton (for Steam Cloud), once the prefix exists.
+pub fn proton_user_dir(app: &OwnedApp, install_dir: &Path) -> Option<PathBuf> {
+    #[cfg(not(windows))]
+    {
+        let p = linux::plan(app, install_dir).ok()?;
+        return p.uses_proton().then(|| local::compat::prefix_user_dir(install_dir, app.app_id)).flatten();
+    }
+    #[cfg(windows)]
+    {
+        let _ = (app, install_dir);
+        None
+    }
+}
+
+#[cfg(not(windows))]
+mod linux {
+    use super::{normalize, split_args};
+    use local::compat::{self, CompatTool};
+    use model::{LaunchOption, OwnedApp};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    /// How a game starts here: its executable, and the Proton to run it
+    /// with when it's a Windows program.
+    pub struct Plan {
+        option: LaunchOption,
+        tool: Option<CompatTool>,
+        steam_root: Option<PathBuf>,
+    }
+
+    fn is_windows_exe(o: &LaunchOption) -> bool {
+        o.executable.to_lowercase().ends_with(".exe") || o.executable.to_lowercase().ends_with(".bat")
+    }
+
+    pub fn plan(app: &OwnedApp, install_dir: &Path) -> Result<Plan, String> {
+        let root = local::find_steam_root();
+        let usable = |o: &&LaunchOption| !o.executable.is_empty();
+        let forced = root.as_deref().is_some_and(|r| compat::forced_tool(r, app.app_id));
+        // A Linux build, unless the player forced a compatibility tool in Steam.
+        let native = app.launch.iter().filter(usable).find(|o| o.os_list.split(',').any(|x| x.trim() == "linux") || (o.os_list.is_empty() && !is_windows_exe(o)));
+        if let (Some(o), false) = (native, forced) {
+            return Ok(Plan { option: o.clone(), tool: None, steam_root: root });
+        }
+        let windows = app
+            .launch
+            .iter()
+            .filter(usable)
+            .find(|o| o.os_list.split(',').any(|x| x.trim() == "windows") || (o.os_list.is_empty() && is_windows_exe(o)))
+            .or_else(|| app.launch.iter().filter(usable).find(|o| o.os_list.is_empty()))
+            .ok_or_else(|| format!("{} has no launch option for this system", app.name))?;
+        let root = root.ok_or("Steam Play needs a Steam install for Proton")?;
+        let tool = compat::tool_for(&root, app.app_id).ok_or("No Proton is installed. Install one in Steam (Library → Tools → Proton).")?;
+        if !install_dir.join(normalize(&windows.executable)).exists() {
+            return Err(format!("{} isn't installed completely", app.name));
+        }
+        Ok(Plan { option: windows.clone(), tool: Some(tool), steam_root: Some(root) })
+    }
+
+    impl Plan {
+        pub fn uses_proton(&self) -> bool {
+            self.tool.is_some()
+        }
+
+        pub fn describe(&self) -> String {
+            match &self.tool {
+                Some(t) => format!("Runs with {}", t.display),
+                None => "Native Linux version".to_string(),
+            }
+        }
+
+        pub fn command(&self, app: &OwnedApp, install_dir: &Path) -> Command {
+            use std::os::unix::process::CommandExt;
+            let o = &self.option;
+            let exe = install_dir.join(normalize(&o.executable));
+            let cwd = if o.working_dir.is_empty() { exe.parent().unwrap_or(install_dir).to_path_buf() } else { install_dir.join(normalize(&o.working_dir)) };
+            let id = app.app_id.to_string();
+            let mut cmd = match &self.tool {
+                None => {
+                    let mut c = Command::new(&exe);
+                    c.args(split_args(&o.arguments));
+                    c
+                }
+                Some(tool) => self.proton(tool, app, install_dir, &exe),
+            };
+            tracing::info!("launching {} ({}) {}", app.name, exe.display(), self.describe());
+            cmd.current_dir(cwd).env("SteamAppId", &id).env("SteamGameId", &id).env("SteamOverlayGameId", &id);
+            // Its own process group, so stopping the game stops everything it started.
+            cmd.process_group(0);
+            cmd
+        }
+
+        /// `proton waitforexitandrun <exe>`, inside the Steam Linux Runtime
+        /// container when the tool asks for one (how Steam runs it).
+        fn proton(&self, tool: &CompatTool, app: &OwnedApp, install_dir: &Path, exe: &Path) -> Command {
+            let root = self.steam_root.clone().unwrap_or_default();
+            let data = compat::compat_data(install_dir, app.app_id).unwrap_or_else(|| install_dir.join("compatdata"));
+            let _ = std::fs::create_dir_all(&data);
+            let runtime = tool.runtime_app.and_then(|rt| compat::app_dir(&root, rt)).map(|d| d.join("_v2-entry-point")).filter(|p| p.is_file());
+            let mut cmd = match runtime {
+                Some(entry) => {
+                    let mut c = Command::new(entry);
+                    c.arg("--verb=waitforexitandrun").arg("--").arg(tool.script());
+                    c
+                }
+                None => Command::new(tool.script()),
+            };
+            cmd.arg("waitforexitandrun").arg(exe).args(split_args(&self.option.arguments));
+            let library = install_dir.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default();
+            cmd.env("STEAM_COMPAT_DATA_PATH", &data)
+                .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &root)
+                .env("STEAM_COMPAT_INSTALL_PATH", install_dir)
+                .env("STEAM_COMPAT_LIBRARY_PATHS", &library)
+                .env("STEAM_COMPAT_APP_ID", app.app_id.to_string());
+            cmd
+        }
+    }
+}
+
 // ------------------------------------------------------------ Win32
 
 #[cfg(windows)]
@@ -1189,5 +1344,35 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         assert_eq!(pe_is_64bit(&exe), Some(cfg!(target_pointer_width = "64")));
         assert_eq!(pe_is_64bit(Path::new("Cargo.toml")), None);
+    }
+}
+
+/// Prints how a game would start on this machine, without starting it:
+/// `cargo test -p client --release launch::dry_run -- --ignored --nocapture`
+/// (STEAMINRUST_DRY_APP / _EXE / _DIR pick the game; defaults to Microsoft
+/// Flight Simulator 2020, a Windows-only game).
+#[cfg(all(test, not(windows)))]
+mod dry_run {
+    #[test]
+    #[ignore]
+    fn dry_run() {
+        let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+        let app_id: model::AppId = env("STEAMINRUST_DRY_APP", "1250410").parse().unwrap();
+        let exe = env("STEAMINRUST_DRY_EXE", "FlightSimulator.exe");
+        let dir = std::path::PathBuf::from(env("STEAMINRUST_DRY_DIR", &format!("{}/.local/share/Steam/steamapps/common/MicrosoftFlightSimulator", std::env::var("HOME").unwrap())));
+        let app = model::OwnedApp {
+            app_id,
+            name: "dry run".into(),
+            launch: vec![model::LaunchOption { executable: exe, arguments: String::new(), working_dir: String::new(), description: String::new(), os_list: "windows".into() }],
+            ..Default::default()
+        };
+        println!("mode: {:?}", super::mode(&app, &dir));
+        let cmd = super::command(&app, &dir, "").expect("a command");
+        println!("program: {}", cmd.get_program().to_string_lossy());
+        println!("args: {:?}", cmd.get_args().collect::<Vec<_>>());
+        println!("cwd: {:?}", cmd.get_current_dir());
+        for (k, v) in cmd.get_envs() {
+            println!("env {}={}", k.to_string_lossy(), v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default());
+        }
     }
 }
