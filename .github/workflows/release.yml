@@ -1,23 +1,102 @@
-# Push a tag like v0.2.0 (matching Cargo.toml) to build and publish a release:
-# the setup, a portable zip and SHA256SUMS.txt (the app's updater checks it).
+# Releases happen when the version goes up: bump `version` in Cargo.toml and
+# push to main. If there is no tag vX.Y.Z for that version yet, this builds
+#   - Linux: SteamOnRust-Linux-x86_64.tar.gz (+ .sha256)
+#   - Windows: the setup, a portable zip and SHA256SUMS.txt (the app's
+#     updater checks it)
+# in parallel, then tags the commit vX.Y.Z and publishes the release (with
+# the Windows files too when that build succeeded). Pushes that don't change
+# the version do nothing here (Build still checks them).
+#
+# Run it by hand (Actions → Release → Run workflow) to build the files; it
+# publishes only if the version isn't released yet.
 name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
 
-# Newer rustup refuses a host tuple in rust-toolchain.toml's channel; this
-# picks the same GNU toolchain explicitly (it takes priority over the file).
-env:
-  RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+# Two quick pushes never race to publish the same version.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  release:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Is this version released yet?
+        id: v
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)".*/\1/p' Cargo.toml | head -n1)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$v" > /dev/null; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "v$v is already tagged: nothing to release."
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "v$v is new: building and releasing it."
+          fi
+
+  linux:
+    needs: version
+    if: needs.version.outputs.release == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Headers for the GUI crates (eframe/winit, GTK for tray-icon and rfd,
+      # libxdo for global-hotkey) and OpenSSL for native-tls.
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libgtk-3-dev libxdo-dev \
+            libayatana-appindicator3-dev libxkbcommon-dev libwayland-dev
+
+      - name: Rust (stable)
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      # steamclient is a Windows DLL (it doesn't link on Linux), so only the
+      # app; tests for the crates that are platform-neutral.
+      - name: Test
+        run: cargo test --release --locked -p i18n -p ui -p vdf -p model -p store
+
+      - name: Build
+        run: cargo build --release --locked -p steam-rs
+
+      - name: Package
+        run: |
+          name=SteamOnRust-Linux-x86_64
+          mkdir -p dist/$name
+          cp target/release/steam-rs README.md LICENSE dist/$name/
+          tar -C dist -czf dist/$name.tar.gz $name
+          (cd dist && sha256sum $name.tar.gz > $name.tar.gz.sha256)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  windows:
+    needs: version
+    if: needs.version.outputs.release == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
+    # Newer rustup refuses a host tuple in rust-toolchain.toml's channel; this
+    # picks the same GNU toolchain explicitly (it takes priority over the file).
+    env:
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
     steps:
       - uses: actions/checkout@v4
 
@@ -36,20 +115,11 @@ jobs:
         shell: pwsh
         run: echo "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
-      - name: Rust toolchain (GNU)
-        run: rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
-
+      - run: rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
       - uses: Swatinem/rust-cache@v2
 
-      - name: Tag matches the version
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        run: |
-          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-          if ("v$v" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} doesn't match Cargo.toml version $v" }
-
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Package
         shell: pwsh
@@ -58,17 +128,51 @@ jobs:
           SIR_MINGW32: ${{ steps.msys2.outputs.msys2-location }}\mingw32\bin
         run: cargo xtask package
 
-      - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: target/package/dist/*
+
+  publish:
+    needs: [version, linux, windows]
+    # Publish a new version once Linux built, even if Windows didn't.
+    if: always() && needs.version.outputs.release == 'true' && needs.linux.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          WINDOWS: ${{ needs.windows.result }}
+        run: |
+          {
+            echo "## SteamOnRust $VERSION"
+            echo
+            echo "**Linux (x86_64):** download \`SteamOnRust-Linux-x86_64.tar.gz\`, then:"
+            echo
+            echo '```sh'
+            echo 'tar -xzf SteamOnRust-Linux-x86_64.tar.gz'
+            echo './SteamOnRust-Linux-x86_64/steam-rs'
+            echo '```'
+            echo
+            if [ "$WINDOWS" = "success" ]; then
+              echo "**Windows:** run \`SteamInRust-Setup-$VERSION.exe\`, or unzip the portable zip."
+            else
+              echo "_No Windows build this time (it failed in CI)._"
+            fi
+          } > notes.md
+          ls -l dist
+
+      - name: Tag and publish the release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/package/dist/*
-          body_path: docs/release-notes.md
+          tag_name: v${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: SteamOnRust ${{ needs.version.outputs.version }}
+          files: dist/*
+          body_path: notes.md
           generate_release_notes: true
-
-      - name: Keep the build (manual runs)
-        if: "!startsWith(github.ref, 'refs/tags/')"
-        uses: actions/upload-artifact@v4
-        with:
-          name: SteamInRust
-          path: target/package/dist/*
