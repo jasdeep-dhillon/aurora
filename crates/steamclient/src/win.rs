@@ -10,6 +10,9 @@ unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
     fn GetModuleHandleExW(flags: u32, name: *const u16, module: *mut *mut c_void) -> i32;
+    fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+    fn GetProcessHeap() -> *mut c_void;
+    fn HeapFree(heap: *mut c_void, flags: u32, mem: *mut c_void) -> i32;
 }
 
 #[cfg(windows)]
@@ -104,3 +107,36 @@ pub fn open_url(url: &str) {
         }
     }
 }
+
+/// Under Wine (Proton): the Windows path of a Linux one, as Wine maps it.
+/// It picks the drive letter Proton gave the game's library (E:\…) and
+/// mangles names Windows can't use (a ':' in a mount point, for example),
+/// so the game can open it. `None` outside Wine.
+#[cfg(windows)]
+pub fn wine_dos_path(unix: &str) -> Option<String> {
+    type ToDos = unsafe extern "system" fn(*const u8) -> *mut u16;
+    let kernel32 = unsafe { GetModuleHandleW(wide("kernel32.dll").as_ptr()) };
+    let f = proc_address(kernel32 as usize, "wine_get_dos_file_name");
+    if f == 0 {
+        return None;
+    }
+    let unix = std::ffi::CString::new(unix).ok()?;
+    let p = unsafe { std::mem::transmute::<usize, ToDos>(f)(unix.as_ptr().cast()) };
+    if p.is_null() {
+        return None;
+    }
+    let mut n = 0;
+    while unsafe { *p.add(n) } != 0 {
+        n += 1;
+    }
+    let s = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, n) });
+    unsafe { HeapFree(GetProcessHeap(), 0, p.cast()) };
+    // \\?\ prefixed paths come back for names without a drive; plain is nicer.
+    Some(s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string())
+}
+
+#[cfg(not(windows))]
+pub fn wine_dos_path(_unix: &str) -> Option<String> {
+    None
+}
+

@@ -350,7 +350,14 @@ mod tests {
 }
 
 /// A folder SteamInRust named, as this process sees it. Under Proton the
-/// app sends Linux paths; Wine shows the Linux root as drive Z:.
+/// app sends Linux paths: Wine converts them (to the library's drive letter,
+/// e.g. E:\SteamLibrary\…, with names Windows can't use mangled); failing
+/// that, drive Z: is the Linux root.
 fn host_path(p: &str) -> String {
-    if cfg!(windows) && p.starts_with('/') { format!("Z:{}", p.replace('/', "\\")) } else { p.to_string() }
+    if !(cfg!(windows) && p.starts_with('/')) {
+        return p.to_string();
+    }
+    let dos = crate::win::wine_dos_path(p).unwrap_or_else(|| format!("Z:{}", p.replace('/', "\\")));
+    crate::log!("path {p} -> {dos}");
+    dos
 }
