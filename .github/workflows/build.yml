@@ -29,9 +29,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # steamclient is a Windows DLL (it doesn't link on Linux), so only
-      # the app; tests for the crates that are platform-neutral.
+      # the app and the steamhost helper (the headless Steam host for
+      # DRM games); tests for the crates that are platform-neutral.
       - name: Build
-        run: cargo build --release --locked -p steam-rs
+        run: cargo build --release --locked -p steam-rs -p steamhost
 
       - name: Test
         run: cargo test --release --locked -p i18n -p ui -p vdf -p model -p store
@@ -40,7 +41,7 @@ jobs:
         run: |
           name=SteamOnRust-Linux-x86_64
           mkdir -p dist/$name
-          cp target/release/steam-rs README.md LICENSE dist/$name/
+          cp target/release/steam-rs target/release/steamhost README.md LICENSE dist/$name/
           tar -C dist -czf dist/$name.tar.gz $name
           (cd dist && sha256sum $name.tar.gz > $name.tar.gz.sha256)
 
