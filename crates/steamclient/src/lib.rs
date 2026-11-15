@@ -46,6 +46,7 @@ mod tables;
 mod trace;
 #[cfg_attr(not(target_arch = "x86"), allow(dead_code))]
 mod tables32;
+mod tables_old;
 mod ugc;
 mod vt;
 mod win;

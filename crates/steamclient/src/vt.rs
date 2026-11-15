@@ -36,7 +36,7 @@ const CLIENT017: &[&str] = &[
 /// Interface name and slot list for a version string, falling back to the
 /// nearest known version of the same interface.
 pub fn layout(version: &str) -> Option<(&'static str, &'static [&'static str])> {
-    if let Some(&(_, kind, methods)) = LAYOUTS.iter().find(|(v, _, _)| *v == version) {
+    if let Some(&(_, kind, methods)) = LAYOUTS.iter().chain(crate::tables_old::OLD_LAYOUTS).find(|(v, _, _)| *v == version) {
         return Some((kind, methods));
     }
     let (prefix, num) = split_version(version);
@@ -60,7 +60,7 @@ pub const UNKNOWN: u16 = 0xFFFF;
 #[cfg_attr(not(target_arch = "x86"), allow(dead_code))]
 pub fn layout32(version: &str) -> Option<(&'static str, Vec<(&'static str, u16)>)> {
     use crate::tables32::LAYOUTS32;
-    if let Some(&(_, kind, methods)) = LAYOUTS32.iter().find(|(v, _, _)| *v == version) {
+    if let Some(&(_, kind, methods)) = LAYOUTS32.iter().chain(crate::tables_old::OLD_LAYOUTS32).find(|(v, _, _)| *v == version) {
         return Some((kind, methods.to_vec()));
     }
     let (kind, names) = layout(version)?;
