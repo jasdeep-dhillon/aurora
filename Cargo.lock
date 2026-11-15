@@ -188,7 +188,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "net",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "client"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "auth",
  "depot",
@@ -820,7 +820,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "depot"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -1147,8 +1147,6 @@ dependencies = [
 [[package]]
 name = "egui_glow"
 version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9275ca5cc35a6b7c94e0e8cedf22542f66cb0cf45ed8ab2657c78ff49fec7268"
 dependencies = [
  "bytemuck",
  "egui",
@@ -1222,8 +1220,6 @@ dependencies = [
 [[package]]
 name = "epaint"
 version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97bac86ae3dde93fc3951e790951caea739ff39a6c89d909cdaf1d9278dbb1bd"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -1285,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "extensions"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "client",
  "egui",
@@ -2108,7 +2104,7 @@ dependencies = [
 
 [[package]]
 name = "i18n"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "sys-locale",
  "toml 1.2.1+spec-1.1.0",
@@ -2275,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "installer"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "directories",
  "eframe",
@@ -2564,7 +2560,7 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
 name = "local"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "model",
  "open",
@@ -2739,7 +2735,7 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
 ]
@@ -2866,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "net"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "flate2",
  "futures-util",
@@ -3574,7 +3570,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plugins"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "model",
  "rhai",
@@ -3834,7 +3830,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -4707,7 +4703,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "steam-rs"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "client",
  "directories",
@@ -4742,7 +4738,7 @@ dependencies = [
 
 [[package]]
 name = "steamclient"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "crc32fast",
@@ -4762,7 +4758,7 @@ dependencies = [
 
 [[package]]
 name = "store"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "model",
  "reqwest",
@@ -5370,7 +5366,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "ui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "egui",
  "i18n",
@@ -5537,7 +5533,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vdf"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -5583,7 +5579,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "video"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "egui",
  "i18n",
@@ -6370,7 +6366,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "sha2",
  "zip",

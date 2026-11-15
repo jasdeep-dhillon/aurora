@@ -274,7 +274,7 @@ work are in [docs/parity.md](docs/parity.md).
 
 ## Credits
 
-Fonts: [Inter](https://rsms.me/inter/) (OFL). Icons: [Phosphor](https://phosphoricons.com) (MIT).
+Fonts: [Geist](https://github.com/vercel/geist-font) and [Inter](https://rsms.me/inter/) (both OFL). Icons: [Phosphor](https://phosphoricons.com) (MIT).
 Protocol definitions: [SteamDatabase/Protobufs](https://github.com/SteamDatabase/Protobufs).
 Price history: [IsThereAnyDeal](https://isthereanydeal.com).
 

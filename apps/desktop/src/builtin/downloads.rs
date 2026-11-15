@@ -52,11 +52,48 @@ pub struct Downloads {
     sent: Option<(u64, u32)>,
     /// Downloads we paused because a game started.
     auto_paused: Vec<model::AppId>,
+    /// Network and disk speed (bytes/s), one sample a second, for the graph.
+    history: std::collections::VecDeque<(u64, u64)>,
+    last_sample: Option<std::time::Instant>,
+}
+
+/// Seconds of speed history the graph shows.
+const HISTORY: usize = 120;
+
+/// Downloads that are still running (not finished or failed).
+fn running(state: &client::State) -> impl Iterator<Item = &model::DownloadStatus> {
+    state.downloads.values().filter(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed))
 }
 
 impl Downloads {
     pub fn new(flags: super::settings::SharedFlags) -> Self {
-        Self { flags, regions: None, probing: false, region_sent: false, settings: Default::default(), sent: None, auto_paused: Vec::new() }
+        Self { flags, regions: None, probing: false, region_sent: false, settings: Default::default(), sent: None, auto_paused: Vec::new(), history: Default::default(), last_sample: None }
+    }
+
+    /// Record the current speeds once a second while anything runs; the
+    /// graph starts over when downloads stop.
+    fn sample(&mut self, ctx: &Ctx) {
+        let mut any = false;
+        let (mut net, mut disk) = (0u64, 0u64);
+        for d in running(ctx.state).filter(|d| !d.paused) {
+            any = true;
+            net += d.speed;
+            disk += d.disk_speed;
+        }
+        if !any && running(ctx.state).next().is_none() {
+            self.history.clear();
+            self.last_sample = None;
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self.last_sample.is_some_and(|t| now.duration_since(t).as_secs_f32() < 1.0) {
+            return;
+        }
+        self.last_sample = Some(now);
+        self.history.push_back((net, disk));
+        while self.history.len() > HISTORY {
+            self.history.pop_front();
+        }
     }
 }
 
@@ -95,6 +132,7 @@ impl Extension for Downloads {
                     ctx.send(client::Command::ResumeDownload { app_id: id });
                 }
             }
+            client::Event::Download(_) => self.sample(ctx),
             _ => {}
         }
         self.sync_limits(ctx);
@@ -103,6 +141,11 @@ impl Extension for Downloads {
     fn page(&mut self, _page: &str, ui: &mut Ui, ctx: &mut Ctx) {
         let t = ctx.theme.clone();
         self.sync_limits(ctx);
+        self.sample(ctx);
+        if running(ctx.state).next().is_some() {
+            // Keep the speed and graph moving while the page is open.
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+        }
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.add_space(26.0);
             w::centered(ui, 1100.0, 32.0, |ui| {
@@ -111,7 +154,9 @@ impl Extension for Downloads {
                 ui.add_space(20.0);
                 self.active(ui, &t, ctx);
 
-                let mut queue: Vec<_> = ctx.local.games.iter().filter(|g| matches!(g.state, InstallState::UpdateRequired | InstallState::Downloading)).collect();
+                // Games already downloading or queued are listed above, not here.
+                let busy = |id: model::AppId| running(ctx.state).any(|d| d.app_id == id) || ctx.state.download_queue.contains(&id);
+                let mut queue: Vec<_> = ctx.local.games.iter().filter(|g| matches!(g.state, InstallState::UpdateRequired | InstallState::Downloading) && !busy(g.app_id)).collect();
                 queue.sort_by_key(|g| g.name.to_lowercase());
                 w::section(ui, &t, &t!("Up next ({n})", n = queue.len()), None);
                 if queue.is_empty() {
@@ -145,11 +190,16 @@ impl Extension for Downloads {
                     }
                     row(ui, &t, ctx, g.app_id, &g.name, &detail, &t!("{size} on disk", size = ui::bytes(g.size_on_disk)), false);
                 }
-                ui.add_space(24.0);
-                self.settings_card(ui, &t, ctx);
                 ui.add_space(40.0);
             });
         });
+    }
+
+    fn settings(&mut self, ui: &mut Ui, ctx: &mut Ctx) -> bool {
+        let t = ctx.theme.clone();
+        self.sync_limits(ctx);
+        self.settings_card(ui, &t, ctx);
+        true
     }
 
     fn save(&self) -> Option<String> {
@@ -163,6 +213,10 @@ impl Extension for Downloads {
 
 impl Downloads {
     fn sync_limits(&mut self, ctx: &Ctx) {
+        if !self.region_sent && ctx.state.steam_id != 0 {
+            self.region_sent = true;
+            ctx.send(region_command(&self.settings.region));
+        }
         let want = (if self.settings.limit_bandwidth { self.settings.limit_kbps as u64 } else { 0 }, self.settings.connections);
         if self.sent != Some(want) {
             ctx.send(client::Command::DownloadLimits { limit_kbps: want.0, concurrency: want.1 });
@@ -180,13 +234,7 @@ impl Downloads {
 
     /// The running download, the queue, and what finished this session.
     fn active(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
-        let running: Vec<model::DownloadStatus> = ctx
-            .state
-            .downloads
-            .values()
-            .filter(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed))
-            .cloned()
-            .collect();
+        let running: Vec<model::DownloadStatus> = running(ctx.state).cloned().collect();
         if !running.is_empty() || !ctx.state.download_queue.is_empty() {
             w::section(ui, t, t!("Downloading"), None);
         }
@@ -283,53 +331,67 @@ impl Downloads {
 
     fn speed_card(&self, ui: &mut Ui, t: &Theme, ctx: &Ctx) {
         let total: u64 = ctx.local.games.iter().map(|g| g.size_on_disk).sum();
+        let active: Vec<&model::DownloadStatus> = running(ctx.state).collect();
+        let speed: u64 = active.iter().filter(|d| !d.paused).map(|d| d.speed).sum();
+        let disk: u64 = active.iter().filter(|d| !d.paused).map(|d| d.disk_speed).sum();
         w::card(t).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                w::stat(ui, t, t!("Current speed"), &if self.settings.show_bits { "0 Mbps".to_string() } else { "0 MB/s".to_string() });
+                w::stat(ui, t, t!("Current speed"), &self.rate(speed));
+                ui.add_space(28.0);
+                w::stat(ui, t, t!("Disk"), &format!("{}/s", ui::bytes(disk)));
                 ui.add_space(28.0);
                 w::stat(ui, t, t!("Installed"), &t!("{n} games · {size}", n = ctx.local.games.len(), size = ui::bytes(total)));
                 ui.add_space(28.0);
                 w::stat(ui, t, t!("Libraries"), &ctx.local.libraries.len().to_string());
             });
             ui.add_space(8.0);
-            // Network graph area (fills in once transfers run).
+            // Network speed over the last two minutes (disk speed as a fainter line).
             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 70.0), Sense::hover());
-            ui.painter().rect_filled(rect, t.corner_small(), t.raised);
+            let p = ui.painter_at(rect);
+            p.rect_filled(rect, t.corner_small(), t.raised);
             for i in 1..4 {
                 let y = rect.top() + rect.height() * i as f32 / 4.0;
-                ui.painter().hline(rect.x_range(), y, egui::Stroke::new(1.0, t.border));
+                p.hline(rect.x_range(), y, egui::Stroke::new(1.0, t.border));
             }
-            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, t!("No active downloads"), w::font(12.5), t.text_faint);
+            let message = if active.is_empty() {
+                Some(t!("No active downloads").to_string())
+            } else if active.iter().all(|d| d.paused) {
+                Some(t!("Paused").to_string())
+            } else {
+                None
+            };
+            if self.history.len() >= 2 && message.is_none() {
+                let peak = self.history.iter().map(|(n, d)| (*n).max(*d)).max().unwrap_or(0).max(1_000_000) as f32;
+                let inner = rect.shrink2(vec2(0.0, 6.0));
+                let x_of = |i: usize| rect.right() - (self.history.len() - 1 - i) as f32 * rect.width() / (HISTORY - 1) as f32;
+                let y_of = |v: u64| inner.bottom() - inner.height() * (v as f32 / peak);
+                let line = |pick: fn(&(u64, u64)) -> u64| -> Vec<egui::Pos2> {
+                    self.history.iter().enumerate().map(|(i, s)| egui::pos2(x_of(i), y_of(pick(s)))).collect()
+                };
+                let net = line(|s| s.0);
+                // Filled area under the network line, one quad per sample.
+                let fill = t.accent.gamma_multiply(0.18);
+                for pair in net.windows(2) {
+                    let (a, b) = (pair[0], pair[1]);
+                    let quad = vec![a, b, egui::pos2(b.x, rect.bottom()), egui::pos2(a.x, rect.bottom())];
+                    p.add(egui::Shape::convex_polygon(quad, fill, egui::Stroke::NONE));
+                }
+                p.add(egui::Shape::line(line(|s| s.1), egui::Stroke::new(1.0, t.text_faint)));
+                p.add(egui::Shape::line(net, egui::Stroke::new(1.5, t.accent)));
+            } else {
+                // Checking files (no transfer yet) shows what it is doing.
+                let text = message.unwrap_or_else(|| active.first().map(|d| i18n::tr_dyn(d.activity()).to_string()).unwrap_or_default());
+                p.text(rect.center(), egui::Align2::CENTER_CENTER, text, w::font(12.5), t.text_faint);
+            }
         });
     }
 
+    /// Settings → Downloads (below the automatic updates switch there).
     fn settings_card(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
-        if !self.region_sent && ctx.state.steam_id != 0 {
-            self.region_sent = true;
-            ctx.send(region_command(&self.settings.region));
-        }
         if self.regions.is_none() && !self.probing {
             self.probing = true;
             ctx.send(client::Command::ProbeRegions);
-        }
-        w::section(ui, t, t!("Download settings"), None);
-        // Master auto-update switch, like Steam's.
-        {
-            let mut f = *self.flags.lock().unwrap();
-            w::card(t).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(w::text_semibold(t!("Automatic updates"), 14.5, t.text));
-                        ui.label(w::text(t!("Keep installed games up to date. Turn off to update only when you choose (or when you launch a game)."), 12.5, t.text_dim));
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add(super::settings::toggle(&mut f.auto_updates));
-                    });
-                });
-            });
-            *self.flags.lock().unwrap() = f;
         }
         ui.add_space(10.0);
         self.region_card(ui, t, ctx);

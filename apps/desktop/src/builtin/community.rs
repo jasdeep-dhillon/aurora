@@ -68,7 +68,11 @@ impl Extension for Community {
             .resizable(false)
             .frame(egui::Frame::new().fill(t.chrome).inner_margin(Margin { left: 16, right: 10, top: 18, bottom: 10 }))
             .show(ui, |ui| {
-                ui.label(w::text_bold(t!("Friends"), 20.0, t.text));
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.label(w::text(icons::USERS, 20.0, t.text_dim));
+                    ui.label(w::text_bold(t!("Friends"), 20.0, t.text));
+                });
                 ui.add_space(8.0);
                 let width = ui.available_width() - 4.0;
                 w::search(ui, &t, &mut self.filter, t!("Search friends"), width);

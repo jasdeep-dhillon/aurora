@@ -6,7 +6,7 @@ pub mod icons;
 pub mod theme;
 pub mod widgets;
 
-pub use theme::{Theme, install_fonts};
+pub use theme::{Theme, install_fonts, install_fonts_with};
 
 use i18n::t;
 

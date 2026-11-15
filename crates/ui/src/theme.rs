@@ -190,6 +190,17 @@ impl Theme {
         }
     }
 
+    /// A saved theme with its preset's current colors. Only the accent colors
+    /// and corner roundness can be edited in Settings, so those are kept; the
+    /// rest comes from the preset, so fixes to a preset (such as the status
+    /// colors) reach themes saved before them. Unknown names stay as saved.
+    pub fn refreshed(self) -> Self {
+        match Self::presets().into_iter().find(|p| p.name == self.name) {
+            Some(preset) => Self { accent: self.accent, accent_2: self.accent_2, radius: self.radius, ..preset },
+            None => self,
+        }
+    }
+
     pub fn corner(&self) -> CornerRadius {
         CornerRadius::same(self.radius)
     }
@@ -216,6 +227,11 @@ impl Theme {
         v.selection.bg_fill = self.accent.linear_multiply(0.35);
         v.selection.stroke = Stroke::new(1.0, self.accent);
         v.text_cursor.stroke = Stroke::new(2.0, self.accent);
+        if self.dark {
+            // egui's dark default (2c - c²) thickens every edge pixel, which
+            // reads as jagged at 1x; a gentle gamma keeps text smooth.
+            v.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Gamma(0.75);
+        }
 
         let r = self.corner_small();
         let w = &mut v.widgets;
@@ -276,26 +292,51 @@ pub fn bold() -> FontFamily {
     FontFamily::Name("bold".into())
 }
 
-const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
-const INTER_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Inter-Medium.ttf");
-const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
+// The interface is set in heavy weights, like a desktop using "Inter Bold":
+// body and medium text in Geist Bold, semibold and bold in Geist ExtraBold.
+const GEIST_BOLD: &[u8] = include_bytes!("../assets/fonts/Geist-Bold.ttf");
+const GEIST_EXTRABOLD: &[u8] = include_bytes!("../assets/fonts/Geist-ExtraBold.ttf");
 const INTER_BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-Bold.ttf");
 const PHOSPHOR: &[u8] = include_bytes!("../assets/Phosphor.ttf");
 
-/// Install Inter (four weights) plus the icon font. Call once at startup.
+/// Text rendering: light hinting (snap stems vertically only, keep the
+/// designed shapes) and a softer coverage curve than egui's dark default,
+/// so edges are smoothly anti-aliased instead of crunchy at 1x.
+fn text_tweak() -> egui::epaint::text::FontTweak {
+    use egui::epaint::text::{FontTweak, HintingTarget, SmoothHinting};
+    FontTweak {
+        hinting: Some(true),
+        hinting_target: HintingTarget::Smooth(SmoothHinting { light: true, symmetric_rendering: true, preserve_linear_metrics: true }),
+        ..Default::default()
+    }
+}
+
+/// Install Geist (Bold and ExtraBold, Inter Bold behind it for scripts Geist lacks) plus
+/// the icon font, with grayscale anti-aliasing. Call once at startup.
 pub fn install_fonts(ctx: &egui::Context) {
+    install_fonts_with(ctx, false);
+}
+
+/// Like [`install_fonts`], but `lcd` renders text and icons with subpixel
+/// (RGB) anti-aliasing, like the rest of the desktop. Only for contexts drawn
+/// by this app's patched glow painter: the in-game overlay hands its meshes
+/// to another renderer and must stay grayscale.
+pub fn install_fonts_with(ctx: &egui::Context, lcd: bool) {
+    use egui::epaint::text::FontTweak;
     use std::sync::Arc;
     let mut fonts = egui::FontDefinitions::default();
     for (name, bytes) in [
-        ("inter", INTER_REGULAR),
-        ("inter-medium", INTER_MEDIUM),
-        ("inter-semibold", INTER_SEMIBOLD),
+        ("geist-bold", GEIST_BOLD),
+        ("geist-extrabold", GEIST_EXTRABOLD),
         ("inter-bold", INTER_BOLD),
-        ("phosphor", PHOSPHOR),
     ] {
-        fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_static(bytes)));
+        fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_static(bytes).tweak(text_tweak()).lcd(lcd)));
     }
-    // System fonts for scripts Inter doesn't cover, so game names in Chinese,
+    // Icons are drawn from their outlines unhinted, exactly as the SVGs
+    // would be: the auto-hinter otherwise bends them onto the pixel grid.
+    let icons = egui::FontData::from_static(PHOSPHOR).tweak(FontTweak { hinting: Some(false), ..Default::default() }).lcd(lcd);
+    fonts.font_data.insert("phosphor".into(), Arc::new(icons));
+    // System fonts for scripts Geist and Inter don't cover, so game names in Chinese,
     // Japanese, Korean, Thai, Arabic, Hindi… show instead of empty boxes.
     let mut system: Vec<String> = Vec::new();
     if let Some(dir) = std::env::var_os("WINDIR").map(|w| std::path::PathBuf::from(w).join("Fonts")) {
@@ -310,17 +351,18 @@ pub fn install_fonts(ctx: &egui::Context) {
     // egui's bundled fonts stay as fallbacks for emoji and rare scripts.
     let mut fallbacks: Vec<String> = system;
     fallbacks.extend(fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default());
-    // The bundled font files are trimmed so they never overlap:
-    // Inter has no private-use glyphs and Phosphor has only private-use ones.
-    let family = |main: &str| {
-        let mut v = vec![main.to_string(), "phosphor".to_string()];
+    // Phosphor has only private-use glyphs and Inter none, so the icon font
+    // can sit right after the text fonts. (Geist's one private-use glyph,
+    // U+F8FF, is outside Phosphor's range.)
+    let family = |geist: &str| {
+        let mut v = vec![geist.to_string(), "inter-bold".to_string(), "phosphor".to_string()];
         v.extend(fallbacks.iter().cloned());
         v
     };
-    fonts.families.insert(FontFamily::Proportional, family("inter"));
-    fonts.families.insert(medium(), family("inter-medium"));
-    fonts.families.insert(semibold(), family("inter-semibold"));
-    fonts.families.insert(bold(), family("inter-bold"));
+    fonts.families.insert(FontFamily::Proportional, family("geist-bold"));
+    fonts.families.insert(medium(), family("geist-bold"));
+    fonts.families.insert(semibold(), family("geist-extrabold"));
+    fonts.families.insert(bold(), family("geist-extrabold"));
     fonts.families.entry(FontFamily::Monospace).or_default().push("phosphor".into());
     ctx.set_fonts(fonts);
 }

@@ -62,6 +62,8 @@ pub struct AppFlags {
     /// Pop-ups for new chat messages / Steam notifications.
     pub toast_messages: bool,
     pub toast_notifications: bool,
+    /// Multiple of egui's scroll distance per wheel notch / touchpad move.
+    pub scroll_speed: f32,
 }
 
 pub type SharedFlags = std::sync::Arc<std::sync::Mutex<AppFlags>>;
@@ -153,7 +155,7 @@ impl Extension for Settings {
                     Section::Library => library(ui, &t, ctx),
                     Section::Downloads => downloads(ui, &t, ctx, &self.flags),
                     Section::Cloud => cloud(ui, &t, &self.flags),
-                    Section::Accessibility => accessibility(ui, &t, ctx),
+                    Section::Accessibility => accessibility(ui, &t, ctx, &self.flags),
                     Section::Appearance => appearance(ui, &t, ctx),
                     Section::Plugins => {
                         w::page_title(ui, &t, t!("Plugins"), Some(t!("Scripts you install yourself. Each one runs in a sandbox and only gets the permissions you approve.")));
@@ -370,9 +372,8 @@ fn downloads(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, flags: &SharedFlags) {
     let mut f = *flags.lock().unwrap();
     switch(ui, t, t!("Automatic updates"), t!("Keep installed games up to date. Turn off to update only when you choose (or when you launch a game)."), &mut f.auto_updates);
     *flags.lock().unwrap() = f;
-    if info_row(ui, t, t!("Download region, speed limit, schedule"), "", Some(t!("Open download settings"))) {
-        ctx.navigate("downloads", None);
-    }
+    // Region, bandwidth limit, schedule… (kept by the Downloads component).
+    ctx.settings_for("downloads", ui);
 }
 
 fn cloud(ui: &mut Ui, t: &Theme, flags: &SharedFlags) {
@@ -382,20 +383,27 @@ fn cloud(ui: &mut Ui, t: &Theme, flags: &SharedFlags) {
     *flags.lock().unwrap() = f;
 }
 
-fn accessibility(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+fn accessibility(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, flags: &SharedFlags) {
     w::page_title(ui, t, t!("Accessibility"), None);
-    egui::Frame::new().fill(t.surface).corner_radius(t.corner_small()).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(w::text_medium(t!("Interface size"), 14.0, t.text));
-                ui.label(w::text(t!("Makes text and everything else bigger or smaller."), 12.5, t.text_dim));
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                zoom_slider(ui, ctx);
+    let row = |ui: &mut Ui, title: &str, body: &str, control: &mut dyn FnMut(&mut Ui)| {
+        egui::Frame::new().fill(t.surface).corner_radius(t.corner_small()).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(w::text_medium(title, 14.0, t.text));
+                    ui.label(w::text(body, 12.5, t.text_dim));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| control(ui));
             });
         });
+    };
+    row(ui, t!("Interface size"), t!("Makes text and everything else bigger or smaller."), &mut |ui| zoom_slider(ui, ctx));
+    ui.add_space(8.0);
+    let mut f = *flags.lock().unwrap();
+    row(ui, t!("Scroll speed"), t!("How far the mouse wheel and touchpad scroll."), &mut |ui| {
+        ui.add(egui::Slider::new(&mut f.scroll_speed, 0.5..=5.0).step_by(0.25).custom_formatter(|v, _| format!("{v:.2}×")));
     });
+    flags.lock().unwrap().scroll_speed = f.scroll_speed;
 }
 
 /// The interface size slider. Zooming rescales the slider itself, so a

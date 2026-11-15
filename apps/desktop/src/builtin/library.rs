@@ -822,10 +822,16 @@ impl Library {
     /// Whether a game passes the advanced filters.
     fn adv_match(&self, ctx: &Ctx, e: &Entry) -> bool {
         let f = &self.adv;
+        let o = e.owned;
+        // Like Steam, the library lists games unless other types are picked
+        // in the filters: no dedicated servers, SDKs, tools or soundtracks.
+        // (Games without app info, e.g. non-Steam ones, always show.)
+        if f.kinds.is_empty() && o.is_some_and(|o| !is_game_kind(&o.kind)) {
+            return false;
+        }
         if f.count() == 0 {
             return true;
         }
-        let o = e.owned;
         let minutes = e
             .installed
             .and_then(|g| g.playtime_minutes)
@@ -924,7 +930,7 @@ impl Library {
 
     fn sidebar(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
         ui.horizontal(|ui| {
-            let home = ui.add(egui::Button::selectable(self.selected.is_none() && self.custom_selected.is_none(), w::text_semibold(format!("{}   {}", icons::HOUSE, t!("Library home")), 14.0, t.text)).min_size(vec2(ui.available_width() - 48.0, 36.0)));
+            let home = home_button(ui, t, self.selected.is_none() && self.custom_selected.is_none(), ui.available_width() - 48.0);
             if home.clicked() {
                 self.selected = None;
                 self.custom_selected = None;
@@ -1993,3 +1999,24 @@ impl InstallDialog {
     }
 }
 
+
+/// "Library home": a solid grey button, a lighter grey while hovered. It is
+/// never transparent, so it reads as a button whether or not it is open.
+fn home_button(ui: &mut Ui, t: &Theme, selected: bool, width: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 36.0), Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+    let sel = ui.ctx().animate_bool_with_time(resp.id.with("sel"), selected, 0.15);
+    let base = w::mix(t.raised, t.surface_hover, sel);
+    let fill = w::mix(base, w::mix(t.surface_hover, t.text, 0.12), hover);
+    let color = w::mix(t.text_dim, t.text, sel.max(hover));
+    let p = ui.painter();
+    p.rect_filled(rect, t.corner_small(), fill);
+    let galley = p.layout_no_wrap(format!("{}   {}", icons::HOUSE, t!("Library home")), w::font_semibold(14.0), color);
+    p.galley(rect.center() - galley.size() / 2.0, galley, color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// App types the library shows by default. Unknown types count as games.
+fn is_game_kind(kind: &str) -> bool {
+    matches!(kind, "game" | "demo" | "")
+}

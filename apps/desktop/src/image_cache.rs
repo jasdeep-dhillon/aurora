@@ -6,7 +6,13 @@
 //! once, then read from disk on later starts (and offline). After a few days
 //! it's revalidated in the background (ETag / Last-Modified) while the saved
 //! copy keeps showing. Downloads run a few at a time, the folder is capped,
-//! and the oldest pictures go first.
+//! and the oldest pictures go first. Pictures that don't exist (a 404, e.g.
+//! a game without library art) are remembered too, so the fallback art
+//! shows at once on later starts instead of after another failed request.
+//!
+//! In memory, a picture is kept only as its GPU texture (no decoded or
+//! downloaded copy), and only while it's on screen: a texture unused for
+//! [`UNUSED_FOR`] is dropped and comes back from the disk cache when needed.
 
 use egui::load::{Bytes, BytesLoadResult, BytesLoader, BytesPoll, LoadError};
 use serde::{Deserialize, Serialize};
@@ -22,6 +28,8 @@ const FRESH_FOR: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
 /// Downloads at once (Steam's CDN drops connections when flooded).
 const PARALLEL: usize = 8;
+/// Textures not drawn (or prefetched) for this long are unloaded.
+const UNUSED_FOR: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 enum Entry {
@@ -74,6 +82,10 @@ impl ImageCache {
         let trim_dir = dir.clone();
         rt.spawn_blocking(move || trim(&trim_dir));
         ctx.add_bytes_loader(Arc::new(Self { dir, rt, http, slots: Arc::new(tokio::sync::Semaphore::new(PARALLEL)), entries: Default::default() }));
+        // Once a picture is a texture, drop its downloaded and decoded copies
+        // (the disk cache has it), and unload textures that are off screen.
+        ctx.options_mut(|o| o.reduce_texture_memory = true);
+        ctx.add_texture_loader(Arc::new(UnloadUnused::default()));
     }
 
     fn key(uri: &str) -> String {
@@ -116,6 +128,13 @@ impl BytesLoader for ImageCache {
             };
             // 1. A saved copy shows right away (even if it's old, or offline).
             let saved = std::fs::read(&path).ok();
+            // Known not to exist: fail at once, so the fallback art shows.
+            let missing = path.with_extension("missing");
+            if saved.is_none() && age(&missing).is_some_and(|a| a < FRESH_FOR) {
+                let status = std::fs::read_to_string(&missing).unwrap_or_default();
+                done(Entry::Failed(format!("HTTP {}", status.trim())));
+                return;
+            }
             let meta = read_meta(&path);
             if let Some(bytes) = &saved {
                 done(Entry::Ready(Bytes::from(bytes.clone()), meta.mime.clone()));
@@ -158,7 +177,14 @@ impl BytesLoader for ImageCache {
                         Err(_) => {}
                     }
                 }
-                Ok(resp) if saved.is_none() => done(Entry::Failed(format!("HTTP {}", resp.status()))),
+                Ok(resp) if saved.is_none() => {
+                    let status = resp.status();
+                    // Remember pictures that don't exist (not server hiccups).
+                    if matches!(status.as_u16(), 403 | 404 | 410) {
+                        let _ = std::fs::write(&missing, status.to_string());
+                    }
+                    done(Entry::Failed(format!("HTTP {status}")));
+                }
                 Err(e) if saved.is_none() => done(Entry::Failed(e.to_string())),
                 // Offline or the server hiccuped: keep showing the saved copy.
                 _ => {}
@@ -177,6 +203,74 @@ impl BytesLoader for ImageCache {
 
     fn byte_size(&self) -> usize {
         self.entries.lock().unwrap().values().map(|e| if let Entry::Ready(b, _) = e { b.len() } else { 0 }).sum()
+    }
+}
+
+/// The standard texture cache, plus unloading: a texture that hasn't been
+/// drawn for [`UNUSED_FOR`] is dropped (scrolled away, another page open).
+#[derive(Default)]
+struct UnloadUnused {
+    inner: egui::load::DefaultTextureLoader,
+    /// When each loaded texture was last asked for.
+    used: Mutex<HashMap<String, std::time::Instant>>,
+    last_sweep: Mutex<Option<std::time::Instant>>,
+}
+
+impl egui::load::TextureLoader for UnloadUnused {
+    fn id(&self) -> &str {
+        egui::generate_loader_id!(UnloadUnused)
+    }
+
+    fn load(&self, ctx: &egui::Context, uri: &str, texture_options: egui::TextureOptions, size_hint: egui::SizeHint) -> egui::load::TextureLoadResult {
+        let result = self.inner.load(ctx, uri, texture_options, size_hint);
+        if matches!(result, Ok(egui::load::TexturePoll::Ready { .. })) {
+            let now = std::time::Instant::now();
+            let mut used = self.used.lock().unwrap();
+            match used.get_mut(uri) {
+                Some(t) => *t = now,
+                None => {
+                    used.insert(uri.to_owned(), now);
+                }
+            }
+        }
+        result
+    }
+
+    fn forget(&self, uri: &str) {
+        self.used.lock().unwrap().remove(uri);
+        self.inner.forget(uri);
+    }
+
+    fn forget_all(&self) {
+        self.used.lock().unwrap().clear();
+        self.inner.forget_all();
+    }
+
+    fn end_pass(&self, pass_index: u64) {
+        self.inner.end_pass(pass_index);
+        let now = std::time::Instant::now();
+        {
+            let mut last = self.last_sweep.lock().unwrap();
+            if last.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1)) {
+                return;
+            }
+            *last = Some(now);
+        }
+        let stale: Vec<String> = {
+            let mut used = self.used.lock().unwrap();
+            let stale: Vec<String> = used.iter().filter(|(_, t)| now.duration_since(**t) > UNUSED_FOR).map(|(uri, _)| uri.clone()).collect();
+            for uri in &stale {
+                used.remove(uri);
+            }
+            stale
+        };
+        for uri in stale {
+            self.inner.forget(&uri);
+        }
+    }
+
+    fn byte_size(&self) -> usize {
+        self.inner.byte_size()
     }
 }
 

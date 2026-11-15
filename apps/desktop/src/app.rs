@@ -40,6 +40,8 @@ pub struct Prefs {
     /// Friends pinned to the top of the list ("Favorites"), like Steam.
     #[serde(default)]
     pub favorite_friends: Vec<u64>,
+    /// Mouse wheel and touchpad scroll distance, as a multiple of egui's.
+    pub scroll_speed: f32,
 }
 
 fn yes() -> bool {
@@ -67,6 +69,7 @@ impl Default for Prefs {
             wants_offline: false,
             auto_offline: false,
             favorite_friends: Vec::new(),
+            scroll_speed: 2.0,
         }
     }
 }
@@ -131,8 +134,10 @@ pub struct SteamApp {
 impl SteamApp {
     pub fn new(cc: &eframe::CreationContext<'_>, link: Option<String>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        ui::install_fonts(&cc.egui_ctx);
-        let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
+        // Subpixel text unless turned off (e.g. for a BGR or rotated screen).
+        ui::install_fonts_with(&cc.egui_ctx, std::env::var("STEAMRS_LCD").as_deref() != Ok("0"));
+        let mut prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
+        prefs.theme = prefs.theme.refreshed();
         // `--lang=en` / `--lang=ru` overrides the saved choice (screenshots, testing).
         let lang_flag = std::env::args().find_map(|a| a.strip_prefix("--lang=").map(String::from));
         // The language picked in setup counts until one is chosen in the app.
@@ -175,6 +180,7 @@ impl SteamApp {
             cloud: prefs.cloud,
             toast_messages: prefs.toast_messages,
             toast_notifications: prefs.toast_notifications,
+            scroll_speed: prefs.scroll_speed,
         }));
         let mut registry = crate::builtin::registry(rt.handle().clone(), cc.egui_ctx.clone(), flags.clone());
         for id in &prefs.disabled {
@@ -561,6 +567,22 @@ impl SteamApp {
 }
 
 impl eframe::App for SteamApp {
+    /// Scroll faster than egui's default (Settings → Accessibility → Scroll
+    /// speed). Ctrl/Cmd + wheel zooms, so those events stay as they are.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let speed = self.prefs.scroll_speed;
+        if (speed - 1.0).abs() < f32::EPSILON {
+            return;
+        }
+        for event in &mut raw_input.events {
+            if let egui::Event::MouseWheel { delta, modifiers, .. } = event
+                && !modifiers.command
+            {
+                *delta *= speed;
+            }
+        }
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         // Transparent so the overlay window can see through; the main window
         // paints its own background.
@@ -590,6 +612,7 @@ impl eframe::App for SteamApp {
             self.prefs.auto_updates = f.auto_updates;
             self.prefs.toast_messages = f.toast_messages;
             self.prefs.toast_notifications = f.toast_notifications;
+            self.prefs.scroll_speed = f.scroll_speed;
             if self.prefs.cloud != f.cloud {
                 self.prefs.cloud = f.cloud;
                 self.client.send(Command::CloudSettings { steam_root: Some(self.local.steam_root.clone()), disabled: if f.cloud { vec![] } else { self.state.apps.as_ref().map(|a| a.keys().copied().collect()).unwrap_or_default() } });

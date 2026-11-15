@@ -367,6 +367,7 @@
 "No games installed on this PC yet." = "На этом компьютере пока нет установленных игр."
 "Updated {when}" = "Обновлено {when}"
 "Current speed" = "Текущая скорость"
+"Disk" = "Диск"
 "Libraries" = "Библиотеки"
 "No active downloads" = "Нет активных загрузок"
 "Download settings" = "Настройки загрузок"
@@ -1132,6 +1133,8 @@
 "Accessibility" = "Доступность"
 "Interface size" = "Размер интерфейса"
 "Makes text and everything else bigger or smaller." = "Увеличивает или уменьшает текст и всё остальное."
+"Scroll speed" = "Скорость прокрутки"
+"How far the mouse wheel and touchpad scroll." = "Насколько далеко прокручивают колесо мыши и тачпад."
 "Storage" = "Хранилище"
 
 # --- Status links, account menu, library filters ---

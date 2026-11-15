@@ -295,13 +295,14 @@ impl DownloadStatus {
     /// downloading, writing to disk, checking files…, like Steam's status.
     pub fn activity(&self) -> &'static str {
         match self.phase {
+            DownloadPhase::Done => "Done",
+            DownloadPhase::Failed => "Failed",
+            // Paused shows as paused whatever step it stopped at.
+            _ if self.paused => "Paused",
             DownloadPhase::Queued | DownloadPhase::Preparing => "Preparing…",
             DownloadPhase::Checking => "Checking existing files…",
             DownloadPhase::Verifying => "Verifying files…",
             DownloadPhase::Finishing => "Finishing…",
-            DownloadPhase::Done => "Done",
-            DownloadPhase::Failed => "Failed",
-            _ if self.paused => "Paused",
             // More than ~50 KB/s over the network: downloading. Otherwise
             // data still landing on disk (reused chunks, buffered writes).
             _ if self.speed > 50_000 => "Downloading",

@@ -129,6 +129,9 @@ fn load(ui: &Ui, url: &str, size: Vec2) -> (ImageState, Option<egui::load::Sized
     match img.load_for_size(ui.ctx(), size) {
         Ok(TexturePoll::Ready { texture }) => (ImageState::Ready, Some(texture)),
         Ok(TexturePoll::Pending { .. }) => (ImageState::Loading, None),
+        // The picture doesn't exist (404 and friends): no point retrying,
+        // and a fallback image can load right away.
+        Err(egui::load::LoadError::Loading(e)) if e.starts_with("HTTP 4") => (ImageState::Missing, None),
         Err(_) => {
             let now = ui.input(|i| i.time);
             let mut guard = FAILED.lock().unwrap();
@@ -184,6 +187,15 @@ pub fn paint_cover_first(ui: &Ui, rect: Rect, urls: &[&str], radius: CornerRadiu
         }
     }
     false
+}
+
+/// Start loading the image [`paint_cover_first`] would show, without drawing.
+pub fn prefetch_first(ui: &Ui, urls: &[&str], size: Vec2) {
+    for url in urls {
+        if load(ui, url, size).0 != ImageState::Missing {
+            return;
+        }
+    }
 }
 
 /// Draw a remote image as large as fits in `rect`, anchored by `align`.
@@ -572,6 +584,12 @@ pub fn avatar(ui: &mut Ui, t: &Theme, url: &str, size: f32, status: Option<Color
 pub fn game_tile(ui: &mut Ui, t: &Theme, url: &str, fallback_url: &str, title: &str, installed: bool, size: Vec2) -> Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if !ui.is_rect_visible(rect) {
+        // Load tiles up to a screen above and below ahead of time, so they
+        // are ready when scrolled to (and stay loaded while close by).
+        let clip = ui.clip_rect();
+        if clip.expand2(vec2(0.0, clip.height())).intersects(rect) {
+            prefetch_first(ui, &[url, fallback_url], size);
+        }
         return resp;
     }
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.15);
