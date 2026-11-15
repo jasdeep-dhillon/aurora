@@ -64,6 +64,9 @@ pub fn mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
         }
         return match linux::plan(app, install_dir) {
             Ok(p) if linux::client_dll(&p, install_dir).is_some() => LaunchMode::SteamInRust,
+            // Native Linux games load Valve's own steamclient.so, which needs
+            // a running Steam to connect to: the headless host is one.
+            Ok(p) if !p.uses_proton() && headless_host_available() && !official_steam_open() => LaunchMode::HeadlessHost,
             Ok(p) => LaunchMode::NoSteam { reason: p.describe() },
             Err(_) => LaunchMode::OfficialSteam { anti_cheat: "Steam for Linux".into() },
         };
