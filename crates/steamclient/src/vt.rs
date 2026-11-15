@@ -161,6 +161,17 @@ mod x86 {
     }
 }
 
+/// The implementation name for a method whose argument types changed between
+/// versions while its name stayed the same.
+fn versioned(version: &str, kind: &str, method: &'static str) -> &'static str {
+    let (_, num) = split_version(version);
+    match (kind, method) {
+        // int32* outputs until 013, uint64* from 014 on.
+        ("ISteamRemoteStorage", "GetQuota") if num < 14 => "GetQuota32",
+        _ => method,
+    }
+}
+
 fn split_version(v: &str) -> (&str, u32) {
     let digits = v.len() - v.bytes().rev().take_while(|b| b.is_ascii_digit()).count();
     (&v[..digits], v[digits..].parse().unwrap_or(0))
@@ -183,7 +194,7 @@ pub fn get(version: &str) -> *mut c_void {
     let slots: Vec<Fp> = match layout(version) {
         Some((kind, methods)) => {
             crate::log!("interface {version} ({kind}, {} methods)", methods.len());
-            methods.iter().map(|m| crate::ifaces::imp(kind, m).unwrap_or_else(|| stub(kind, m))).collect()
+            methods.iter().map(|m| versioned(version, kind, m)).map(|m| crate::ifaces::imp(kind, m).unwrap_or_else(|| stub(kind, m))).collect()
         }
         None => {
             crate::log!("interface {version}: unknown");
@@ -196,7 +207,8 @@ pub fn get(version: &str) -> *mut c_void {
             crate::log!("interface {version} ({kind}, {} methods, 32-bit)", methods.len());
             let targets: Vec<(Fp, u16, Option<u32>)> = methods
                 .iter()
-                .map(|(m, bytes)| match *bytes {
+                .map(|&(m, bytes)| (versioned(version, kind, m), bytes))
+                .map(|(m, bytes)| match bytes {
                     UNKNOWN => (zero as Fp, 0, None),
                     b => match crate::ifaces::imp(kind, m) {
                         Some(f) => (f, b, crate::trace::call_id(kind, m)),

@@ -154,6 +154,7 @@ pub fn imp(kind: &str, name: &str) -> Option<Fp> {
         ("ISteamRemoteStorage", "GetFileCount") => f!(rs_count),
         ("ISteamRemoteStorage", "GetFileNameAndSize") => f!(rs_name_and_size),
         ("ISteamRemoteStorage", "GetQuota") => f!(rs_quota),
+        ("ISteamRemoteStorage", "GetQuota32") => f!(rs_quota32),
         ("ISteamRemoteStorage", "GetLocalFileChange") => f!(empty_str),
 
         // ISteamMatchmaking: Steam lobbies (lobby.rs); P2P packets (p2p.rs).
@@ -1199,11 +1200,24 @@ extern "C" fn rs_name_and_size(_t: This, i: i32, size: *mut i32) -> *const c_cha
     g.intern(&name)
 }
 extern "C" fn rs_quota(_t: This, total: *mut u64, available: *mut u64) -> bool {
+    let (quota, free) = quota();
+    put(total, quota);
+    put(available, free);
+    true
+}
+/// GetQuota before STEAMREMOTESTORAGE_INTERFACE_VERSION014 took int32
+/// pointers: writing 8 bytes there smashed the game's stack (Alien:
+/// Isolation crashed in its first Steam callback).
+extern "C" fn rs_quota32(_t: This, total: *mut i32, available: *mut i32) -> bool {
+    let (quota, free) = quota();
+    put(total, quota.min(i32::MAX as u64) as i32);
+    put(available, free.min(i32::MAX as u64) as i32);
+    true
+}
+fn quota() -> (u64, u64) {
     let used: u64 = list_remote().iter().map(|(_, s)| *s as u64).sum();
     let quota = 1u64 << 30;
-    put(total, quota);
-    put(available, quota.saturating_sub(used));
-    true
+    (quota, quota.saturating_sub(used))
 }
 
 // -------------------------------------------------- ISteamNetworkingUtils
