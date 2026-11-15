@@ -83,8 +83,17 @@ fn read_vdf(path: &Path) -> Result<vdf::Obj> {
 
 /// Load the full local state. Missing optional files are skipped, not errors.
 pub fn load(steam_root: Option<PathBuf>) -> Result<LocalState> {
-    let root = steam_root.or_else(find_steam_root).ok_or(Error::NotFound)?;
-    let libraries = library_folders(&root)?;
+    // No Steam installed: games go to a Steam-shaped folder of our own.
+    let root = match steam_root.filter(|p| !p.as_os_str().is_empty()).or_else(find_steam_root) {
+        Some(r) => r,
+        None => own_root().ok_or(Error::NotFound)?,
+    };
+    let mut libraries = library_folders(&root)?;
+    for lib in extra_libraries() {
+        if !libraries.iter().any(|l| same_path(l, &lib)) {
+            libraries.push(lib);
+        }
+    }
     let accounts = accounts(&root).unwrap_or_else(|e| {
         tracing::warn!("could not read accounts: {e}");
         Vec::new()
@@ -111,6 +120,46 @@ pub fn load(steam_root: Option<PathBuf>) -> Result<LocalState> {
     games.dedup_by_key(|g| g.app_id);
 
     Ok(LocalState { steam_root: root, libraries, games, accounts })
+}
+
+fn dirs() -> Option<directories::ProjectDirs> {
+    // The names the app's other settings folders use.
+    directories::ProjectDirs::from("dev", "SteamInRust", "SteamInRust")
+}
+
+/// Where games and Steam's caches go when no Steam is installed (a folder
+/// shaped like a Steam install), created on first use.
+pub fn own_root() -> Option<PathBuf> {
+    let root = dirs()?.data_local_dir().join("Steam");
+    fs::create_dir_all(root.join("steamapps")).ok()?;
+    Some(root)
+}
+
+fn libraries_file() -> Option<PathBuf> {
+    Some(dirs()?.config_dir().join("libraries.txt"))
+}
+
+/// Library folders added in SteamInRust (one per line), on top of the ones
+/// Steam lists. They work with or without a Steam install.
+pub fn extra_libraries() -> Vec<PathBuf> {
+    let Some(text) = libraries_file().and_then(|f| fs::read_to_string(f).ok()) else { return Vec::new() };
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(PathBuf::from).filter(|p| p.is_dir()).collect()
+}
+
+/// Remember a library folder (and give it a `steamapps` folder).
+pub fn add_library(path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(path.join("steamapps"))?;
+    let file = libraries_file().ok_or_else(|| std::io::Error::other("no settings folder"))?;
+    let mut list: Vec<PathBuf> = fs::read_to_string(&file).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()).map(PathBuf::from).collect();
+    if list.iter().any(|l| same_path(l, path)) {
+        return Ok(());
+    }
+    list.push(path.to_path_buf());
+    if let Some(dir) = file.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let text: String = list.iter().map(|p| format!("{}\n", p.display())).collect();
+    fs::write(file, text)
 }
 
 /// All library folders listed in `steamapps/libraryfolders.vdf`.

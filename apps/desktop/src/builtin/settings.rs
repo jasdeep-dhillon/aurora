@@ -602,9 +602,18 @@ fn folders(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
         });
     });
     ui.add_space(14.0);
-    w::page_title(ui, t, t!("Library folders"), Some(t!("Folders where games are installed (read from your Steam setup).")));
+    w::page_title(ui, t, t!("Library folders"), Some(t!("Folders where games are installed: your Steam setup's, and any you add here.")));
+    if w::button(ui, t, Some(icons::FOLDER), t!("Add library folder…"), w::Kind::Secondary, w::Size::Sm).clicked() {
+        if let Some(p) = rfd::FileDialog::new().pick_folder() {
+            match local::add_library(&p) {
+                Ok(()) => ctx.act(extensions::Action::ReloadLocal),
+                Err(e) => ctx.toast(format!("{}: {e}", p.display())),
+            }
+        }
+    }
+    ui.add_space(8.0);
     if ctx.local.libraries.is_empty() {
-        w::empty(ui, t, icons::DRIVES, t!("No library folders found"), t!("Install location detection looks for an existing Steam install."));
+        w::empty(ui, t, icons::DRIVES, t!("No library folders found"), t!("Add a folder to install games into."));
     }
     for lib in &ctx.local.libraries {
         let games: Vec<_> = ctx.local.games.iter().filter(|g| &g.library == lib).collect();

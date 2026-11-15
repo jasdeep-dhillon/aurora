@@ -1766,7 +1766,11 @@ impl Library {
             }
             if w::button(ui, t, Some(icons::FOLDER), t!("Choose another folder…"), w::Kind::Ghost, w::Size::Sm).clicked() {
                 if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                    let _ = std::fs::create_dir_all(p.join("steamapps"));
+                    // Remembered, so games installed there show up (with or
+                    // without a Steam install).
+                    if let Err(e) = local::add_library(&p) {
+                        ctx.toast(format!("{}: {e}", p.display()));
+                    }
                     dlg.libraries.push(p.clone());
                     dlg.library = p;
                 }
