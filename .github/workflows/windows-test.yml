@@ -1,0 +1,136 @@
+# Windows test build for testers, plus a smoke test.
+#
+# Push a branch named windows-test/<anything> (or run it by hand): it builds
+# the Windows setup and portable zip, then starts the setup and the app (demo
+# mode, no sign-in) twice: with Mesa's software OpenGL (the normal OpenGL
+# path), and with only Windows' own OpenGL 1.1, like a PC without a GPU
+# driver, where they must fall back to Direct3D 12 (WARP on the runner).
+# Each run is screenshotted and logged; the job fails if one exits early.
+# The files for testers are in the "windows-build" artifact.
+name: Windows test build
+
+on:
+  push:
+    branches: ["windows-test/**"]
+  workflow_dispatch:
+
+# Newer rustup refuses a host tuple in rust-toolchain.toml's channel; this
+# picks the same GNU toolchain explicitly (it takes priority over the file).
+env:
+  RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: MinGW (the project uses the GNU toolchain)
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          # Use the MSYS2 that ships with the runner instead of downloading it
+          # (the download often fails with HTTP 504).
+          release: false
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64-i686-gcc mingw-w64-i686-binutils
+
+      - name: Put MinGW on PATH
+        shell: pwsh
+        run: echo "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - run: rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Package
+        shell: pwsh
+        env:
+          # 32-bit MinGW, so the setup includes steamclient32.dll for 32-bit games.
+          SIR_MINGW32: ${{ steps.msys2.outputs.msys2-location }}\mingw32\bin
+        run: cargo xtask package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: target/package/dist/*
+
+      # The runner has no GPU, only Windows' OpenGL 1.1; Mesa's llvmpipe
+      # (placed next to the exe) gives it OpenGL 4.5 in software.
+      - name: Software OpenGL (Mesa llvmpipe)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Where the 64-bit OpenGL driver sits has moved between Mesa
+          # releases, so search both builds for it.
+          gh release download -R pal1000/mesa-dist-win --pattern '*-release-msvc.7z' --pattern '*-release-mingw.7z' --dir mesa-dl
+          Get-ChildItem mesa-dl\*.7z | ForEach-Object { 7z x $_.FullName "-omesa\$($_.BaseName)" | Out-Null }
+          $gl = Get-ChildItem mesa -Recurse -Filter opengl32.dll | Where-Object { $_.DirectoryName -match 'x64' } | Select-Object -First 1
+          if (-not $gl) {
+            Get-ChildItem mesa -Recurse -Filter *.dll | Select-Object Name, DirectoryName | Out-Host
+            throw "No 64-bit opengl32.dll in Mesa's release"
+          }
+          # opengl32.dll plus the driver it loads (libgallium_wgl / libglapi when present).
+          New-Item -ItemType Directory mesa-gl | Out-Null
+          Get-ChildItem $gl.DirectoryName -Filter *.dll | Where-Object { $_.Name -match '^(opengl32|libgallium_wgl|libglapi|libgallium)' } | Copy-Item -Destination mesa-gl\
+          Get-ChildItem mesa-gl | Out-Host
+
+      - name: "Smoke test: start the setup and the app, check they stay up"
+        shell: pwsh
+        run: |
+          $smoke = (New-Item -ItemType Directory smoke).FullName
+          # A tester's PC has no MinGW: only Windows on PATH.
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+          $env:GALLIUM_DRIVER = 'llvmpipe'
+          $env:RUST_LOG = 'info,egui_glow=debug'
+          $env:RUST_BACKTRACE = '1'
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Shot($name) {
+            $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+            $bmp.Save("$smoke\$name.png")
+          }
+          # Start a program, give it $secs, screenshot, report whether it stayed up.
+          function Run($name, $exe, $argv, $dir, $secs) {
+            $a = @{ FilePath = $exe; WorkingDirectory = $dir; PassThru = $true;
+                    RedirectStandardOutput = "$smoke\$name-stdout.log"; RedirectStandardError = "$smoke\$name-stderr.log" }
+            if ($argv) { $a.ArgumentList = $argv }
+            $p = Start-Process @a
+            $null = $p.Handle  # keeps the exit code readable if it exits early
+            Start-Sleep -Seconds $secs
+            Shot $name
+            $alive = -not $p.HasExited
+            if ($alive) { Stop-Process -Id $p.Id -Force; Start-Sleep -Seconds 2 }
+            Write-Host "=== ${name}: $(if ($alive) { 'still running' } else { "exited, code $($p.ExitCode)" })"
+            Get-Content "$smoke\$name-stdout.log", "$smoke\$name-stderr.log" -Tail 30 -ErrorAction SilentlyContinue | Out-Host
+            return $alive
+          }
+          $stage = Resolve-Path target\package\stage
+          $setup = Get-ChildItem target\package\dist\*-Setup-*.exe | Select-Object -First 1
+          $ok = @{}
+          foreach ($gl in 'opengl', 'd3d12') {
+            # A copy of the app and the setup; the OpenGL run gets Mesa next to them.
+            $dir = (New-Item -ItemType Directory "run-$gl").FullName
+            Copy-Item "$stage\*" $dir -Recurse
+            Copy-Item $setup.FullName $dir
+            if ($gl -eq 'opengl') { Copy-Item mesa-gl\*.dll $dir }
+            $ok["setup-$gl"] = Run "setup-$gl" (Join-Path $dir $setup.Name) $null $dir 15
+            $ok["app-$gl"] = Run "app-$gl" "$dir\steam-rs.exe" @('--demo') $dir 30
+            # Which renderer drew it: the fallback logs this line.
+            $fellBack = [bool](Select-String -Path "$smoke\app-$gl-*.log" -Pattern 'using Direct3D 12 instead' -Quiet)
+            Write-Host "=== app-${gl}: fell back to Direct3D 12: $fellBack"
+            if ($fellBack -ne ($gl -eq 'd3d12')) { $ok["renderer-$gl"] = $false }
+          }
+          $ok.GetEnumerator() | Sort-Object Name | Out-Host
+          if ($ok.Values -contains $false) { throw "A smoke test failed" }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-test
+          path: smoke/
