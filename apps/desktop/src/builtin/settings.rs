@@ -367,6 +367,10 @@ fn library(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
     if info_row(ui, t, t!("Add a non-Steam game"), "", Some(t!("Open library"))) {
         ctx.navigate("library", None);
     }
+    let n = ctx.local.libraries.len();
+    if info_row(ui, t, t!("Library folders"), &t!("{n} folders", n = n), Some(t!("Add library folder…"))) {
+        add_library_folder(ctx);
+    }
     #[cfg(not(windows))]
     proton_version(ui, t);
 }
@@ -577,6 +581,16 @@ fn overlay(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
     });
 }
 
+/// Pick a folder and remember it as a library folder (games installed there show up).
+fn add_library_folder(ctx: &mut Ctx) {
+    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+        match local::add_library(&p) {
+            Ok(()) => ctx.act(extensions::Action::ReloadLocal),
+            Err(e) => ctx.toast(format!("{}: {e}", p.display())),
+        }
+    }
+}
+
 fn folders(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
     // Saved pictures (store and library art), like Steam's web browser cache.
     w::card(t).show(ui, |ui| {
@@ -604,12 +618,7 @@ fn folders(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
     ui.add_space(14.0);
     w::page_title(ui, t, t!("Library folders"), Some(t!("Folders where games are installed: your Steam setup's, and any you add here.")));
     if w::button(ui, t, Some(icons::FOLDER), t!("Add library folder…"), w::Kind::Secondary, w::Size::Sm).clicked() {
-        if let Some(p) = rfd::FileDialog::new().pick_folder() {
-            match local::add_library(&p) {
-                Ok(()) => ctx.act(extensions::Action::ReloadLocal),
-                Err(e) => ctx.toast(format!("{}: {e}", p.display())),
-            }
-        }
+        add_library_folder(ctx);
     }
     ui.add_space(8.0);
     if ctx.local.libraries.is_empty() {

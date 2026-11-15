@@ -280,6 +280,7 @@
 "Folders where games are installed: your Steam setup's, and any you add here." = "Папки, куда устанавливаются игры: из вашей установки Steam и добавленные здесь."
 "Add library folder…" = "Добавить папку библиотеки…"
 "Add a folder to install games into." = "Добавьте папку для установки игр."
+"{n} folders" = "папок: {n}"
 "Install location detection looks for an existing Steam install." = "Поиск папок опирается на установленный Steam."
 "{n} games · {size}" = "игр: {n} · {size}"
 "Open" = "Открыть"
