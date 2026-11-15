@@ -1333,6 +1333,7 @@
 "SteamInRust" = "SteamInRust"
 "Achievements, cloud saves and friends work through SteamInRust." = "Достижения, облачные сохранения и друзья работают через SteamInRust."
 "Runs through Steam (anti-cheat)" = "Через Steam (античит)"
+"Runs through Steam (Steam DRM)" = "Запуск через Steam (Steam DRM)"
 "Uses {name}: starts through the official Steam client, which opens in the background." = "Использует {name}: запускается через официальный клиент Steam, он откроется в фоне."
 "Starts without Steam" = "Без Steam"
 "32-bit game" = "32-битная игра"
