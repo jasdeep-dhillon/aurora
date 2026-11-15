@@ -2,6 +2,7 @@
 //! window, account name and password on the left, QR code on the right, an
 //! account picker for saved logins, and a small splash while signing in.
 
+use ui::widgets::EditMenu;
 use i18n::t;
 use crate::app::SteamApp;
 use client::{Command, Guard, state::Phase};
@@ -239,10 +240,10 @@ fn form_and_qr(app: &mut SteamApp, ui: &mut Ui, t: &Theme, phase: &Phase) {
             ui.set_width(left_w);
             ui.add_enabled_ui(!busy, |ui| {
                 label(ui, t, t!("Sign in with account name"));
-                let name = ui.add(egui::TextEdit::singleline(&mut app.login.account).font(w::font(15.0)).desired_width(f32::INFINITY).margin(vec2(12.0, 9.0)));
+                let name = ui.add(egui::TextEdit::singleline(&mut app.login.account).font(w::font(15.0)).desired_width(f32::INFINITY).margin(vec2(12.0, 9.0))).with_edit_menu();
                 ui.add_space(12.0);
                 label(ui, t, t!("Password"));
-                let pass = ui.add(egui::TextEdit::singleline(&mut app.login.password).password(true).font(w::font(15.0)).desired_width(f32::INFINITY).margin(vec2(12.0, 9.0)));
+                let pass = ui.add(egui::TextEdit::singleline(&mut app.login.password).password(true).font(w::font(15.0)).desired_width(f32::INFINITY).margin(vec2(12.0, 9.0))).with_edit_menu();
                 w::autofocus(&name, app.login.account.is_empty() && !pass.has_focus());
                 if app.login.password_error {
                     if let Some(e) = &app.state.last_error {
@@ -372,7 +373,7 @@ fn guard(app: &mut SteamApp, ui: &mut Ui, t: &Theme, guards: &[Guard]) {
                 .align(Align2::CENTER_CENTER)
                 .desired_width(f32::INFINITY)
                 .margin(vec2(12.0, 12.0)),
-        );
+        ).with_edit_menu();
         w::autofocus(&field, app.login.code.is_empty());
         app.login.code = app.login.code.to_uppercase();
         if let Some(e) = &app.state.guard_error {

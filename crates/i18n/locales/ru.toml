@@ -1750,3 +1750,5 @@
 "Running install script…" = "Выполняется скрипт установки…"
 "Running install script: {step}" = "Скрипт установки: {step}"
 "Path to the game's program (Linux or Windows .exe)" = "Путь к программе игры (Linux или .exe для Windows)"
+"Cut" = "Вырезать"
+"Paste" = "Вставить"
