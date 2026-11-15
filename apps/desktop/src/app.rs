@@ -710,6 +710,10 @@ impl eframe::App for SteamApp {
             // at that moment, so a fixed-size window is locked only once it
             // has its size (see `pending_size` below).
             if resizable {
+                // winit (Wayland) keeps the size it pinned as the max size when
+                // the window becomes resizable again: a max below the main
+                // window's min size is a protocol error that closes the app.
+                ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::vec2(16384.0, 16384.0)));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min.into()));
