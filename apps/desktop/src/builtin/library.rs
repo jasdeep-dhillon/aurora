@@ -298,6 +298,12 @@ impl Extension for Library {
                 self.auto_update(ctx);
             }
             client::Event::GameStopped { .. } => self.auto_update(ctx),
+            client::Event::RelaunchForSteamDrm { app_id } => {
+                let Some(g) = ctx.local.games.iter().find(|g| g.app_id == *app_id).cloned() else { return };
+                ctx.toast(t!("{name} uses Steam DRM: starting it again through Steam", name = g.name.clone()));
+                let args = self.games.get(app_id).map(|s| s.args.clone()).unwrap_or_default();
+                self.launch_or_notice(ctx, *app_id, g.install_dir, args);
+            }
             client::Event::SteamCollections(Ok(list)) => self.merge_steam_collections(list),
             client::Event::CloudReport { report, held_launch } => {
                 let name = ctx.state.app_name(report.app_id).unwrap_or_default().to_string();

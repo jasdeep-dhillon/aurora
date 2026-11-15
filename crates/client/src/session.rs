@@ -349,6 +349,9 @@ struct Online {
     launch_tokens: HashMap<AppId, String>,
     /// Games the official Steam client runs (anti-cheat), by install folder.
     official: HashMap<AppId, std::path::PathBuf>,
+    /// Games stopped because their Steam DRM refused our steamclient: Play
+    /// starts them again (on Valve's engine) once they've closed.
+    drm_relaunch: std::collections::HashSet<AppId>,
     /// Two-letter country of this connection.
     country: String,
     /// The wallet's Steam currency code, once known (prices and cart country).
@@ -470,6 +473,7 @@ async fn online(
         ipc: ipc_server,
         launch_tokens: HashMap::new(),
         official: HashMap::new(),
+        drm_relaunch: Default::default(),
         country: String::new(),
         wallet_currency: None,
         auth: crate::ipc::Auth::new(info.public_ip),
@@ -1045,6 +1049,9 @@ async fn online(
                     let _ = games_played(&conn, None);
                 }
                 sink(Event::GameStopped { app_id });
+                if st.drm_relaunch.remove(&app_id) {
+                    sink(Event::RelaunchForSteamDrm { app_id });
+                }
             }
             _ = sleep_until(retry_at), if retry_at.is_some() && !connecting => {
                 retry_at = None;
@@ -2342,6 +2349,24 @@ impl Online {
                     }
                     let _ = reply.send(Reply::Stored { eresult, crc });
                 });
+            }
+            Request::SteamDrm => {
+                let _ = reply.send(Reply::Ok);
+                // Its DRM is about to refuse to start: stop it and start it
+                // again on Valve's engine (remembered for next time).
+                if launch::mark_steam_drm(app_id) {
+                    tracing::info!("game {app_id} carries Steam DRM: restarting it on Valve's engine");
+                    self.drm_relaunch.insert(app_id);
+                    let (pid, dir) = (self.running.get(&app_id).copied(), self.launched_dirs.get(&app_id).cloned());
+                    tokio::task::spawn_blocking(move || {
+                        if let Some(pid) = pid {
+                            launch::kill_tree(pid);
+                        }
+                        if let Some(dir) = dir {
+                            launch::kill_in_folder(&dir);
+                        }
+                    });
+                }
             }
             Request::RichPresence { pairs } => {
                 // "connect" is how friends join the game ("Invite to game").

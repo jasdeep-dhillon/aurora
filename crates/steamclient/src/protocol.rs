@@ -110,6 +110,10 @@ pub enum Request {
     /// ActivateGameOverlay's names ("friends", "players", "community"…), or
     /// "user:<name>" (ActivateGameOverlayToUser; target: Steam ID).
     Overlay { dialog: String, target: String },
+    /// Steam's DRM wrapped around the game asked for Steam itself (not
+    /// through steam_api): it will refuse to start on this DLL ("Application
+    /// load error 3:0000065432"). SteamInRust starts it on Valve's engine.
+    SteamDrm,
     /// Invite a friend to play with this connect string (ISteamFriends::InviteUserToGame).
     GameInvite { friend: u64, connect: String },
     /// A Valve-signed networking certificate for this Ed25519 public key

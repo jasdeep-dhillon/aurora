@@ -149,9 +149,33 @@ fn create_interface(version: usize, err: usize) -> usize {
         if state::ensure_session() {
             // Draw the Shift+Tab overlay inside the game (see overlay/).
             overlay::start();
+            steam_drm_check(version);
         }
     }
     p as usize
+}
+
+/// Games reach Steam through steam_api, which passes its own version
+/// strings. A version string from anywhere else at startup is Steam's DRM
+/// wrapper (SteamStub, or a packer carrying it) checking for Valve's client:
+/// it would show "Application load error 3:0000065432", so tell SteamInRust,
+/// which restarts the game on Valve's engine.
+fn steam_drm_check(version: usize) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static LOADED: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+    static SENT: AtomicBool = AtomicBool::new(false);
+    let since_load = LOADED.elapsed();
+    if !cfg!(windows) || since_load > std::time::Duration::from_secs(60) || SENT.load(Ordering::Relaxed) {
+        return;
+    }
+    let module = crate::win::module_of(version);
+    let from_steam = module.as_deref().is_some_and(|m| m.starts_with("steam_api") || m.starts_with("gameoverlayrenderer"));
+    if from_steam || SENT.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(version as *const c_char) }.to_string_lossy().into_owned();
+    log!("Steam DRM: {name} asked for from {}", module.as_deref().unwrap_or("code outside any module"));
+    std::thread::spawn(|| crate::ipc::request(crate::protocol::Request::SteamDrm));
 }
 
 fn get_callback(_pipe: usize, msg: usize) -> usize {

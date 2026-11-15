@@ -1700,6 +1700,7 @@
 
 # Steam-DRM games on the headless host / background Steam (Linux & Windows)
 "Steam DRM (no window)" = "Steam DRM (без окна)"
+"{name} uses Steam DRM: starting it again through Steam" = "{name} использует Steam DRM: запускаем заново через Steam"
 "Starts a limited, windowless instance of your own installed Steam in the background, with no store or friends. It signs in and closes when the game does." = "Запускает в фоне ограниченный экземпляр вашего установленного Steam без окна, без магазина и друзей. Выполняет вход и закрывается вместе с игрой."
 "Before {name} starts" = "Перед запуском {name}"
 "{name} is protected by Steam DRM, so SteamInRust starts the official Steam client minimized in the background (no window) and closes it again when you quit the game." = "{name} защищена Steam DRM, поэтому SteamInRust запускает официальный клиент Steam свёрнутым в фоне (без окна) и закрывает его, когда вы выходите из игры."

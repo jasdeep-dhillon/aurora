@@ -247,6 +247,9 @@ pub enum Event {
     /// wasn't started because of conflicts (its launch arguments).
     CloudReport { report: model::CloudReport, held_launch: Option<String> },
     GameStopped { app_id: AppId },
+    /// A game was stopped because its Steam DRM refused SteamInRust's
+    /// steamclient; Play it again (it now starts on Valve's engine).
+    RelaunchForSteamDrm { app_id: AppId },
     /// The running game entered (`Some`) or left a matchmaking lobby, so
     /// friends can be invited to it.
     GameLobby { app_id: AppId, lobby: Option<u64> },

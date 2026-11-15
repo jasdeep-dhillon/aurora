@@ -169,6 +169,7 @@ impl State {
             }
             Event::Blocked { .. } => {}
             Event::WorkshopTags { .. } => {}
+            Event::RelaunchForSteamDrm { .. } => {}
             Event::AppNames(list) => self.app_names.extend(list.iter().cloned()),
             Event::Email { address, validated } => self.email = Some((address.clone(), *validated)),
             Event::Regions(_) => {}

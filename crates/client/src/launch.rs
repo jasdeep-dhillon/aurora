@@ -48,7 +48,7 @@ pub fn mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
     // of the user's own Steam engine answers it; when that isn't available,
     // or the official client is already open (only one can run), the
     // official client runs it.
-    if launch_exe(app, install_dir).is_some_and(|exe| has_steam_drm(&exe)) {
+    if steam_drm_marked(app.app_id) || launch_exe(app, install_dir).is_some_and(|exe| has_steam_drm(&exe)) {
         if headless_host_available() && !official_steam_open() {
             return LaunchMode::HeadlessHost;
         }
@@ -89,11 +89,13 @@ fn windows_mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
     LaunchMode::SteamInRust
 }
 
+/// What [`mode_cached`] remembers.
+static MODE_CACHE: Mutex<Option<std::collections::HashMap<(AppId, PathBuf), (Instant, LaunchMode)>>> = Mutex::new(None);
+
 /// [`mode`], remembered for a minute (for UI that asks every frame).
 pub fn mode_cached(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
-    static CACHE: Mutex<Option<std::collections::HashMap<(AppId, PathBuf), (Instant, LaunchMode)>>> = Mutex::new(None);
     let key = (app.app_id, install_dir.to_path_buf());
-    let mut cache = CACHE.lock().unwrap();
+    let mut cache = MODE_CACHE.lock().unwrap();
     let map = cache.get_or_insert_with(Default::default);
     if let Some((_, m)) = map.get(&key).filter(|(at, _)| at.elapsed() < Duration::from_secs(60)) {
         return m.clone();
@@ -189,6 +191,36 @@ fn launch_exe(app: &OwnedApp, install_dir: &Path) -> Option<PathBuf> {
     return linux::plan(app, install_dir).ok().map(|p| p.exe(install_dir));
     #[allow(unreachable_code)]
     executable(app, install_dir)
+}
+
+/// Games found to carry Steam's DRM while running on our steamclient (see
+/// `Request::SteamDrm`): wrappers without a `.bind` section, such as
+/// PRAGMATA's packer. One app id per line.
+fn steam_drm_file() -> PathBuf {
+    crate::store::config_dir().join("steam-drm-apps.txt")
+}
+
+fn steam_drm_marked(app_id: AppId) -> bool {
+    std::fs::read_to_string(steam_drm_file()).is_ok_and(|t| t.lines().any(|l| l.trim().parse() == Ok(app_id)))
+}
+
+/// Remember that this game carries Steam's DRM, so Play starts it on Valve's
+/// engine from now on. False if it was already known.
+pub fn mark_steam_drm(app_id: AppId) -> bool {
+    if steam_drm_marked(app_id) {
+        return false;
+    }
+    let path = steam_drm_file();
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    text.push_str(&format!("{app_id}\n"));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, text);
+    if let Some(map) = MODE_CACHE.lock().unwrap().as_mut() {
+        map.retain(|(id, _), _| *id != app_id);
+    }
+    true
 }
 
 /// Wrapped with Steam's DRM (SteamStub), which adds a `.bind` section to the
