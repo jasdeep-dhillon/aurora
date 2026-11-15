@@ -50,6 +50,14 @@ pub struct Prefs {
     /// with, instead of Steam's pick. `None` follows Steam's choice.
     #[serde(default)]
     pub proton_override: Option<String>,
+    /// The main window's last size, position and maximized state, restored on
+    /// the next run (the sign-in and splash windows always center small).
+    #[serde(default)]
+    pub win_size: Option<[f32; 2]>,
+    #[serde(default)]
+    pub win_pos: Option<[f32; 2]>,
+    #[serde(default)]
+    pub win_maximized: bool,
 }
 
 fn yes() -> bool {
@@ -80,6 +88,9 @@ impl Default for Prefs {
             scroll_speed: 2.0,
             drm_host_ack: false,
             proton_override: None,
+            win_size: None,
+            win_pos: None,
+            win_maximized: false,
         }
     }
 }
@@ -126,6 +137,8 @@ pub struct SteamApp {
     /// "A download is in progress, exit anyway?" is showing.
     confirm_exit: bool,
     window_mode: Option<WindowMode>,
+    /// A window size waiting to be centered once the monitor size is known.
+    center_window: Option<[f32; 2]>,
     pub tray: crate::tray::Tray,
     flags: crate::builtin::settings::SharedFlags,
     pub friends_window: crate::friends_window::FriendsWindow,
@@ -244,6 +257,7 @@ impl SteamApp {
             cart_count: None,
             confirm_exit: false,
             window_mode: None,
+            center_window: None,
             tray: crate::tray::Tray::new(&cc.egui_ctx),
             flags,
             friends_window: Default::default(),
@@ -684,20 +698,55 @@ impl eframe::App for SteamApp {
             self.window_mode = Some(mode);
             let (size, min, resizable) = match mode {
                 WindowMode::Main => ([1440.0, 900.0], [1060.0, 680.0], true),
-                WindowMode::SignIn => ([720.0, 470.0], [720.0, 470.0], false),
+                // Small, compact sign-in and splash windows, like Steam's.
+                WindowMode::SignIn => ([560.0, 400.0], [560.0, 400.0], false),
                 WindowMode::Splash => ([380.0, 250.0], [380.0, 250.0], false),
             };
-            if mode != WindowMode::Main {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
-            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(resizable));
             ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min.into()));
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.into()));
-            // Keep it centered on the screen, like Steam's windows.
-            if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
-                let pos = ((monitor - egui::Vec2::from(size)) / 2.0).max(egui::Vec2::ZERO);
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos.to_pos2()));
+            // Main: restore the last size/position/maximized. Sign-in and
+            // splash: always small and centered on the main display.
+            if mode == WindowMode::Main && self.prefs.win_maximized {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.prefs.win_size.unwrap_or(size).into()));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+                self.center_window = None;
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                let size = if mode == WindowMode::Main { self.prefs.win_size.unwrap_or(size) } else { size };
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.into()));
+                // Restore a saved main-window position, else center once the
+                // monitor size is known (it can be unknown on this frame).
+                match (mode, self.prefs.win_pos) {
+                    (WindowMode::Main, Some(pos)) => ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos.into())),
+                    _ => self.center_window = Some(size),
+                }
             }
+        }
+        // Center when a size is pending and the monitor size has arrived.
+        if let (Some(size), Some(monitor)) = (self.center_window, ctx.input(|i| i.viewport().monitor_size)) {
+            let pos = ((monitor - egui::Vec2::from(size)) / 2.0).max(egui::Vec2::ZERO);
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos.to_pos2()));
+            self.center_window = None;
+        }
+        // Remember the main window's geometry for next time.
+        if mode == WindowMode::Main {
+            ctx.input(|i| {
+                let vp = i.viewport();
+                // Right after sign-in the window is still sign-in sized for a
+                // few frames: don't take that for the main window's size.
+                if vp.inner_rect.is_none_or(|r| r.width() < 1000.0 || r.height() < 600.0) {
+                    return;
+                }
+                self.prefs.win_maximized = vp.maximized.unwrap_or(false);
+                if !self.prefs.win_maximized && !vp.minimized.unwrap_or(false) {
+                    if let Some(r) = vp.outer_rect {
+                        self.prefs.win_pos = Some([r.min.x, r.min.y]);
+                    }
+                    if let Some(r) = vp.inner_rect {
+                        self.prefs.win_size = Some([r.width(), r.height()]);
+                    }
+                }
+            });
         }
         if signed_in {
             crate::shell::show(self, ui, &mut actions);
@@ -723,6 +772,15 @@ impl eframe::App for SteamApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.prefs.ext_data = self.registry.save_all().into_iter().collect();
         eframe::set_value(storage, "prefs", &self.prefs);
+    }
+
+    /// Dropping a tokio runtime waits for every blocking task to return: a
+    /// running game's wait, a verify, the headless Steam host. Closing then
+    /// left an invisible process behind, and the next launch handed itself to
+    /// that stuck copy. Give the tasks a moment and stop waiting for them.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let idle = tokio::runtime::Builder::new_current_thread().build().expect("tokio runtime");
+        std::mem::replace(&mut self._rt, idle).shutdown_timeout(std::time::Duration::from_secs(2));
     }
 }
 

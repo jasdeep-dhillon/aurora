@@ -41,10 +41,13 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title(i18n::BRAND)
             // Starts at sign-in size; the app resizes itself after sign-in.
-            .with_inner_size([720.0, 470.0])
+            .with_inner_size([560.0, 400.0])
             // Our own title bar (see chrome.rs) instead of the Windows one.
             .with_decorations(false)
             .with_icon(std::sync::Arc::new(ui::brand::window_icon(256))),
+        // The app keeps the main window's geometry itself (app.rs): eframe's
+        // copy would reopen the small sign-in window at the main size.
+        persist_window: false,
         ..Default::default()
     };
     // "SteamInRust" names the settings folder (and Wayland app id): kept so
