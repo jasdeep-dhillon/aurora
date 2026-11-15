@@ -615,11 +615,13 @@ pub fn run_through_steam(app_id: AppId, args: &str, steam_id: u64, offline: bool
         }
     }
     let _restore = RestoreLogin;
-    let exe = steam_exe().ok_or_else(|| "This game uses anti-cheat and runs through the official Steam client, which isn't installed. Install Steam from store.steampowered.com, sign in, then press Play again.".to_string())?;
+    let exe = steam_exe().ok_or_else(|| "This game runs through the official Steam client, which isn't installed. Install Steam from store.steampowered.com, sign in, then press Play again.".to_string())?;
     if offline && !steam_running() && remembered_account(steam_id).is_none() {
-        return Err("This game uses anti-cheat and runs through the official Steam client. Steam can only start offline for an account it remembers: sign in to Steam once with \"Remember me\" while online.".into());
+        return Err("This game runs through the official Steam client. Steam can only start offline for an account it remembers: sign in to Steam once with \"Remember me\" while online.".into());
     }
-    if !steam_running() {
+    // Steam started here only for this game closes again with it.
+    let ours = !steam_running();
+    if ours {
         start_steam(&exe, steam_id, offline)?;
     }
     if !wait_until(Duration::from_secs(20), signed_in) && win::reg_dword(ACTIVE, "ActiveUser").unwrap_or(0) == 0 {
@@ -647,6 +649,10 @@ pub fn run_through_steam(app_id: AppId, args: &str, steam_id: u64, offline: bool
     while app_running(app_id) {
         std::thread::sleep(Duration::from_secs(2));
     }
+    if ours {
+        tracing::info!("the game closed; shutting down the Steam client started for it");
+        let _ = quiet(Command::new(&exe).arg("-shutdown")).spawn();
+    }
     Ok(())
 }
 
@@ -655,7 +661,10 @@ fn start_steam(exe: &Path, steam_id: u64, offline: bool) -> Result<(), String> {
         Some(account) => tracing::info!("starting the official Steam client in the background, signed in as {account}"),
         None => tracing::info!("starting the official Steam client in the background (it doesn't remember this account)"),
     }
-    quiet(Command::new(exe).arg("-silent")).spawn().map_err(|e| format!("Couldn't start Steam: {e}"))?;
+    // Only there for the game (anti-cheat, Steam DRM): no windows, and its
+    // web layer kept small (about 500 MB in all with Teardown running).
+    let lean = ["-silent", "-nofriendsui", "-nochatui", "-cef-single-process", "-cef-disable-gpu", "-cef-disable-gpu-compositing"];
+    quiet(Command::new(exe).args(lean)).spawn().map_err(|e| format!("Couldn't start Steam: {e}"))?;
     if !wait_until(Duration::from_secs(90), steam_running) {
         return Err("Steam didn't start. Open Steam yourself, then press Play again.".into());
     }

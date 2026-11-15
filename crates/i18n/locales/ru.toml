@@ -1340,7 +1340,7 @@
 "game file not found" = "файл игры не найден"
 "no launch option for this system" = "нет варианта запуска для этой системы"
 "steamclient.dll not found next to SteamInRust" = "steamclient.dll не найден рядом с SteamInRust"
-"This game uses anti-cheat and runs through the official Steam client, which isn't installed. Install Steam from store.steampowered.com, sign in, then press Play again." = "В этой игре есть античит, она запускается через официальный клиент Steam, а он не установлен. Установите Steam с store.steampowered.com, войдите и снова нажмите «Играть»."
+"This game runs through the official Steam client, which isn't installed. Install Steam from store.steampowered.com, sign in, then press Play again." = "Эта игра запускается через официальный клиент Steam, а он не установлен. Установите Steam с store.steampowered.com, войдите и снова нажмите «Играть»."
 "Steam didn't start. Open Steam yourself, then press Play again." = "Steam не запустился. Откройте Steam сами и снова нажмите «Играть»."
 "Steam is running but not signed in. Sign in to the Steam window, then press Play again." = "Steam запущен, но вход не выполнен. Войдите в окне Steam и снова нажмите «Играть»."
 "Steam didn't start the game. Check the Steam window for a message." = "Steam не запустил игру. Проверьте сообщение в окне Steam."
@@ -1432,7 +1432,7 @@
 "· paused while offline" = "· на паузе без сети"
 "This account hasn't signed in online on this PC yet, so it can't start in offline mode." = "Этот аккаунт ещё не входил в сеть на этом компьютере, поэтому его нельзя запустить в автономном режиме."
 "No offline data for this account" = "Для этого аккаунта нет данных для автономного режима"
-"This game uses anti-cheat and runs through the official Steam client. Steam can only start offline for an account it remembers: sign in to Steam once with \"Remember me\" while online." = "Эта игра использует античит и запускается через официальный клиент Steam. Steam запускается без сети только для запомненного аккаунта: войдите в Steam один раз с флажком «Запомнить меня», пока есть сеть."
+"This game runs through the official Steam client. Steam can only start offline for an account it remembers: sign in to Steam once with \"Remember me\" while online." = "Эта игра запускается через официальный клиент Steam. Steam запускается без сети только для запомненного аккаунта: войдите в Steam один раз с флажком «Запомнить меня», пока есть сеть."
 
 # --- Setup wizard (laid out like Steam's installer) and the updater window ---
 "SteamInRust Setup" = "Установка SteamInRust"
