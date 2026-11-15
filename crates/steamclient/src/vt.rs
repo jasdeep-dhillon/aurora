@@ -233,7 +233,8 @@ fn stub(kind: &str, name: &str) -> Fp {
         Some(16) => sret::<16> as Fp,
         Some(20) => sret::<20> as Fp,
         Some(40) => sret::<40> as Fp,
-        _ => zero as Fp,
+        // Plain zero, traced by name when the log is on.
+        _ => crate::trace::stub(kind, name).unwrap_or(zero as Fp),
     }
 }
 

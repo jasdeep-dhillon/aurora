@@ -43,6 +43,7 @@ mod servers;
 mod sns;
 mod state;
 mod tables;
+mod trace;
 #[cfg_attr(not(target_arch = "x86"), allow(dead_code))]
 mod tables32;
 mod ugc;
@@ -105,7 +106,9 @@ macro_rules! exports {
                 Mode::Ours => {
                     let _ = (g, h);
                     let ours: fn(usize, usize, usize, usize, usize, usize) -> usize = $ours;
-                    ours(a, b, c, d, e, f)
+                    let r = ours(a, b, c, d, e, f);
+                    trace::export(stringify!($name), [a, b, c], r);
+                    r
                 }
             }
         }
