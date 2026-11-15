@@ -1,0 +1,11 @@
+[package]
+name = "steamhost"
+description = "Hosts Valve's own, unmodified steamclient.so without steamui/steamwebhelper (Linux)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
