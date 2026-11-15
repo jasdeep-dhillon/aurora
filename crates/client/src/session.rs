@@ -539,7 +539,7 @@ async fn online(
             let (app_id, install_dir, args): (AppId, std::path::PathBuf, String) = ($app_id, $install_dir, $args);
                 // Like Steam: bring down newer cloud saves first (games the
                 // official client runs get its own cloud sync instead).
-                let official = st.apps.get(&app_id).is_some_and(|a| matches!(launch::mode(a, &install_dir), crate::LaunchMode::OfficialSteam { .. }));
+                let official = st.apps.get(&app_id).is_some_and(|a| matches!(launch::mode(a, &install_dir), crate::LaunchMode::OfficialSteam { .. } | crate::LaunchMode::HeadlessHost));
                 match st.cloud_target(app_id, &install_dir).filter(|_| !official) {
                     // Offline: play with the saves on this PC; they go up once online.
                     Some(_) if st.link != Link::Online && !st.running.contains_key(&app_id) => {
@@ -667,7 +667,7 @@ async fn online(
                 Some(Command::Launch { app_id, install_dir, args }) => {
                     // Like Steam: subscribed Workshop items are downloaded
                     // (or updated) before the game starts, then cloud saves.
-                    let official = st.apps.get(&app_id).is_some_and(|a| matches!(launch::mode(a, &install_dir), crate::LaunchMode::OfficialSteam { .. }));
+                    let official = st.apps.get(&app_id).is_some_and(|a| matches!(launch::mode(a, &install_dir), crate::LaunchMode::OfficialSteam { .. } | crate::LaunchMode::HeadlessHost));
                     let library = crate::workshop::library_of(&install_dir).filter(|_| !official && st.link == Link::Online && !st.running.contains_key(&app_id));
                     match library {
                         Some(library) => {
@@ -2179,6 +2179,27 @@ impl Online {
                 });
                 return Ok(());
             }
+            #[cfg(not(windows))]
+            crate::LaunchMode::HeadlessHost => {
+                // The user's own Steam engine, headless, runs it; we follow
+                // along like the official-client case (the engine sends its
+                // own presence/stats). It needs the live refresh token.
+                let app = app.clone();
+                let (account, token, me) = (self.account.clone(), self.refresh_token.clone(), self.me);
+                self.running.insert(app_id, 0);
+                self.official.insert(app_id, dir.to_path_buf());
+                let (tx, sink, args, dir2) = (exit_tx.clone(), sink.clone(), args.to_string(), dir.to_path_buf());
+                tokio::task::spawn_blocking(move || {
+                    let started = || sink(Event::GameStarted { app_id });
+                    if let Err(e) = launch::run_through_host(&app, &dir2, &args, &account, &token, me, started) {
+                        sink(Event::Error(e));
+                    }
+                    let _ = tx.send(app_id);
+                });
+                return Ok(());
+            }
+            #[cfg(windows)]
+            crate::LaunchMode::HeadlessHost => unreachable!("HeadlessHost is Linux-only"),
             crate::LaunchMode::SteamInRust => {
                 let token = self.ipc.register(app_id);
                 let is64 = launch::exe_is_64bit(app, dir).unwrap_or(true);

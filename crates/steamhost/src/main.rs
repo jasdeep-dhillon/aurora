@@ -38,6 +38,7 @@ fn main() {
         "probe" => engine::probe(root),
         "client-test" => engine::client_test(root),
         "login" => engine::login(root),
+        "serve" => engine::serve(root),
         _ => Err(format!("unknown command {cmd}")),
     };
     let status = match code {

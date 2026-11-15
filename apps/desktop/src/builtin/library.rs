@@ -1393,6 +1393,7 @@ impl Library {
                                 let (mode, why) = match client::launch_mode_cached(o, &g.install_dir) {
                                     client::LaunchMode::SteamInRust => (t!("SteamInRust"), t!("Achievements, cloud saves and friends work through SteamInRust.").to_string()),
                                     client::LaunchMode::OfficialSteam { anti_cheat } => (if anti_cheat == client::STEAM_DRM { t!("Runs through Steam (Steam DRM)") } else if cfg!(windows) { t!("Runs through Steam (anti-cheat)") } else { t!("Runs through Steam") }, t!("Uses {name}: starts through the official Steam client, which opens in the background.", name = anti_cheat)),
+                                    client::LaunchMode::HeadlessHost => (t!("Steam DRM (no window)"), t!("Starts a limited, windowless instance of your own installed Steam in the background, with no store or friends. It signs in and closes when the game does.").to_string()),
                                     client::LaunchMode::NoSteam { reason } => (t!("Starts without Steam"), i18n::tr_dyn(&reason)),
                                 };
                                 ui.add_space(20.0);

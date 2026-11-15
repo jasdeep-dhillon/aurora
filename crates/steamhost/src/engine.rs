@@ -219,20 +219,38 @@ mod user {
     pub const SET_LOGIN_TOKEN: usize = 56; // void SetLoginToken(const char* token, const char* account)
 }
 
-/// Sign in with a Steam-client refresh token. The account name, token and
-/// SteamID come on stdin (one per line), never argv/env, which other
-/// processes can read.
-pub fn login(root: &Path) -> Result<(), String> {
-    let mut lines = std::io::stdin().lines();
+/// The printed line that tells a parent process the host is signed in and
+/// ready for games to connect. Diagnostics go to stderr; this marker is the
+/// only thing a parent needs to match on stdout.
+pub const READY: &str = "STEAMHOST-READY";
+
+/// Account name, refresh token and SteamID, read one per line from stdin —
+/// never argv/env, which other processes can read.
+fn read_credentials(
+    lines: &mut impl Iterator<Item = std::io::Result<String>>,
+) -> Result<(CString, CString, u64), String> {
     let mut next = |what: &str| -> Result<String, String> {
         let l = lines.next().ok_or(format!("stdin: missing {what}"))?.map_err(|e| e.to_string())?;
         Ok(l.trim().to_owned())
     };
     let (account, token, steam_id) = (next("account name")?, next("refresh token")?, next("SteamID")?);
     let steam_id: u64 = steam_id.parse().map_err(|_| "SteamID must be a 64-bit number".to_string())?;
-    let (account, token) =
-        (CString::new(account).map_err(|e| e.to_string())?, CString::new(token).map_err(|e| e.to_string())?);
+    Ok((
+        CString::new(account).map_err(|e| e.to_string())?,
+        CString::new(token).map_err(|e| e.to_string())?,
+        steam_id,
+    ))
+}
 
+/// A signed-in headless instance. Holding it keeps Valve's library loaded and
+/// the global instance alive; the process exits to end the session.
+struct Session {
+    _lib: Lib,
+}
+
+/// Become the global instance and sign in with the given credentials, waiting
+/// until the engine reports logged-on (or timing out).
+fn sign_in(root: &Path, account: CString, token: CString, steam_id: u64) -> Result<Session, String> {
     let lib = Lib::open(root)?;
     let (e, pipe, h_user) = global_instance(&lib)?;
     // SAFETY: getter slot shaped (this, hUser, hPipe), see `layout`.
@@ -248,7 +266,7 @@ pub fn login(root: &Path) -> Result<(), String> {
         let set_token: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) = slot(cu, user::SET_LOGIN_TOKEN);
         set_token(cu, token.as_ptr(), account.as_ptr());
         let log_on: unsafe extern "C" fn(*mut c_void, u64) -> c_int = slot(cu, user::LOG_ON);
-        println!("LogOn -> EResult {}", log_on(cu, steam_id));
+        eprintln!("LogOn -> EResult {}", log_on(cu, steam_id));
     }
     drop(token);
     let logged_on: unsafe extern "C" fn(*mut c_void) -> bool = unsafe { slot(cu, user::B_LOGGED_ON) };
@@ -258,17 +276,42 @@ pub fn login(root: &Path) -> Result<(), String> {
         // SAFETY: as above.
         let (s, ok) = unsafe { (state(cu), logged_on(cu)) };
         if s != last {
-            println!("logon state {s}");
+            eprintln!("logon state {s}");
             last = s;
         }
         if ok {
-            println!("logged on");
-            hold();
-            return Ok(());
+            return Ok(Session { _lib: lib });
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
     Err("not logged on after 60s".into())
+}
+
+/// Sign in, then hold the instance for a while (manual testing).
+pub fn login(root: &Path) -> Result<(), String> {
+    let mut lines = std::io::stdin().lines();
+    let (account, token, steam_id) = read_credentials(&mut lines)?;
+    let _session = sign_in(root, account, token, steam_id)?;
+    eprintln!("logged on");
+    hold();
+    Ok(())
+}
+
+/// Sign in, print [`READY`], then serve games until the parent closes our
+/// stdin (or sends EOF); then shut down by exiting. This is what the app runs
+/// for a DRM game: it stays up only as long as the parent holds the pipe.
+pub fn serve(root: &Path) -> Result<(), String> {
+    let mut lines = std::io::stdin().lines();
+    let (account, token, steam_id) = read_credentials(&mut lines)?;
+    let _session = sign_in(root, account, token, steam_id)?;
+    println!("{READY}");
+    use std::io::Write;
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    eprintln!("ready; serving until stdin closes");
+    // Block until the parent drops the pipe (EOF) or sends a line.
+    for _ in lines {}
+    eprintln!("stdin closed; shutting down");
+    Ok(())
 }
 
 pub fn probe(root: &Path) -> Result<(), String> {

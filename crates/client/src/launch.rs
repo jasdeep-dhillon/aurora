@@ -28,6 +28,10 @@ pub enum LaunchMode {
     /// Runs through the official Steam client because of its anti-cheat
     /// (named in `anti_cheat`).
     OfficialSteam { anti_cheat: String },
+    /// Linux, Steam-DRM games: runs on a headless instance of the user's own
+    /// Steam engine (no steamui/CEF), which the Proton game connects to
+    /// through lsteamclient. The engine answers SteamStub's check itself.
+    HeadlessHost,
     /// Starts without Steam features; `reason` says why.
     NoSteam { reason: String },
 }
@@ -39,8 +43,14 @@ pub fn mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
         return LaunchMode::OfficialSteam { anti_cheat: ac };
     }
     // Steam DRM checks with Valve's client before the game even starts
-    // ("Application load error 3:0000065432" with ours); only Steam can run it.
+    // ("Application load error 3:0000065432" with ours). On Linux we answer it
+    // with a headless instance of the user's own Steam engine; elsewhere, or
+    // when that isn't available, the official client runs it.
     if launch_exe(app, install_dir).is_some_and(|exe| has_steam_drm(&exe)) {
+        #[cfg(not(windows))]
+        if headless_host_available() {
+            return LaunchMode::HeadlessHost;
+        }
         return LaunchMode::OfficialSteam { anti_cheat: STEAM_DRM.into() };
     }
     // Linux: SteamInRust starts the game itself, natively or with Proton.
@@ -669,6 +679,135 @@ fn start_steam(exe: &Path, steam_id: u64, offline: bool) -> Result<(), String> {
         return Err("Steam didn't start. Open Steam yourself, then press Play again.".into());
     }
     Ok(())
+}
+
+// ----------------------------------------------------- headless host (Linux)
+
+/// The `steamhost` helper: shipped next to the app, or (in dev) found in the
+/// build output or named by `STEAMHOST_BIN`.
+#[cfg(not(windows))]
+fn steamhost_bin() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("STEAMHOST_BIN").map(PathBuf::from).filter(|p| p.is_file()) {
+        return Some(p);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let beside = exe.parent()?.join("steamhost");
+    if beside.is_file() {
+        return Some(beside);
+    }
+    // Dev: target/<profile>/steamhost next to the app binary's target dir.
+    let dev = exe.parent()?.join("steamhost");
+    dev.is_file().then_some(dev)
+}
+
+/// The headless host can run a Steam-DRM game here: we have the helper and a
+/// Steam install with the engine it loads.
+#[cfg(not(windows))]
+fn headless_host_available() -> bool {
+    steamhost_bin().is_some()
+        && local::find_steam_root().is_some_and(|r| r.join("linux64/steamclient.so").is_file())
+}
+
+/// Printed by `steamhost serve` once it is signed in and serving.
+#[cfg(not(windows))]
+const STEAMHOST_READY: &str = "STEAMHOST-READY";
+
+/// Run a Steam-DRM game on a headless instance of the user's own Steam engine.
+///
+/// Starts `steamhost serve` (signed in with the user's refresh token, fed on
+/// stdin — never argv/env), waits until it is ready, launches the game through
+/// Proton with lsteamclient left on so Valve's library inside the game reaches
+/// the host, waits for the game to close, then drops the pipe so the host
+/// shuts down. Nothing of Valve's is bundled or modified; the engine does its
+/// own ownership check, so a game the user doesn't own won't start.
+#[cfg(not(windows))]
+pub fn run_through_host(
+    app: &OwnedApp,
+    install_dir: &Path,
+    args: &str,
+    account: &str,
+    token: &str,
+    steam_id: u64,
+    started: impl FnOnce(),
+) -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::mpsc;
+
+    let bin = steamhost_bin().ok_or("the steamhost helper is missing")?;
+    let root = local::find_steam_root().ok_or("no Steam install found for the headless host")?;
+
+    let mut host = Command::new(&bin)
+        .arg("serve")
+        .arg(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("couldn't start the headless Steam host: {e}"))?;
+
+    // Credentials over the pipe, which we hold open to keep the host alive.
+    let mut stdin = host.stdin.take().ok_or("host stdin unavailable")?;
+    stdin.write_all(format!("{account}\n{token}\n{steam_id}\n").as_bytes()).map_err(|e| format!("couldn't send credentials to the host: {e}"))?;
+    stdin.flush().ok();
+
+    // Watch stdout for the ready marker on another thread (reading blocks).
+    let stdout = host.stdout.take().ok_or("host stdout unavailable")?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if line.trim() == STEAMHOST_READY {
+                let _ = tx.send(true);
+                return;
+            }
+        }
+        let _ = tx.send(false); // stdout closed without ready = host gave up
+    });
+
+    let ready = rx.recv_timeout(Duration::from_secs(90)).unwrap_or(false);
+    if !ready {
+        let _ = host.kill();
+        let _ = host.wait();
+        return Err("the headless Steam host didn't sign in. Check that this account is signed in to SteamInRust, then press Play again.".into());
+    }
+    tracing::info!("headless Steam host ready; launching {}", app.name);
+
+    // Launch the game through Proton with lsteamclient ON (the default), so the
+    // game's steamclient reaches the host. `command` already points
+    // STEAM_COMPAT_CLIENT_INSTALL_PATH at the real Steam root.
+    let game = spawn_for_host(app, install_dir, args, account);
+    let mut child = match game {
+        Ok(c) => c,
+        Err(e) => {
+            drop(stdin);
+            let _ = host.wait();
+            return Err(e);
+        }
+    };
+    started();
+    let _ = child.wait();
+
+    // Game closed: drop the pipe so the host signs out and exits.
+    tracing::info!("{} closed; shutting down the headless Steam host", app.name);
+    drop(stdin);
+    if !wait_until(Duration::from_secs(10), || host.try_wait().ok().flatten().is_some()) {
+        let _ = host.kill();
+    }
+    let _ = host.wait();
+    Ok(())
+}
+
+/// The Proton launch for the headless-host path: the normal command plus the
+/// `Steam*` environment a game expects, with lsteamclient left enabled.
+#[cfg(not(windows))]
+fn spawn_for_host(app: &OwnedApp, install_dir: &Path, args: &str, account: &str) -> Result<Child, String> {
+    let mut cmd = command(app, install_dir, args)?;
+    let id = app.app_id.to_string();
+    cmd.env("SteamOverlayGameId", &id)
+        .env("SteamClientLaunch", "1")
+        .env("SteamEnv", "1")
+        .env("SteamAppUser", account)
+        .env("SteamUser", account);
+    cmd.spawn().map_err(|e| format!("could not start {}: {e}", app.name))
 }
 
 /// Steam's output isn't ours to show.
