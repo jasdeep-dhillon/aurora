@@ -40,8 +40,7 @@ pub fn mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
     }
     // Steam DRM checks with Valve's client before the game even starts
     // ("Application load error 3:0000065432" with ours); only Steam can run it.
-    let drm_ours = std::env::var("STEAMINRUST_STEAM_DRM").as_deref() == Ok("ours");
-    if !drm_ours && launch_exe(app, install_dir).is_some_and(|exe| has_steam_drm(&exe)) {
+    if launch_exe(app, install_dir).is_some_and(|exe| has_steam_drm(&exe)) {
         return LaunchMode::OfficialSteam { anti_cheat: STEAM_DRM.into() };
     }
     // Linux: SteamInRust starts the game itself, natively or with Proton.
