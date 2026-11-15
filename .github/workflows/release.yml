@@ -7,14 +7,22 @@
 # the Windows files too when that build succeeded). Pushes that don't change
 # the version do nothing here (Build still checks them).
 #
-# Run it by hand (Actions → Release → Run workflow) to build the files; it
-# publishes only if the version isn't released yet.
+# Run it by hand (Actions → Release → Run workflow) to build the files; on
+# main it publishes only if the version isn't released yet. Run by hand on
+# any other branch (or with "Test build" ticked) it publishes a prerelease
+# tagged vX.Y.Z-test.N for testers instead: installed copies don't update to
+# prereleases, and the real vX.Y.Z stays free for the release from main.
 name: Release
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      test:
+        description: "Test build: publish a prerelease (always on outside main)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -30,13 +38,27 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       release: ${{ steps.v.outputs.release }}
+      tag: ${{ steps.v.outputs.tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
       - name: Is this version released yet?
         id: v
+        env:
+          TEST: ${{ github.event_name == 'workflow_dispatch' && (inputs.test || github.ref != 'refs/heads/main') }}
         run: |
           v=$(sed -n 's/^version = "\(.*\)".*/\1/p' Cargo.toml | head -n1)
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [ "$TEST" = "true" ]; then
+            # A test build: its own tag, never the release's.
+            echo "tag=v$v-test.$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "Test build: publishing prerelease v$v-test.$GITHUB_RUN_NUMBER from ${GITHUB_REF#refs/heads/}."
+            exit 0
+          fi
+          echo "tag=v$v" >> "$GITHUB_OUTPUT"
+          echo "prerelease=false" >> "$GITHUB_OUTPUT"
           if git ls-remote --exit-code --tags origin "refs/tags/v$v" > /dev/null; then
             echo "release=false" >> "$GITHUB_OUTPUT"
             echo "v$v is already tagged: nothing to release."
@@ -67,18 +89,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # steamclient is a Windows DLL (it doesn't link on Linux), so only the
-      # app; tests for the crates that are platform-neutral.
+      # app and the steamhost helper (the headless Steam host for DRM games);
+      # tests for the crates that are platform-neutral.
       - name: Test
         run: cargo test --release --locked -p i18n -p ui -p vdf -p model -p store
 
       - name: Build
-        run: cargo build --release --locked -p steam-rs
+        run: cargo build --release --locked -p steam-rs -p steamhost
 
       - name: Package
         run: |
           name=SteamOnRust-Linux-x86_64
           mkdir -p dist/$name
-          cp target/release/steam-rs README.md LICENSE dist/$name/
+          cp target/release/steam-rs target/release/steamhost README.md LICENSE dist/$name/
           tar -C dist -czf dist/$name.tar.gz $name
           (cd dist && sha256sum $name.tar.gz > $name.tar.gz.sha256)
 
@@ -135,8 +158,9 @@ jobs:
 
   publish:
     needs: [version, linux, windows]
-    # Publish a new version once Linux built, even if Windows didn't.
-    if: always() && needs.version.outputs.release == 'true' && needs.linux.result == 'success'
+    # Publish a new version once Linux built, even if Windows didn't; a test
+    # build only with both (testing Windows is usually the point).
+    if: always() && needs.version.outputs.release == 'true' && needs.linux.result == 'success' && (needs.version.outputs.prerelease != 'true' || needs.windows.result == 'success')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -162,10 +186,16 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
           WINDOWS: ${{ needs.windows.result }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+          BRANCH: ${{ github.ref_name }}
         run: |
           {
             echo "## SteamOnRust $VERSION"
             echo
+            if [ "$PRERELEASE" = "true" ]; then
+              echo "> **Test build** from \`$BRANCH\` ($GITHUB_SHA). Not offered to installed copies as an update."
+              echo
+            fi
             echo "**Linux (x86_64):** download \`SteamOnRust-Linux-x86_64.tar.gz\`, then:"
             echo
             echo '```sh'
@@ -184,9 +214,11 @@ jobs:
       - name: Tag and publish the release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.version.outputs.version }}
+          tag_name: ${{ needs.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: SteamOnRust ${{ needs.version.outputs.version }}
+          name: SteamOnRust ${{ needs.version.outputs.version }}${{ needs.version.outputs.prerelease == 'true' && format(' (test {0})', github.run_number) || '' }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.version.outputs.prerelease == 'true' && 'false' || 'true' }}
           files: dist/*
           body_path: notes.md
           generate_release_notes: true
