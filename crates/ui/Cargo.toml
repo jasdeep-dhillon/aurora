@@ -11,6 +11,13 @@ serde.workspace = true
 i18n.workspace = true
 # Renders the Aurora SVG into the window/tray icon (same resvg egui_extras uses).
 resvg = { version = "0.45", default-features = false }
+eframe.workspace = true
+log = "0.4"
+
+# Direct3D 12 renderer, used when OpenGL can't start (see src/native.rs).
+[target.'cfg(windows)'.dependencies]
+eframe = { workspace = true, features = ["wgpu_no_default_features"] }
+wgpu = { version = "30", default-features = false, features = ["dx12"] }
 
 [dev-dependencies]
 image.workspace = true

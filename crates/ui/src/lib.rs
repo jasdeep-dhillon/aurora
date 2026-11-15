@@ -3,6 +3,7 @@
 
 pub mod brand;
 pub mod icons;
+pub mod native;
 pub mod theme;
 pub mod widgets;
 

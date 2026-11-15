@@ -64,7 +64,7 @@ fn main() -> eframe::Result {
     // Fixed sizes: never reuse a size remembered from an earlier run.
     let options = eframe::NativeOptions { viewport, centered: true, persist_window: false, ..Default::default() };
     let progress = Arc::new(Mutex::new(Progress::default()));
-    eframe::run_native(
+    ui::native::run(
         "SteamInRust Setup",
         options,
         Box::new(move |cc| {

@@ -49,5 +49,5 @@ fn main() -> eframe::Result {
     };
     // "SteamInRust" names the settings folder (and Wayland app id): kept so
     // existing settings carry over to Aurora.
-    eframe::run_native("SteamInRust", options, Box::new(move |cc| Ok(Box::new(app::SteamApp::new(cc, link)))))
+    ui::native::run("SteamInRust", options, Box::new(move |cc| Ok(Box::new(app::SteamApp::new(cc, link)))))
 }
