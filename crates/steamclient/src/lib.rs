@@ -159,11 +159,12 @@ fn create_interface(version: usize, err: usize) -> usize {
     p as usize
 }
 
-/// Games reach Steam through steam_api, which passes its own version
-/// strings. A version string from anywhere else at startup is Steam's DRM
-/// wrapper (SteamStub, or a packer carrying it) checking for Valve's client:
-/// it would show "Application load error 3:0000065432", so tell SteamInRust,
-/// which restarts the game on Valve's engine.
+/// Games reach Steam through steam_api. CreateInterface called from anywhere
+/// else at startup is Steam's DRM wrapper (SteamStub, or a packer carrying
+/// it, like PRAGMATA's) checking for Valve's client: it would show
+/// "Application load error 3:0000065432", so tell SteamInRust, which
+/// restarts the game on Valve's engine. (Where the version string lives says
+/// nothing: Unity games' steam_api passes one from the game.)
 fn steam_drm_check(version: usize) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static LOADED: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
@@ -172,13 +173,22 @@ fn steam_drm_check(version: usize) {
     if !cfg!(windows) || since_load > std::time::Duration::from_secs(60) || SENT.load(Ordering::Relaxed) {
         return;
     }
-    let module = crate::win::module_of(version);
-    let from_steam = module.as_deref().is_some_and(|m| m.starts_with("steam_api") || m.starts_with("gameoverlayrenderer"));
-    if from_steam || SENT.swap(true, Ordering::Relaxed) {
+    let caller = crate::win::caller_module();
+    let drm = match &caller {
+        // Valve's own libraries: a normal start.
+        Some(Some(m)) => !(m.starts_with("steam_api") || m.starts_with("gameoverlayrenderer") || m.starts_with("steamclient")),
+        // Code mapped by hand (SteamStub's loader). 32-bit stack walks can go
+        // astray without frame pointers, so only trust this on 64-bit.
+        Some(None) => cfg!(target_pointer_width = "64"),
+        // Couldn't tell: never restart a game on a guess.
+        None => false,
+    };
+    if !drm || SENT.swap(true, Ordering::Relaxed) {
         return;
     }
     let name = unsafe { std::ffi::CStr::from_ptr(version as *const c_char) }.to_string_lossy().into_owned();
-    log!("Steam DRM: {name} asked for from {}", module.as_deref().unwrap_or("code outside any module"));
+    let from = caller.flatten().unwrap_or_else(|| "code outside any module".into());
+    log!("Steam DRM: {name} asked for from {from}");
     std::thread::spawn(|| crate::ipc::request(crate::protocol::Request::SteamDrm));
 }
 

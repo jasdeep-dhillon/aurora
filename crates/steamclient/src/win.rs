@@ -12,6 +12,7 @@ unsafe extern "system" {
     fn GetModuleHandleExW(flags: u32, name: *const u16, module: *mut *mut c_void) -> i32;
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
     fn GetModuleFileNameW(module: *mut c_void, name: *mut u16, len: u32) -> u32;
+    fn RtlCaptureStackBackTrace(skip: u32, count: u32, frames: *mut *mut c_void, hash: *mut u32) -> u16;
     fn GetProcessHeap() -> *mut c_void;
     fn HeapFree(heap: *mut c_void, flags: u32, mem: *mut c_void) -> i32;
 }
@@ -112,6 +113,22 @@ pub fn module_of(addr: usize) -> Option<String> {
 
 #[cfg(not(windows))]
 pub fn module_of(_addr: usize) -> Option<String> {
+    None
+}
+
+/// Who called into this DLL: the module (file name, lower case) of the first
+/// return address on the stack outside it, `Some(None)` if that code isn't
+/// in any module, `None` if the stack walk didn't get past us.
+#[cfg(windows)]
+pub fn caller_module() -> Option<Option<String>> {
+    let mut frames = [std::ptr::null_mut::<c_void>(); 24];
+    let n = unsafe { RtlCaptureStackBackTrace(0, frames.len() as u32, frames.as_mut_ptr(), std::ptr::null_mut()) } as usize;
+    let ours = module_of(caller_module as usize);
+    frames[..n.min(frames.len())].iter().map(|&f| module_of(f as usize)).find(|m| *m != ours)
+}
+
+#[cfg(not(windows))]
+pub fn caller_module() -> Option<Option<String>> {
     None
 }
 
