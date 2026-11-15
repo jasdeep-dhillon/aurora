@@ -11,6 +11,7 @@ unsafe extern "system" {
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
     fn GetModuleHandleExW(flags: u32, name: *const u16, module: *mut *mut c_void) -> i32;
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+    fn GetModuleFileNameW(module: *mut c_void, name: *mut u16, len: u32) -> u32;
     fn GetProcessHeap() -> *mut c_void;
     fn HeapFree(heap: *mut c_void, flags: u32, mem: *mut c_void) -> i32;
 }
@@ -79,6 +80,27 @@ pub fn load_real_steamclient() -> usize {
     0
 }
 
+/// File name (no folder, lower case) of the loaded module holding `addr`;
+/// `None` if no module does (heap, or code mapped by hand).
+#[cfg(windows)]
+pub fn module_of(addr: usize) -> Option<String> {
+    const FROM_ADDRESS: u32 = 0x4;
+    const UNCHANGED_REFCOUNT: u32 = 0x2;
+    let mut module = std::ptr::null_mut();
+    if addr == 0 || unsafe { GetModuleHandleExW(FROM_ADDRESS | UNCHANGED_REFCOUNT, addr as *const u16, &mut module) } == 0 {
+        return None;
+    }
+    let mut buf = [0u16; 520];
+    let n = unsafe { GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    let path = String::from_utf16_lossy(&buf[..n.min(buf.len())]);
+    Some(path.rsplit(['\\', '/']).next().unwrap_or_default().to_lowercase())
+}
+
+#[cfg(not(windows))]
+pub fn module_of(_addr: usize) -> Option<String> {
+    None
+}
+
 #[cfg(windows)]
 pub fn proc_address(module: usize, name: &str) -> usize {
     if module == 0 {
@@ -114,7 +136,9 @@ pub fn open_url(url: &str) {
 /// so the game can open it. `None` outside Wine.
 #[cfg(windows)]
 pub fn wine_dos_path(unix: &str) -> Option<String> {
-    type ToDos = unsafe extern "system" fn(*const u8) -> *mut u16;
+    // Wine declares it CDECL. "system" is stdcall on 32-bit: the stack came
+    // back 4 bytes off and 32-bit games (Alien: Isolation) crashed here.
+    type ToDos = unsafe extern "C" fn(*const u8) -> *mut u16;
     let kernel32 = unsafe { GetModuleHandleW(wide("kernel32.dll").as_ptr()) };
     let f = proc_address(kernel32 as usize, "wine_get_dos_file_name");
     if f == 0 {
