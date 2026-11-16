@@ -5166,6 +5166,7 @@ dependencies = [
  "global-hotkey",
  "i18n",
  "image",
+ "libc",
  "local",
  "model",
  "open",

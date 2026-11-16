@@ -46,3 +46,5 @@ winresource = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { workspace = true, features = ["wayland", "x11"] }
+# mallopt / malloc_trim (main.rs: memory given back to the system).
+libc = "0.2"
