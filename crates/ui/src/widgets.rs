@@ -8,6 +8,32 @@ use egui::{
     Stroke, StrokeKind, Ui, Vec2, load::TexturePoll, pos2, vec2,
 };
 
+// ---------- focus ----------
+
+/// Give a text field keyboard focus on the frame it appears (when `want`),
+/// and not again while it stays on screen.
+///
+/// Never call `request_focus` on every frame, or until the field reports
+/// focus: each call makes egui-winit recreate the X11 input context, winit
+/// answers with IME events it handles in a loop, eframe repaints from inside
+/// that loop, and the field asks again. winit then never reads X events again,
+/// so on X11 the window ignores input and the window manager's ping ("not
+/// responding").
+pub fn autofocus(r: &Response, want: bool) {
+    let key = r.id.with("autofocus-seen");
+    let pass = r.ctx.cumulative_pass_nr();
+    let last = r.ctx.data_mut(|d| {
+        let last = d.get_temp::<u64>(key);
+        d.insert_temp(key, pass);
+        last
+    });
+    // Shown on the previous pass too: it has been on screen, leave focus alone.
+    let shown_before = last.is_some_and(|l| l + 1 >= pass);
+    if want && !shown_before {
+        r.request_focus();
+    }
+}
+
 // ---------- text ----------
 
 pub fn text(s: impl Into<String>, size: f32, color: Color32) -> RichText {

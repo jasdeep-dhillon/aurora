@@ -243,9 +243,7 @@ fn form_and_qr(app: &mut SteamApp, ui: &mut Ui, t: &Theme, phase: &Phase) {
                 ui.add_space(12.0);
                 label(ui, t, t!("Password"));
                 let pass = ui.add(egui::TextEdit::singleline(&mut app.login.password).password(true).font(w::font(15.0)).desired_width(f32::INFINITY).margin(vec2(12.0, 9.0)));
-                if app.login.account.is_empty() && !name.has_focus() && !pass.has_focus() {
-                    name.request_focus();
-                }
+                w::autofocus(&name, app.login.account.is_empty() && !pass.has_focus());
                 if app.login.password_error {
                     if let Some(e) = &app.state.last_error {
                         ui.add_space(6.0);
@@ -375,9 +373,7 @@ fn guard(app: &mut SteamApp, ui: &mut Ui, t: &Theme, guards: &[Guard]) {
                 .desired_width(f32::INFINITY)
                 .margin(vec2(12.0, 12.0)),
         );
-        if !field.has_focus() && app.login.code.is_empty() {
-            field.request_focus();
-        }
+        w::autofocus(&field, app.login.code.is_empty());
         app.login.code = app.login.code.to_uppercase();
         if let Some(e) = &app.state.guard_error {
             ui.label(w::text(format!("{}  {}", icons::WARNING, i18n::tr_dyn(e)), 13.0, t.danger));

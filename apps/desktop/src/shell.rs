@@ -1180,7 +1180,7 @@ pub fn friend_dialogs(app: &mut SteamApp, ctx: &egui::Context) {
                 ui.label(w::text(t!("Only you see it. Steam keeps it on all your devices."), 12.5, t.text_dim));
                 ui.add_space(8.0);
                 let r = ui.add(egui::TextEdit::singleline(text).desired_width(f32::INFINITY).hint_text(t!("Nickname")));
-                r.request_focus();
+                w::autofocus(&r, true);
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     let save = w::button(ui, &t, None, t!("Save"), w::Kind::Primary, w::Size::Sm).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));

@@ -480,9 +480,7 @@ impl Library {
             ui.label(w::text_bold(if index.is_some() { t!("Rename collection") } else { t!("New collection") }, 18.0, t.text));
             ui.add_space(8.0);
             let r = ui.add(egui::TextEdit::singleline(name).hint_text(t!("Name, e.g. Co-op with friends")).desired_width(f32::INFINITY).margin(vec2(10.0, 8.0)));
-            if !r.has_focus() && name.is_empty() {
-                r.request_focus();
-            }
+            w::autofocus(&r, name.is_empty());
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
