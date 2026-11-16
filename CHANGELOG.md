@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.2](https://github.com/mollie2999/Aurora/compare/v0.7.1-1...v0.7.2) (2026-11-16)
+
+### New
+
+* Linux: store trailers play, with sound. Needs `ffmpeg` installed ([f3f4a0a](https://github.com/mollie2999/Aurora/commit/f3f4a0a7bf2f3641d740f67fa5f9185ee3a2eb0a))
+* Linux: Manage > Compatibility picks the Proton version for one game ([19918af](https://github.com/mollie2999/Aurora/commit/19918afd0dcb9935de477cdf2eac0acac9fc3218))
+* Linux: games with a Linux build get "Native" in Manage > Compatibility, selected by default. Before, the menu said these games used the default Proton, though they already ran natively ([6561add](https://github.com/mollie2999/Aurora/commit/6561add8115aa964c829654f3ed99e57bc5f8362))
+
+### Fixes
+
+* The game right-click menu was about 600 px wide; it now fits its items ([3a857d8](https://github.com/mollie2999/Aurora/commit/3a857d84edbb7e5a666640c9c9f264d888cfcb3f))
+* Library sidebar: the filter buttons and Filters now line up with the search box ([eda24e1](https://github.com/mollie2999/Aurora/commit/eda24e15f120c750623d0cabaaf637207d4141b9))
+
 ## [0.7.1-1](https://github.com/mollie2999/Aurora/compare/v0.7.1...v0.7.1-1) (2026-11-16)
 
 **The GitHub page is now [mollie2999/Aurora](https://github.com/mollie2999/Aurora).**
