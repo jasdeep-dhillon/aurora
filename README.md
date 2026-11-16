@@ -1,284 +1,147 @@
 <p align="center">
-  <img src="docs/media/en/banner.png" alt="SteamInRust: the Steam client, rebuilt in Rust" width="100%">
+  <img src="docs/media/aurora-banner.png" alt="Aurora: your Steam library, none of the bloat" width="100%">
 </p>
 
 <p align="center">
   <a href="#download"><b>Download</b></a> ·
-  <a href="#performance"><b>Benchmarks</b></a> ·
-  <a href="docs/parity.md"><b>Parity</b></a> ·
-  <a href="docs/steam-compatibility.md"><b>Games and anti-cheat</b></a> ·
-  <a href="CONTRIBUTING.md"><b>Contributing</b></a> ·
-  <a href="README.ru.md"><b>Русский</b></a>
+  <a href="#every-game-launches"><b>Games</b></a> ·
+  <a href="#status"><b>Status</b></a> ·
+  <a href="#benchmarks"><b>Benchmarks</b></a> ·
+  <a href="CHANGELOG.md"><b>Changelog</b></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/madonchik123/SteamInRust/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/madonchik123/SteamInRust?style=flat-square&color=4F8CFF"></a>
-  <a href="https://github.com/madonchik123/SteamInRust/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/madonchik123/SteamInRust/ci.yml?branch=main&style=flat-square&label=CI"></a>
-  <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows%2010%20%C2%B7%2011-4F8CFF?style=flat-square">
+  <a href="https://github.com/mollie2999/Aurora/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/mollie2999/Aurora?style=flat-square&color=F07A4A"></a>
+  <img alt="Linux and Windows" src="https://img.shields.io/badge/Linux%20%C2%B7%20Windows-F07A4A?style=flat-square">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2FB36B?style=flat-square">
 </p>
 
-# Aurora (SteamOnRust-Linux)
+# Aurora
 
-A Linux fork of [SteamInRust](https://github.com/madonchik123/SteamInRust).
-What it changes:
+A Steam client written in Rust, with no browser inside. Store, library,
+downloads, friends, chat, Workshop, inventory, Market and Steam Cloud, drawn
+natively with [egui](https://github.com/emilk/egui) in one process. It signs in
+to your own Steam account and talks to Steam's servers directly.
 
-- **Builds and runs on Linux** (Wayland and X11): `cargo build --release -p steam-rs`,
-  then run `target/release/steam-rs`.
-- **Games start through the official Steam client** (native games in its runtime,
-  Windows games through Proton), since SteamInRust's own steamclient is a Windows DLL.
-  Steam must be installed and signed in once.
-- **NEVKO theme** (the default), after the [NEVKO-UI](https://github.com/dotFelixan/NEVKO-UI)
-  Steam skin: flat slate controls, Steam blue only for what's active, sentence-case labels.
-- The interface is labelled "Steam" and shows Steam's logo, read at runtime from your own
-  Steam install (nothing of Valve's is bundled).
-- A quieter download bar, library icons that load, and collections hidden unless turned on
-  in Settings → Library.
+Aurora is a fork of [SteamInRust](https://github.com/madonchik123/SteamInRust)
+that adds Linux: it builds and runs there (Wayland and X11) and starts every
+kind of game in your library.
 
-Not on Linux: trailer playback (Windows Media Foundation), the in-game overlay (D3D11),
-the tray icon and `steam://` link registration.
+## Every game launches
 
----
+On Linux, Aurora picks how to start each game:
 
-# SteamInRust
+| Game | How it starts | Steam features in the game |
+| --- | --- | --- |
+| Native Linux games | Directly | From your own Steam's `steamclient.so`, on a windowless Steam host |
+| Windows games | Proton (Steam's default, or one you pick in Manage › Compatibility) | Aurora's own `steamclient`: achievements, stats, cloud, lobbies, Workshop |
+| Steam DRM (SteamStub) | Proton, on the windowless Steam host | Valve's engine answers the DRM check itself |
+| Anti-cheat (VAC, Easy Anti-Cheat, BattlEye) | Through the official Steam client | Steam's own |
 
-**The Steam desktop client, rewritten in Rust.** Store, library, downloads,
-friends, chat, inventory, Market, Steam Cloud and the Shift+Tab overlay, in one
-native process with no embedded browser. It signs in to your own Steam account
-and talks to Steam's servers directly. Free, open source (MIT) and unofficial.
+The windowless Steam host is your installed Steam's engine without its
+interface: no `steamwebhelper`, no Chromium. It checks ownership itself, so it
+can't start a game you don't own.
 
-The official client is a Chromium app: a dozen `steamwebhelper.exe` processes
-drawing web pages. SteamInRust draws everything itself on the GPU with
-[egui](https://github.com/emilk/egui), so it starts in about two seconds and
-idles at a quarter of a gigabyte.
+Games with both a Linux and a Windows build run the Linux build by default.
+Manage › Compatibility switches a game to Proton or to a specific Proton
+version.
 
-<p align="center">
-  <img src="docs/media/en/store.png" alt="A store page in SteamInRust with the Hades trailer playing" width="100%">
-</p>
+Needs Steam installed (for Proton and the Steam host). Anti-cheat games also
+need it signed in. Settings › Library has an experimental option to run
+anti-cheat games on the Steam host instead; the anti-cheat may count that as an
+unsupported setup and ban you.
 
-## What works today
+On Windows, games run as in SteamInRust: Aurora's `steamclient` for most games,
+the official client for anti-cheat.
 
-Everything below is in the current release. Area-by-area status:
-[parity](docs/parity.md).
+## Status
 
-- **Store.** Front page, search, tags with filters, wishlist and cart. Game
-  pages play trailers natively. Prices are in your wallet's currency, and games
-  you own are marked. You can gift a game, even one you own, and SteamInRust
-  checks first whether Steam will deliver it to that friend's region. Payment
-  happens on Steam's website, as Steam requires.
-- **Library.** Every game you own, collections (your Steam Favorites and Hidden
-  included), non-Steam games, filters, achievements and full Properties:
-  launch options, language, betas, DLC, Steam Cloud, verify files.
-- **Downloads.** SteamInRust's own depot downloader. It has a queue, pause and
-  resume, and downloads that survive a restart. It shows network and disk
-  speed separately, and picks the fastest of Steam's download regions.
-- **Friends and chat.** Live status with the game and rich presence, chat with
-  history, and a separate Friends window. Right-click a friend to join their
-  game or look up their server.
-- **Community.** Profiles, comments, game hubs, Workshop pages, guides and
-  discussions, all inside the app.
-- **Workshop.** Browse a game's Workshop with its own tag filters. Subscribing
-  downloads the item right away, and missing or updated items download before
-  the game starts, like in Steam.
-- **Account.** Account details, purchase history, licenses and your Steam
-  Family, as native pages.
-- **Inventory and Market.** Every game's inventory, market prices, order book and
-  price chart. Selling uses Steam's real fees; you confirm in the Steam Mobile app.
-- **Steam Cloud.** Sync before you play and after you quit, conflicts with
-  local backups, and saves made offline upload once you're back online.
-- **Games.** Games without anti-cheat get achievements, stats, cloud saves,
-  lobbies, P2P, Workshop, inventory, the server browser, screenshots and Steam
-  Input from SteamInRust's own `steamclient`, 32-bit games included. Older
-  multiplayer games (like Human Fall Flat) play with friends and strangers on
-  the official client.
-  Games with VAC, Easy Anti-Cheat or BattlEye always start through the official
-  client, silently, so their anti-cheat runs as intended
-  ([how](docs/steam-compatibility.md)).
-- **Overlay.** Shift+Tab in the running game opens friends, chat,
-  achievements, guides and notes. Like Steam's, it's drawn inside the game
-  (D3D11 games), so it works in full screen. You can pin any of them over the
-  game.
-- **Offline mode.** It works like Steam's. If the connection drops, SteamInRust
-  reconnects without signing you out, and your running games keep going.
-- **Plugins.** Small [Rhai](https://rhai.rs) scripts can add pages,
-  notifications and automations, with only the permissions you approve.
-- **English and Russian**, picked from your system language.
+Works: sign-in (password, Steam Guard, QR), store with trailers, library with
+collections and non-Steam games, downloads, friends and chat, community pages,
+Workshop, inventory and Market, Steam Cloud, offline mode, plugins. English and
+Russian.
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/media/en/library.png" alt="The library: game grid, collections in the sidebar"></td>
-    <td width="50%"><img src="docs/media/en/inventory.png" alt="Inventory: a Dota 2 item with its market price and price chart"></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/media/en/profile.png" alt="A profile: level, recent activity, most played and comments"></td>
-    <td width="50%"><img src="docs/media/en/startup-race.gif" alt="SteamInRust and Steam starting side by side"></td>
-  </tr>
-</table>
+Missing:
 
-<sub>Screenshots from <code>--demo</code> mode, which uses sample account data.</sub>
+- **Linux:** tray icon, `steam://` links, Shift+Tab overlay inside games.
+- **Linux, known bug:** the first launch of a Windows game with a new Proton
+  prefix can fail when the game needs Steam (Bloons TD 6 crashed with
+  "NoSteamClient"). The second launch works.
+- **Everywhere:** Big Picture, Remote Play, group chats and voice chat, writing
+  reviews. Checkout and trade offers open Steam's website.
 
-## Performance
+Area-by-area detail (from SteamInRust): [docs/parity.md](docs/parity.md).
 
-**SteamInRust opens its window about 4 times sooner than Steam and uses less
-than a quarter of the memory**, on the same PC, account and network. Measured
-on 8 November 2026 on a Ryzen 5 5600 with 16 GB of RAM, Windows 11, SteamInRust
-0.4.0 against Steam 11.15.70.27. Both clients started on the library. Every
-figure is the typical (middle) result of 5 runs:
+## Benchmarks
 
-| | Steam | SteamInRust |
+Aurora 0.7.2 against the official Steam client (build 1792618285, no
+mods), on the same PC and account: Ryzen 7 5700X, 16 GB RAM, GeForce RTX
+5070, CachyOS with GNOME on Wayland. Measured on 16 November 2026. Each figure
+is the median of 3 runs after a warm-up run.
+
+| | Steam | Aurora |
 | --- | ---: | ---: |
-| Start → main window | 9.4 s | 2.4 s |
-| Start → library fully drawn | 19.2 s | 10.0 s |
-| Memory when idle (private bytes) | 1,126 MB | 255 MB |
-| CPU when idle | 7.5 % of a core | 0.13 % |
-| Processes | 8 | 1 |
-| Program size | 1,083 MB | 27.2 MB |
-| Open the Store | 1.22 s | 0.56 s |
-| Open a game page in the library | 0.85 s | 0.06 s |
-| Open Friends & Chat | 1.32 s | 0.05 s |
+| Start → first window | 2.77 s | 0.14 s |
+| Start → main window, signed in | 4.90 s | 2.16 s |
+| Memory when idle (PSS, all its processes) | 1,408 MB | 166 MB |
+| CPU when idle | 18 % of a core (9–33 %) | 0.2 % |
+| Processes | 16 | 1 |
+| Program size | 2,129 MB | 46 MB |
 
-Most of SteamInRust's time to a fully drawn library is library art arriving
-over the network. With the art already cached on disk (a warm start), it was
-7.2 s. Your games list itself shows about 1 s after start-up: SteamInRust shows
-the library saved at your last sign-in while Steam sends the current one. Method, ranges and what was left out:
-[docs/benchmarks.md](docs/benchmarks.md).
+Steam signs in automatically; its first window is its sign-in window.
+Aurora's first window is its account picker, which the script clicked as soon
+as it showed. Idle figures are
+taken 45 s after the main window opened, CPU over the next 30 s. Steam's
+program size leaves out games, user data, caches and compatibility tools.
+Aurora still needs a Steam install on Linux for Proton and the Steam host.
+
+Method, script and every run: [docs/benchmarks-linux.md](docs/benchmarks-linux.md).
 
 ## Download
 
-Get it from [the latest release](https://github.com/madonchik123/SteamInRust/releases/latest):
+From [the latest release](https://github.com/mollie2999/Aurora/releases/latest):
 
-| File | What it is |
+| File | Platform |
 | --- | --- |
-| `SteamInRust-Setup-<version>.exe` | Installer. Installs for your user only, without administrator rights, into `%LOCALAPPDATA%\Programs\SteamInRust`, and updates itself |
-| `SteamInRust-<version>-portable.zip` | The same app with no installer. Doesn't update itself |
-| `SHA256SUMS.txt` | Checksums for both |
+| `SteamOnRust-Linux-x86_64.tar.gz` | Linux x86_64. Unpack and run `steam-rs` |
+| `steamonrust-bin-<version>-x86_64.pkg.tar.zst` | Arch Linux package (`sudo pacman -U …`) |
+| `SteamInRust-Setup-<version>.exe` | Windows 10/11 installer, updates itself |
+| `SteamInRust-<version>-portable.zip` | Windows, no installer |
 
-Needs Windows 10 or 11 (64-bit) and a Steam account. Sign in with your password
-and Steam Guard, or scan the QR code with the Steam Mobile app. Windows
-SmartScreen may warn about a new unsigned app: **More info → Run anyway**.
-Uninstall from **Settings → Apps**.
-
-## Is it safe to use?
-
-- **Your account.** SteamInRust signs in the way the official client and the
-  Steam Mobile app do. Your sign-in stays on your PC, in your user's app data
-  folder, and is only sent to Steam.
-- **Anti-cheat.** SteamInRust never touches anti-cheat. Games that use it
-  always run through Valve's client.
-- **Other connections.** Apart from Steam, the app only contacts GitHub (for
-  updates) and an exchange-rate service (when you check a gift's region). If
-  you add your own key, it also contacts IsThereAnyDeal (price history). There
-  is no telemetry.
-- **Not official.** SteamInRust isn't made or approved by Valve.
-
-## Plugins
-
-A plugin is a folder with a manifest and a script. This one adds a page that
-counts your online friends:
-
-```toml
-# plugins/friends-online/plugin.toml
-id = "friends-online"
-name = "Friends online"
-version = "1.0.0"
-permissions = ["friends.read"]
-
-[page]
-title = "Friends online"
-icon = "users"
-```
-
-```rust
-// plugins/friends-online/main.rhai
-fn page() {
-    let online = friends().filter(|f| f.status != "Offline");
-    [
-        #{ type: "heading", text: "Friends online" },
-        #{ type: "stat", label: "Right now", value: online.len().to_string() },
-    ]
-}
-```
-
-Scripts can't reach files, the network or other programs, only the API they
-were granted. The API is in [`crates/plugins`](crates/plugins/src/lib.rs), with
-more examples in [`crates/plugins/examples`](crates/plugins/examples).
+Store trailers on Linux need `ffmpeg`, and `libpulse` for sound.
 
 ## Build from source
 
-Needs [Rust](https://rustup.rs) and MinGW-w64. The project uses the GNU
-toolchain (see `rust-toolchain.toml`).
+Needs [Rust](https://rustup.rs).
 
 ```sh
-git clone https://github.com/madonchik123/SteamInRust.git
-cd SteamInRust
-cargo run                  # sign in with your account
-cargo run -- --demo        # sample data, no sign-in
-cargo test --workspace
-cargo xtask steamclient32   # the DLL for 32-bit games (needs a 32-bit MinGW)
-cargo xtask package        # installer and portable zip in target/package/dist
+git clone https://github.com/mollie2999/Aurora.git
+cd Aurora
+cargo build --release -p steam-rs -p steamhost
+target/release/steam-rs            # sign in with your account
+target/release/steam-rs --demo     # sample data, no sign-in
 ```
 
-<details>
-<summary>How the code is laid out</summary>
+The Windows `steamclient` DLLs that Proton games load are built by CI
+(`.github/workflows/build.yml`); copy them next to `steam-rs` from a release.
 
-```
-apps/desktop     the app: window, sign-in, overlay, tray, updater, pages (builtin/)
-apps/installer   installer, updater and uninstaller
-xtask            release packaging (cargo xtask package)
-crates/
-  client         the engine: commands in, events out; PICS, chat, cloud, market
-  net            connection to Steam: WebSocket, framing, jobs, service calls
-  auth           sign-in: RSA password, QR, Steam Guard, refresh tokens
-  depot          depot downloader
-  steamclient    the steamclient DLL that games load
-  store          store APIs: browse, reviews, tags, trailers, news
-  video          trailer player: HLS, Media Foundation, WASAPI
-  local          the Steam folders on disk: libraries, manifests, verify
-  plugins        Rhai plugins
-  extensions     the interface every page implements
-  i18n           translations (locales/ru.toml)
-  ui             theme, fonts, widgets
-  proto          Steam's .proto files, compiled with protox
-  vdf, model     KeyValues parser, shared types
-```
-</details>
+## Is it safe to use?
 
-## Contributing
-
-Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md)
-first. Pull request titles follow Conventional Commits (`feat: …`, `fix: …`),
-since that's how releases and the changelog are made. Areas that still need
-work are in [docs/parity.md](docs/parity.md).
-
-## Project status
-
-| Area | Score |
-| --- | ---: |
-| Sign-in and accounts | 0.75 |
-| Offline mode and reconnecting | 1 |
-| Library | 0.75 |
-| Downloads and installs | 0.75 |
-| Store | 0.75 |
-| Friends and chat | 0.75 |
-| Community | 0.5 |
-| Inventory and Market | 0.75 |
-| Steam Cloud | 1 |
-| Steam features inside games | 0.75 |
-| Shift+Tab overlay | 0.75 |
-| Notifications and tray | 1 |
-| Settings, languages, updates | 0.75 |
-| Big Picture, Remote Play | 0 |
-
-0 is not started, 1 is complete. What's missing in each area:
-[docs/parity.md](docs/parity.md).
+- **Your account.** Aurora signs in the way the official client and the Steam
+  Mobile app do. Your sign-in stays on your PC and is only sent to Steam.
+- **Anti-cheat.** By default, anti-cheat games always run through Valve's
+  client.
+- **Other connections.** Steam, GitHub (updates), an exchange-rate service
+  (gift regions) and, if you add a key, IsThereAnyDeal. No telemetry.
 
 ## Credits
 
-Fonts: [Geist](https://github.com/vercel/geist-font) and [Inter](https://rsms.me/inter/) (both OFL). Icons: [Phosphor](https://phosphoricons.com) (MIT).
+Built on [SteamInRust](https://github.com/madonchik123/SteamInRust) by
+madonchik123. Fonts: [Geist](https://github.com/vercel/geist-font) and
+[Inter](https://rsms.me/inter/) (OFL). Icons: [Phosphor](https://phosphoricons.com) (MIT).
 Protocol definitions: [SteamDatabase/Protobufs](https://github.com/SteamDatabase/Protobufs).
-Price history: [IsThereAnyDeal](https://isthereanydeal.com).
 
 ## License
 
-[MIT](LICENSE). Steam and the Steam logo are trademarks of Valve Corporation.
-SteamInRust is not affiliated with, endorsed or sponsored by Valve.
+[MIT](LICENSE). Unofficial. Not affiliated with Valve. Steam is a trademark of
+Valve Corporation.
