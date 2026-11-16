@@ -3,6 +3,7 @@
 </p>
 
 <p align="center">
+  <a href="https://mollie2999.github.io/Aurora/"><b>Website</b></a> ·
   <a href="#download"><b>Download</b></a> ·
   <a href="#every-game-launches"><b>Games</b></a> ·
   <a href="#status"><b>Status</b></a> ·

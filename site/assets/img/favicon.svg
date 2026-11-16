@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Aurora's logo (crates/ui/assets/aurora.svg) on a dark tile, as the window icon draws it. -->
+  <defs>
+    <linearGradient id="fade" gradientUnits="userSpaceOnUse" x1="0" y1="50" x2="0" y2="8">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#161D25"/>
+  <g transform="translate(6 6) scale(.8125)">
+    <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30 L54 8 C49 9 45 12 40 17 C31 26 21 30 11 25 Z" fill="url(#fade)"/>
+    <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round"/>
+  </g>
+</svg>
