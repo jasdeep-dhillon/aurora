@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.1](https://github.com/mollie2999/SteamOnRust-Linux/compare/v0.7.0...v0.7.1) (2026-11-16)
+
+**Linux: shaders like Steam, and much less memory for the windowless Steam host.**
+
+### New
+
+* Linux: games now use Steam's shader cache (`steamapps/shadercache/<game>`), like when Steam starts them. Before, shaders Steam had pre-cached for your GPU were never used ([0e06ee7](https://github.com/mollie2999/SteamOnRust-Linux/commit/0e06ee745c093991f85c48e7345747cd29506cd2))
+* Linux: shaders are compiled before a game starts, like Steam's "Processing Vulkan shaders": the Play button shows "Compiling shaders… N%" with a Skip button. It runs once per game, and again only after a driver or cache update ([0e06ee7](https://github.com/mollie2999/SteamOnRust-Linux/commit/0e06ee745c093991f85c48e7345747cd29506cd2))
+* Settings > Downloads: "Allow downloads during gameplay" (off by default), shader pre-caching, and compiling shaders before a game starts. SteamInRust puts these into Steam's own settings before every game while Steam is closed; while it compiles shaders itself, Steam's background Vulkan shader processing is turned off so the work isn't done twice ([0e06ee7](https://github.com/mollie2999/SteamOnRust-Linux/commit/0e06ee745c093991f85c48e7345747cd29506cd2))
+
+### Fixes
+
+* Linux: the windowless Steam host used 350–475 MB instead of about 150 MB while a game ran: with Steam's "Allow downloads during gameplay" on, it kept starting game updates and shader downloads in the background ([0e06ee7](https://github.com/mollie2999/SteamOnRust-Linux/commit/0e06ee745c093991f85c48e7345747cd29506cd2))
+
 ## [0.7.0](https://github.com/mollie2999/SteamOnRust-Linux/compare/v0.6.3...v0.7.0) (2026-11-16)
 
 **Mostly Linux fixes.** Nothing changes for Windows in this release, so updating there is optional.

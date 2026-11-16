@@ -2,7 +2,7 @@
 # pkgver and the checksum and attaches the built package and this file to the
 # GitHub release; by hand: set pkgver, then `updpkgsums && makepkg -si`.
 pkgname=steamonrust-bin
-pkgver=0.7.0
+pkgver=0.7.1
 pkgrel=1
 pkgdesc="Aurora (SteamOnRust): an unofficial Steam client written in Rust"
 arch=('x86_64')
