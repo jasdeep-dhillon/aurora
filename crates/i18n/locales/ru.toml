@@ -1743,3 +1743,4 @@
 "Compatibility" = "Совместимость"
 "Run with this Proton:" = "Запускать с этой версией Proton:"
 "Default ({tool})" = "По умолчанию ({tool})"
+"Trailers need FFmpeg. Install the ffmpeg package, then restart SteamInRust." = "Для трейлеров нужен FFmpeg. Установите пакет ffmpeg и перезапустите SteamInRust."
