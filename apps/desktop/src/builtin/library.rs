@@ -974,22 +974,27 @@ impl Library {
         let width = ui.available_width() - 6.0;
         w::search(ui, t, &mut self.search, t!("Search games"), width);
         ui.add_space(6.0);
+        // The chips' span, so Filters below lines up from "All" to "Played".
+        let mut span = egui::Rect::NOTHING;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             for (f, label) in [(Filter::All, t!("All")), (Filter::Installed, t!("Installed")), (Filter::Favorites, icons::STAR), (Filter::Playing, t!("Played"))] {
-                if w::chip(ui, t, label, self.filter == f).clicked() {
+                let r = w::chip(ui, t, label, self.filter == f);
+                span = span.union(r.rect);
+                if r.clicked() {
                     self.filter = f;
                 }
             }
-            // Steam-style filters in a popup.
-            let n = self.adv.count();
-            let label = if n > 0 { format!("{}  {} ({n})", icons::FUNNEL, t!("Filters")) } else { format!("{}  {}", icons::FUNNEL, t!("Filters")) };
-            let r = w::chip(ui, t, &label, n > 0);
-            egui::Popup::from_toggle_button_response(&r)
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .width(720.0)
-                .show(|ui| self.adv_panel(ui, t, ctx));
         });
+        ui.add_space(6.0 - ui.spacing().item_spacing.y);
+        // Steam-style filters in a popup.
+        let n = self.adv.count();
+        let label = if n > 0 { format!("{}  {} ({n})", icons::FUNNEL, t!("Filters")) } else { format!("{}  {}", icons::FUNNEL, t!("Filters")) };
+        let r = w::wide_chip(ui, t, &label, n > 0, span.width());
+        egui::Popup::from_toggle_button_response(&r)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .width(720.0)
+            .show(|ui| self.adv_panel(ui, t, ctx));
         // Collections (only when turned on in Settings → Library).
         if !self.show_collections && matches!(self.filter, Filter::Collection(_)) {
             self.filter = Filter::All;

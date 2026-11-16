@@ -493,9 +493,20 @@ pub fn chip(ui: &mut Ui, t: &Theme, label: &str, selected: bool) -> Response {
 /// A chip in its own color, e.g. an item rarity: a colored dot and text,
 /// and a tinted fill when selected.
 pub fn tinted_chip(ui: &mut Ui, t: &Theme, label: &str, tint: Option<Color32>, selected: bool) -> Response {
+    chip_impl(ui, t, label, tint, selected, None)
+}
+
+/// A chip stretched to `width`, its label centered (e.g. a full-row button
+/// under a row of chips).
+pub fn wide_chip(ui: &mut Ui, t: &Theme, label: &str, selected: bool, width: f32) -> Response {
+    chip_impl(ui, t, label, None, selected, Some(width))
+}
+
+fn chip_impl(ui: &mut Ui, t: &Theme, label: &str, tint: Option<Color32>, selected: bool, width: Option<f32>) -> Response {
     let galley = ui.painter().layout_no_wrap(label.to_string(), font_medium(13.0), Color32::PLACEHOLDER);
     let dot = if tint.is_some() { 14.0 } else { 0.0 };
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 24.0 + dot, 28.0), Sense::click());
+    let natural = galley.size().x + 24.0 + dot;
+    let (rect, resp) = ui.allocate_exact_size(vec2(width.map_or(natural, |w| w.max(natural)), 28.0), Sense::click());
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
     let p = ui.painter();
     let r = t.corner_small();
@@ -513,7 +524,8 @@ pub fn tinted_chip(ui: &mut Ui, t: &Theme, label: &str, tint: Option<Color32>, s
     if let Some(c) = tint {
         p.circle_filled(egui::pos2(rect.left() + 16.0, rect.center().y), 4.0, c);
     }
-    let pos = egui::pos2(rect.left() + 12.0 + dot, rect.center().y - galley.size().y / 2.0);
+    let x = if width.is_some() { rect.center().x - galley.size().x / 2.0 } else { rect.left() + 12.0 + dot };
+    let pos = egui::pos2(x, rect.center().y - galley.size().y / 2.0);
     p.galley(pos, galley, color);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
