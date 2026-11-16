@@ -5,691 +5,645 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Aurora Steam Client</title>
 <meta name="claude:viewport-fit-sides" content="cover">
-<meta name="description" content="Aurora is a Steam client written in Rust, with no browser inside. Store, library, downloads, friends and Workshop in one native process, on Linux and Windows.">
-<meta name="theme-color" content="#0F151C">
+<meta name="description" content="Aurora is a Steam client written in Rust. Store, library, downloads, friends and Workshop in one native window, with no Chromium inside. Linux and Windows.">
+<meta name="theme-color" content="#11171E">
 <meta property="og:title" content="Aurora: your Steam library, none of the bloat">
-<meta property="og:description" content="A native Steam client written in Rust. Linux and Windows, no browser inside.">
+<meta property="og:description" content="A Steam client written in Rust. One process, 166 MB idle, no Chromium. Linux and Windows.">
 <meta property="og:image" content="https://mollie2999.github.io/Aurora/assets/img/social.png">
 <meta property="og:url" content="https://mollie2999.github.io/Aurora/">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="assets/img/favicon.svg" type="image/svg+xml">
-<link rel="preload" href="assets/fonts/Geist-ExtraBold.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="preload" href="assets/img/game.webp" as="image">
+<link rel="preload" href="assets/fonts/Archivo.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/Geist.woff2" as="font" type="font/woff2" crossorigin>
 <style>
-/* Layout: the README banner as a page. Headline left, the app window bleeding
-   off the right edge, then sections built from the launcher's own parts
-   (pill tabs, slate cards, Phosphor icons). Tokens follow crates/ui/src/theme.rs
-   (NEVKO preset) plus the banner's orange. Deliberately dark only. */
-@font-face { font-family: "Geist"; src: url(assets/fonts/Geist-Bold.woff2) format("woff2"); font-weight: 700; font-display: swap; }
-@font-face { font-family: "Geist"; src: url(assets/fonts/Geist-ExtraBold.woff2) format("woff2"); font-weight: 800; font-display: swap; }
-@font-face { font-family: "Inter"; src: url(assets/fonts/Inter-Regular.woff2) format("woff2"); font-weight: 400; font-display: swap; }
-@font-face { font-family: "Inter"; src: url(assets/fonts/Inter-Medium.woff2) format("woff2"); font-weight: 500; font-display: swap; }
-@font-face { font-family: "Inter"; src: url(assets/fonts/Inter-SemiBold.woff2) format("woff2"); font-weight: 600; font-display: swap; }
+/* Layout: an industrial datasheet for a piece of software. A title block of
+   specs, an expanded headline, the app window overlapping the next band,
+   then the measurements set as oversized condensed numerals on a ruled grid.
+   Slate from the launcher's NEVKO theme dominates; the banner's orange is
+   the only accent. Depth comes from rules, offset plates and grain. */
+@font-face { font-family: "Archivo"; src: url(assets/fonts/Archivo.woff2) format("woff2"); font-weight: 100 900; font-stretch: 62% 125%; font-display: swap; }
+@font-face { font-family: "Geist"; src: url(assets/fonts/Geist.woff2) format("woff2"); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: "Geist Mono"; src: url(assets/fonts/GeistMono.woff2) format("woff2"); font-weight: 100 900; font-display: swap; }
 @font-face { font-family: "Phosphor"; src: url(assets/fonts/Phosphor.woff2) format("woff2"); font-display: block; }
 
 :root {
   color-scheme: dark;
-  /* ground: the banner's ink, then the app's NEVKO slates */
-  --ink: #0B0F14;
-  --bg: #0F151C;
-  --chrome: #161D25;
-  --surface: #1A2129;
-  --raised: #20272F;
-  --hover: #2E3540;
-  --line: #232A33;
-  --text: #DFE3E6;
-  --bright: #F4F6F8;
-  --dim: #9198A1;
-  --faint: #6B727C;
-  /* accents: banner orange for the brand, Steam blue for what is active */
-  --accent: #F07A4A;
-  --accent-hi: #FF8F60;
-  --on-accent: #1C0D06;
-  --active: #1A9FFF;
-  --active-bg: rgba(26, 159, 255, .14);
-  --play: #4CAF50;
-  --discount: #4C6B22;
-  --discount-text: #BEEE11;
 
-  --display: "Geist", "Inter", ui-sans-serif, system-ui, sans-serif;
-  --body: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  /* color: one dominant slate, one accent, neutrals */
+  --c-slate: #11171E;
+  --c-panel: #171E26;
+  --c-rule: #2A323C;
+  --c-rule-strong: #3A444F;
+  --c-ink: #E6E9EC;
+  --c-muted: #9AA2AB;
+  --c-accent: #F07A4A;
+  --c-accent-hover: #FF916A;
+  --c-accent-press: #D9673A;
+  --c-on-accent: #160A04;
+  --c-accent-wash: rgba(240, 122, 74, .12);
+  --c-error: #FF8A80;
 
-  --r: 9px;          /* theme.radius */
-  --r-s: 6px;        /* theme.corner_small */
+  /* type */
+  --f-display: "Archivo", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --f-icon: "Phosphor";
+  --t-label: 12px;
+  --t-small: 14px;
+  --t-body: 17px;
+  --t-lead: 20px;
+  --t-h3: 24px;
+  --t-h2: clamp(32px, 5vw, 56px);
+  --t-hero: clamp(40px, 7.2vw, 100px);
+  --t-giant: clamp(64px, 13vw, 168px);
+  --lh-tight: .92;
+  --lh-head: 1.05;
+  --lh-body: 1.6;
+  --track-label: .08em;
+
+  /* space: 4px scale */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;  --s-5: 20px;
+  --s-6: 24px; --s-8: 32px; --s-10: 40px; --s-12: 48px; --s-14: 56px;
+  --s-16: 64px; --s-20: 80px; --s-24: 96px; --s-32: 128px;
+
+  /* shape and depth */
+  --r-0: 0;
+  --r-1: 2px;
+  --r-window: 8px;
+  --b-hair: 1px solid var(--c-rule);
+  --b-strong: 1px solid var(--c-rule-strong);
+  --plate-offset: var(--s-3);
+  --focus: 0 0 0 2px var(--c-slate), 0 0 0 4px var(--c-accent);
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 .07 0 0 0 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+
   --max: 1280px;
-  --gutter-l: max(20px, env(safe-area-inset-left, 0px));
-  --gutter-r: max(20px, env(safe-area-inset-right, 0px));
+  --gutter-l: max(var(--s-4), env(safe-area-inset-left, 0px));
+  --gutter-r: max(var(--s-4), env(safe-area-inset-right, 0px));
+  --tap: 44px;
+  --ease: cubic-bezier(.2, .7, .2, 1);
 }
 
-* { box-sizing: border-box; }
-html { scroll-behavior: smooth; scroll-padding-top: 80px; background: var(--ink); }
+*, *::before, *::after { box-sizing: border-box; }
+html { background: var(--c-slate); scroll-behavior: smooth; scroll-padding-top: var(--s-20); }
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font: 400 16px/1.6 var(--body);
+  background: var(--grain) var(--c-slate);
+  color: var(--c-ink);
+  font: 400 var(--t-body)/var(--lh-body) var(--f-body);
   -webkit-font-smoothing: antialiased;
-  overflow-x: hidden;
 }
-body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 60; background: var(--chrome); }
-img { max-width: 100%; display: block; }
-a { color: inherit; text-decoration: none; }
-::selection { background: rgba(240, 122, 74, .35); color: var(--bright); }
-:focus-visible { outline: 2px solid var(--active); outline-offset: 2px; border-radius: var(--r-s); }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 60; background: var(--c-slate); }
+img { max-width: 100%; height: auto; display: block; }
+a { color: inherit; }
+p { margin: 0; }
+h1, h2, h3 { margin: 0; font-family: var(--f-display); text-wrap: balance; }
+::selection { background: var(--c-accent); color: var(--c-on-accent); }
+:focus-visible { outline: none; box-shadow: var(--focus); }
 
-.i { font-family: "Phosphor"; font-style: normal; font-weight: 400; line-height: 1; display: inline-block; speak: never; }
-.wrap { max-width: var(--max); margin: 0 auto; padding-left: var(--gutter-l); padding-right: var(--gutter-r); }
-
-/* ---------- launcher parts ---------- */
-.pill {
-  display: inline-flex; align-items: center; gap: 8px;
-  height: 36px; padding: 0 14px;
-  border-radius: var(--r-s);
-  background: var(--raised); color: var(--text);
-  font: 700 14px/1 var(--display); letter-spacing: .005em;
-  border: 0; cursor: pointer; white-space: nowrap;
-  transition: background .15s, color .15s;
+.wrap { max-width: var(--max); margin-inline: auto; padding-left: var(--gutter-l); padding-right: var(--gutter-r); }
+.i { font-family: var(--f-icon); font-style: normal; font-weight: 400; line-height: 1; display: inline-block; }
+.label {
+  font: 500 var(--t-label)/1.3 var(--f-mono);
+  letter-spacing: var(--track-label); text-transform: uppercase; color: var(--c-muted);
 }
-.pill:hover { background: var(--hover); }
-.pill .i { font-size: 16px; color: var(--dim); transition: color .15s; }
-.pill[aria-current="true"], .pill[aria-selected="true"] { background: var(--active-bg); color: var(--active); }
-.pill[aria-current="true"] .i, .pill[aria-selected="true"] .i { color: var(--active); }
+.skip { position: absolute; left: var(--s-4); top: calc(-1 * var(--s-16)); z-index: 100; padding: var(--s-3) var(--s-4); background: var(--c-accent); color: var(--c-on-accent); font-weight: 600; }
+.skip:focus { top: var(--s-4); }
 
+/* ---------- buttons: one behaviour everywhere ---------- */
 .btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
-  height: 52px; padding: 0 26px; border-radius: var(--r);
-  font: 700 18px/1 var(--display);
-  transition: background .15s, transform .15s;
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--s-3);
+  min-height: var(--tap); padding: 0 var(--s-5);
+  border: 1px solid transparent; border-radius: var(--r-1);
+  font: 650 var(--t-small)/1 var(--f-body); letter-spacing: .01em;
+  text-decoration: none; cursor: pointer;
+  transition: background-color .15s, border-color .15s, color .15s, transform .15s var(--ease);
 }
-.btn-accent { background: var(--accent); color: var(--on-accent); }
-.btn-accent:hover { background: var(--accent-hi); }
-.btn-accent:active { transform: translateY(1px); }
-.btn-ghost { color: var(--bright); padding: 0 6px; }
-.btn-ghost:hover { color: var(--accent-hi); }
-.btn .i { font-size: 20px; }
+.btn .i { font-size: var(--t-lead); }
+.btn:active { transform: translateY(1px); }
+.btn:disabled, .btn[aria-disabled="true"] { opacity: .45; cursor: not-allowed; transform: none; }
+.btn-primary { background: var(--c-accent); color: var(--c-on-accent); }
+.btn-primary:hover { background: var(--c-accent-hover); }
+.btn-primary:active { background: var(--c-accent-press); }
+.btn-line { border: var(--b-strong); color: var(--c-ink); background: transparent; }
+.btn-line:hover { border-color: var(--c-ink); }
+.btn-line.is-done { border-color: var(--c-accent); color: var(--c-accent); }
+.btn-line.is-error { border-color: var(--c-error); color: var(--c-error); }
+.btn-hero { min-height: var(--s-16); padding: 0 var(--s-8); font-size: var(--t-lead); width: 100%; }
+.text-link { display: inline-flex; align-items: center; gap: var(--s-2); min-height: var(--tap); color: var(--c-ink); text-decoration: underline; text-decoration-color: var(--c-rule-strong); text-underline-offset: var(--s-1); }
+.text-link:hover { text-decoration-color: var(--c-accent); color: var(--c-accent-hover); }
 
-.eyebrow {
-  font: 700 12px/1 var(--display); letter-spacing: .1em; text-transform: uppercase;
-  color: var(--active);
-}
-h1, h2, h3 { font-family: var(--display); color: var(--bright); margin: 0; text-wrap: balance; }
-h2 { font-weight: 800; font-size: clamp(32px, 4.4vw, 48px); line-height: 1.05; letter-spacing: -.025em; }
-h3 { font-weight: 700; font-size: 18px; line-height: 1.3; letter-spacing: -.005em; }
-.lede { color: var(--dim); font-size: 18px; max-width: 60ch; margin: 0; }
-.section { padding-block: clamp(72px, 10vw, 128px); }
-.section-head { display: grid; gap: 16px; margin-bottom: clamp(36px, 5vw, 56px); }
-
-/* ---------- top bar (the app's own) ---------- */
-.topbar {
-  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 50;
-  background: color-mix(in srgb, var(--chrome) 88%, transparent);
-  backdrop-filter: saturate(140%) blur(14px);
-  -webkit-backdrop-filter: saturate(140%) blur(14px);
-  border-bottom: 1px solid var(--line);
-}
-.topbar .wrap { display: flex; align-items: center; gap: 10px; height: 60px; }
-.brand { display: flex; align-items: center; gap: 10px; font: 700 17px/1 var(--display); color: var(--bright); margin-right: 14px; }
-.brand svg { width: 28px; height: 28px; }
-.tabs { display: flex; gap: 6px; }
-.topbar .spacer { flex: 1; }
-.topbar .get { height: 36px; padding: 0 16px; font-size: 14px; border-radius: var(--r-s); }
-.topbar .get .i { font-size: 16px; }
-@media (max-width: 900px) { .tabs { display: none; } }
-@media (max-width: 420px) { .topbar .gh span { display: none; } }
+/* ---------- header ---------- */
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 50; background: var(--c-slate); border-bottom: var(--b-hair); }
+.top .wrap { display: flex; align-items: center; gap: var(--s-4); min-height: var(--s-16); }
+.mark { display: inline-flex; align-items: center; gap: var(--s-2); min-height: var(--tap); text-decoration: none; font: 800 var(--t-lead)/1 var(--f-display); font-stretch: 112%; letter-spacing: -.01em; }
+.mark svg { width: var(--s-8); height: var(--s-8); }
+.nav { display: none; gap: var(--s-1); margin-left: auto; }
+.nav a { display: inline-flex; align-items: center; min-height: var(--tap); padding: 0 var(--s-3); text-decoration: none; font: 500 var(--t-label)/1 var(--f-mono); letter-spacing: var(--track-label); text-transform: uppercase; color: var(--c-muted); border-bottom: 2px solid transparent; }
+.nav a:hover { color: var(--c-ink); }
+.nav a[aria-current="true"] { color: var(--c-ink); border-bottom-color: var(--c-accent); }
+.top .btn { margin-left: auto; }
+@media (min-width: 960px) { .nav { display: flex; } .top .btn { margin-left: var(--s-4); } }
 
 /* ---------- hero ---------- */
-.hero { position: relative; overflow: hidden; background: linear-gradient(180deg, var(--bg) 0%, var(--ink) 100%); }
-.curtain {
-  position: absolute; pointer-events: none;
-  width: min(1400px, 140vw); left: -18%; top: -24%;
-  opacity: .5; filter: blur(42px);
-  animation: drift 18s ease-in-out infinite alternate;
-}
-@keyframes drift { from { transform: translate3d(0, 0, 0) rotate(-3deg); } to { transform: translate3d(6%, 3%, 0) rotate(2deg); } }
-.hero-grid {
-  position: relative;
-  display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
-  align-items: center; gap: clamp(32px, 5vw, 72px);
-  padding-block: clamp(56px, 8vw, 104px) clamp(64px, 8vw, 112px);
-}
-.hero-copy { display: grid; gap: 28px; min-width: 0; }
-.release {
-  justify-self: start; display: inline-flex; align-items: center; gap: 8px;
-  height: 30px; padding: 0 12px 0 10px; border-radius: 999px;
-  background: var(--raised); color: var(--dim);
-  font: 600 13px/1 var(--body);
-}
-.release:hover { color: var(--text); background: var(--hover); }
-.release .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--play); box-shadow: 0 0 0 3px rgba(76, 175, 80, .2); }
-.release b { color: var(--bright); font-weight: 600; }
-h1 {
-  font-weight: 800; font-size: clamp(44px, 4.15vw, 62px); line-height: 1; letter-spacing: -.035em;
-}
-h1 .hot { display: block; color: var(--accent); }
-.hero .lede { font-size: clamp(18px, 1.7vw, 21px); line-height: 1.55; color: #B4BAC1; }
-.cta { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px; }
-.platforms { display: flex; gap: 18px; color: var(--faint); font: 600 13px/1 var(--body); }
-.platforms span { display: inline-flex; align-items: center; gap: 7px; }
-.platforms .i { font-size: 18px; color: var(--dim); }
-
-.window {
-  position: relative; min-width: 0;
-  border-radius: 12px; overflow: hidden;
-  background: var(--chrome);
-  box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 40px 90px -20px rgba(0,0,0,.75), 0 0 120px -30px rgba(240,122,74,.25);
-}
-.hero .window { margin-right: calc(-1 * clamp(40px, 12vw, 220px)); transform: perspective(2200px) rotateY(-7deg) rotateX(2deg); transform-origin: left center; }
-.window img { width: 100%; height: auto; aspect-ratio: 16 / 10; object-fit: cover; object-position: left top; }
-
-@media (max-width: 960px) {
-  .hero-grid { grid-template-columns: 1fr; }
-  .hero .window { margin-right: calc(-1 * var(--gutter-r)); transform: none; border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.specs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: var(--b-hair); }
+.specs div { padding: var(--s-3) var(--s-4) var(--s-3) 0; border-top: var(--b-hair); display: grid; gap: var(--s-1); }
+.specs dd { margin: 0; font: 500 var(--t-small)/1.3 var(--f-body); color: var(--c-ink); }
+.specs dt { margin: 0; }
+@media (min-width: 640px) { .specs { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 1100px) {
+  .specs { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .specs div { border-top: 0; border-left: var(--b-hair); padding-left: var(--s-4); }
+  .specs div:first-child { border-left: 0; padding-left: 0; }
 }
 
-/* ---------- proof strip ---------- */
-.proof { background: var(--ink); border-block: 1px solid var(--line); }
-.proof .wrap { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.stat { padding: 30px 24px 28px; display: grid; gap: 6px; border-left: 1px solid var(--line); }
-.stat:first-child { border-left: 0; padding-left: 0; }
-.stat .n { font: 800 clamp(32px, 3.6vw, 44px)/1 var(--display); color: var(--bright); letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
-.stat .n small { font-size: .5em; letter-spacing: 0; color: var(--dim); margin-left: 4px; }
-.stat .l { color: var(--text); font-weight: 500; font-size: 15px; }
-.stat .vs { color: var(--faint); font-size: 13px; font-variant-numeric: tabular-nums; }
-@media (max-width: 860px) {
-  .proof .wrap { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .stat:nth-child(3) { border-left: 0; padding-left: 0; }
-  .stat:nth-child(n+3) { border-top: 1px solid var(--line); }
+.hero { padding-top: var(--s-12); }
+.hero h1 {
+  margin-top: var(--s-12);
+  font-size: var(--t-hero); line-height: var(--lh-tight); font-weight: 800; font-stretch: 125%;
+  letter-spacing: -.035em; text-wrap: initial;
+}
+.hero h1 .line { display: block; overflow: hidden; padding-bottom: .06em; }
+.hero h1 .line > span { display: inline-block; animation: rise .9s var(--ease) both; }
+.hero h1 .line + .line > span { animation-delay: .12s; color: var(--c-accent); }
+@keyframes rise { from { transform: translateY(105%); } to { transform: none; } }
+
+.hero-row { display: grid; gap: var(--s-8); margin-top: var(--s-8); padding-bottom: var(--s-12); }
+.hero-row .lead { font-size: var(--t-lead); line-height: 1.5; color: var(--c-ink); max-width: 46ch; }
+.hero-row .lead em { font-style: normal; color: var(--c-muted); }
+.get { display: grid; gap: var(--s-3); align-content: start; }
+.get .label { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); }
+#dl-version { text-transform: none; color: var(--c-ink); }
+@media (min-width: 860px) {
+  .hero-row { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); align-items: end; gap: var(--s-16); }
 }
 
-/* ---------- tour ---------- */
-.tour-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 18px; }
-.tour-frame { display: grid; grid-template-columns: minmax(0, 1fr); }
-.tour-frame > figure { grid-area: 1 / 1; margin: 0; transition: opacity .35s ease; }
-.tour-frame > figure[hidden] { display: block !important; opacity: 0; visibility: hidden; }
-.tour-cap { margin-top: 18px; color: var(--dim); font-size: 15px; max-width: 70ch; min-height: 3.2em; }
-.tour-cap b { color: var(--text); font-weight: 600; }
-
-/* ---------- features ---------- */
-.features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-.feature {
-  background: var(--surface); border-radius: var(--r); padding: 24px;
-  display: grid; gap: 10px; align-content: start;
-  transition: background .15s;
+/* the app window, sitting on an offset plate and overlapping the next band */
+.shot { position: relative; margin: 0 0 calc(-1 * var(--s-24)); z-index: 2; }
+.plate { position: relative; }
+.plate::before {
+  content: ""; position: absolute; inset: 0;
+  transform: translate(var(--plate-offset), var(--plate-offset));
+  border: 1px solid var(--c-accent); border-radius: var(--r-window);
 }
-.feature:hover { background: var(--raised); }
-.feature .i { font-size: 24px; color: var(--accent); }
-.feature p { margin: 0; color: var(--dim); font-size: 15px; line-height: 1.55; }
-@media (max-width: 900px) { .features { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px) { .features { grid-template-columns: 1fr; } }
+.window { position: relative; border-radius: var(--r-window); overflow: hidden; border: var(--b-strong); background: var(--c-panel); }
+.window img { width: 100%; aspect-ratio: 16 / 10; object-fit: cover; object-position: left top; }
+.fig { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--s-2) var(--s-6); margin-top: var(--s-6); }
 
-/* ---------- launch matrix ---------- */
-.launch { display: grid; gap: 8px; }
-.launch-row {
-  display: grid; grid-template-columns: 56px minmax(0, 1.1fr) minmax(0, 1.2fr) minmax(0, 1.4fr);
-  gap: 20px; align-items: center;
-  background: var(--surface); border-radius: var(--r); padding: 18px 22px;
-}
-.launch-row .ic {
-  width: 44px; height: 44px; border-radius: var(--r-s); display: grid; place-items: center;
-  background: var(--raised); color: var(--bright);
-}
-.launch-row .ic .i { font-size: 22px; }
-.launch-row h3 { font-size: 17px; }
-.launch-row .k { display: block; font: 700 11px/1 var(--display); letter-spacing: .09em; text-transform: uppercase; color: var(--faint); margin-bottom: 6px; }
-.launch-row p { margin: 0; font-size: 15px; color: var(--text); line-height: 1.5; }
-.launch-head { display: grid; grid-template-columns: 56px minmax(0, 1.1fr) minmax(0, 1.2fr) minmax(0, 1.4fr); gap: 20px; padding: 0 22px 4px; font: 700 11px/1 var(--display); letter-spacing: .09em; text-transform: uppercase; color: var(--faint); }
-.launch-row .k { display: none; }
-.note {
-  margin-top: 20px; display: flex; gap: 14px; align-items: flex-start;
-  padding: 18px 22px; border-radius: var(--r);
-  background: rgba(240, 122, 74, .08); color: #E9C3B2; font-size: 15px;
-}
-.note .i { color: var(--accent); font-size: 20px; margin-top: 2px; }
-.note p { margin: 0; }
-code { font-family: var(--mono); font-size: .9em; background: var(--raised); padding: 2px 6px; border-radius: 4px; color: var(--bright); }
-@media (max-width: 860px) {
-  .launch-head { display: none; }
-  .launch-row { grid-template-columns: 44px minmax(0, 1fr); align-items: start; gap: 14px 16px; }
-  .launch-row > div:nth-child(n+3) { grid-column: 2; }
-  .launch-row .k { display: block; }
-}
+/* ---------- numbers ---------- */
+.band { background: var(--c-panel); border-block: var(--b-hair); }
+.numbers { padding-top: calc(var(--s-24) + var(--s-16)); padding-bottom: var(--s-24); }
+.head { display: grid; gap: var(--s-4); margin-bottom: var(--s-12); }
+.head h2 { font-size: var(--t-h2); line-height: var(--lh-head); font-weight: 800; font-stretch: 100%; letter-spacing: -.025em; max-width: 22ch; }
+.head p:not(.label) { color: var(--c-muted); max-width: 62ch; }
 
-/* ---------- benchmarks ---------- */
-.bench { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: clamp(24px, 4vw, 56px); align-items: start; }
-.bars { background: var(--surface); border-radius: var(--r); padding: 8px 26px; }
-.metric { padding: 20px 0; border-top: 1px solid var(--line); display: grid; gap: 10px; }
-.metric:first-child { border-top: 0; }
-.metric-name { display: flex; justify-content: space-between; gap: 12px; font: 700 15px/1.3 var(--display); color: var(--bright); }
-.metric-name span { color: var(--accent); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.bar { display: grid; grid-template-columns: 64px minmax(0, 1fr) 96px; align-items: center; gap: 12px; font-size: 13px; }
-.bar .who { color: var(--dim); font-weight: 500; }
-.bar .track { height: 10px; border-radius: 5px; background: var(--ink); overflow: hidden; }
-.bar .fill { height: 100%; border-radius: 5px; min-width: 4px; background: var(--hover); }
-.bar.us .fill { background: linear-gradient(90deg, var(--accent), var(--accent-hi)); }
-.bar.us .who { color: var(--text); }
-.bar .v { text-align: right; font-variant-numeric: tabular-nums; color: var(--dim); white-space: nowrap; }
-.bar.us .v { color: var(--bright); font-weight: 600; }
-.rig { display: grid; gap: 18px; }
-.rig dl { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 18px; font-size: 15px; }
-.rig dt { color: var(--faint); font-weight: 500; }
-.rig dd { margin: 0; color: var(--text); }
-.rig p { margin: 0; color: var(--dim); font-size: 14px; }
-.link { color: var(--active); font-weight: 600; display: inline-flex; gap: 6px; align-items: center; }
-.link:hover { text-decoration: underline; text-underline-offset: 3px; }
-@media (max-width: 900px) { .bench { grid-template-columns: 1fr; } }
-@media (max-width: 480px) { .bars { padding: 4px 16px; } .bar { grid-template-columns: 52px minmax(0, 1fr) 76px; gap: 8px; } }
-
-/* ---------- download ---------- */
-.dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-.dl a {
-  background: var(--surface); border-radius: var(--r); padding: 22px;
-  display: grid; grid-template-rows: auto auto 1fr auto; gap: 8px;
-  transition: background .15s, transform .15s;
+.metric { border-top: var(--b-hair); padding-block: var(--s-6); display: grid; gap: var(--s-2); grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.metric:last-of-type { border-bottom: var(--b-hair); }
+.metric .label { grid-column: 1 / -1; }
+.metric .now {
+  font: 800 var(--t-giant)/var(--lh-tight) var(--f-display); font-stretch: 62%;
+  letter-spacing: -.02em; color: var(--c-accent); font-variant-numeric: tabular-nums;
 }
-.dl a:hover { background: var(--raised); transform: translateY(-2px); }
-.dl .i.os { font-size: 30px; color: var(--bright); margin-bottom: 8px; }
-.dl .ext { font-family: var(--mono); font-size: 13px; color: var(--accent); }
-.dl p { margin: 0; color: var(--dim); font-size: 14px; }
-.dl .go { margin-top: 10px; color: var(--active); font: 700 14px/1 var(--display); display: inline-flex; gap: 6px; align-items: center; }
-.dl-foot { margin-top: 14px; color: var(--faint); font-size: 14px; }
-@media (max-width: 960px) { .dl { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 520px) { .dl { grid-template-columns: 1fr; } }
+.metric .now small { font-size: .38em; font-stretch: 75%; letter-spacing: 0; margin-left: var(--s-2); }
+.metric .was { text-align: right; display: grid; gap: var(--s-1); justify-items: end; }
+.metric .was s { font: 600 var(--t-h3)/1 var(--f-display); font-stretch: 75%; color: var(--c-muted); text-decoration-thickness: 2px; text-decoration-color: var(--c-muted); font-variant-numeric: tabular-nums; }
+.metric .was span { font: 500 var(--t-label)/1.3 var(--f-mono); color: var(--c-ink); letter-spacing: var(--track-label); text-transform: uppercase; }
+.metric-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s-2); padding-bottom: var(--s-3); }
+.metric-head .label:first-child { color: var(--c-accent); }
+.metric-head .label:last-child { text-align: right; }
+.metric-head .label.spacer { display: none; }
+@media (min-width: 860px) {
+  .metric, .metric-head { grid-template-columns: minmax(0, 14rem) minmax(0, 1fr) minmax(0, 12rem); align-items: center; gap: var(--s-8); }
+  .metric .label { grid-column: auto; }
+  .metric-head .label.spacer { display: block; }
+  .metric-head .label:first-child { color: var(--c-muted); }
+  .metric-head .label:nth-child(2) { color: var(--c-accent); }
+}
+.method { display: grid; gap: var(--s-4); margin-top: var(--s-8); color: var(--c-muted); font-size: var(--t-small); max-width: 80ch; }
 
-.source { margin-top: 48px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 32px; align-items: center; }
-.source p { margin: 8px 0 0; color: var(--dim); font-size: 15px; }
-.term { position: relative; background: var(--ink); border-radius: var(--r); box-shadow: inset 0 0 0 1px var(--line); }
-.term pre { margin: 0; padding: 20px 22px; overflow-x: auto; font: 13.5px/1.75 var(--mono); color: var(--text); }
-.term .c { color: var(--faint); }
-.term .p { color: var(--accent); user-select: none; }
-.copy { position: absolute; top: 10px; right: 10px; height: 30px; padding: 0 10px; font-size: 12px; }
-@media (max-width: 860px) { .source { grid-template-columns: minmax(0, 1fr); } }
+/* ---------- screens ---------- */
+.section { padding-block: var(--s-24); }
+.tabs { display: flex; gap: var(--s-1); overflow-x: auto; margin-bottom: var(--s-6); scrollbar-width: none; }
+.tab {
+  display: inline-flex; align-items: center; gap: var(--s-2); flex: none;
+  min-height: var(--tap); padding: 0 var(--s-4);
+  background: transparent; color: var(--c-muted);
+  border: var(--b-hair); border-radius: var(--r-1);
+  font: 600 var(--t-small)/1 var(--f-body); cursor: pointer;
+  transition: color .15s, border-color .15s, background-color .15s;
+}
+.tab .i { font-size: var(--t-lead); }
+.tab:hover { color: var(--c-ink); border-color: var(--c-rule-strong); }
+.tab[aria-selected="true"] { color: var(--c-accent); border-color: var(--c-accent); background: var(--c-accent-wash); }
+.stage { display: grid; }
+.stage > figure { grid-area: 1 / 1; margin: 0; transition: opacity .3s var(--ease); }
+.stage > figure[hidden] { display: block !important; opacity: 0; visibility: hidden; }
+.stage figcaption { display: grid; gap: var(--s-2); margin-top: var(--s-6); max-width: 70ch; }
+.stage figcaption p { color: var(--c-muted); }
 
-/* ---------- safety ---------- */
-.safe { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: clamp(20px, 3vw, 40px); }
-.safe div { display: grid; gap: 10px; align-content: start; }
-.safe .i { font-size: 26px; color: var(--play); }
-.safe p { margin: 0; color: var(--dim); font-size: 15px; }
-@media (max-width: 760px) { .safe { grid-template-columns: 1fr; } }
+/* ---------- launch table ---------- */
+.launch { width: 100%; border-collapse: collapse; }
+.launch th, .launch td { text-align: left; vertical-align: top; padding: var(--s-4) var(--s-6) var(--s-4) 0; border-top: var(--b-hair); }
+.launch thead th { font: 500 var(--t-label)/1.3 var(--f-mono); letter-spacing: var(--track-label); text-transform: uppercase; color: var(--c-muted); border-top: 0; padding-bottom: var(--s-3); }
+.launch tbody th { font: 700 var(--t-lead)/1.25 var(--f-display); font-stretch: 100%; width: 28%; }
+.launch tbody th .sub { display: block; margin-top: var(--s-1); font: 400 var(--t-small)/1.4 var(--f-body); color: var(--c-muted); }
+.launch td { color: var(--c-ink); }
+.launch tbody tr:last-child > * { border-bottom: var(--b-hair); }
+code { font-family: var(--f-mono); font-size: .88em; padding: 0 var(--s-1); border: var(--b-hair); border-radius: var(--r-1); color: var(--c-ink); }
+@media (max-width: 759px) {
+  .launch thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .launch tr { display: grid; gap: var(--s-2); padding-block: var(--s-4); border-top: var(--b-hair); }
+  .launch tbody tr:last-child { border-bottom: var(--b-hair); }
+  .launch th, .launch td, .launch tbody th { display: block; border: 0; padding: 0; width: auto; }
+  .launch tbody tr:last-child > * { border-bottom: 0; }
+  .launch td::before { content: attr(data-label); display: block; font: 500 var(--t-label)/1.3 var(--f-mono); letter-spacing: var(--track-label); text-transform: uppercase; color: var(--c-muted); margin-bottom: var(--s-1); }
+}
+.caution { margin-top: var(--s-8); border: var(--b-strong); padding: var(--s-6); display: grid; gap: var(--s-2); max-width: 80ch; }
+.caution .label { color: var(--c-accent); }
+
+/* ---------- status ---------- */
+.status { display: grid; gap: var(--s-12); }
+.status h3 { font-size: var(--t-h3); font-weight: 800; font-stretch: 112%; display: flex; align-items: baseline; gap: var(--s-3); padding-bottom: var(--s-3); border-bottom: var(--b-strong); }
+.status h3 .label { color: var(--c-muted); }
+.status ul { list-style: none; margin: 0; padding: 0; }
+.status li { display: grid; grid-template-columns: var(--s-6) minmax(0, 1fr); gap: var(--s-2); padding-block: var(--s-3); border-bottom: var(--b-hair); }
+.status li .i { font-size: var(--t-lead); padding-top: 2px; }
+.status .works .i { color: var(--c-accent); }
+.status .missing .i { color: var(--c-muted); }
+.status li b { font-weight: 600; }
+@media (min-width: 860px) { .status { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-16); } }
+
+/* ---------- install ---------- */
+.install { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s-12); }
+@media (min-width: 960px) { .install { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--s-16); } }
+.files { list-style: none; margin: 0; padding: 0; border-top: var(--b-strong); }
+.files a {
+  display: grid; grid-template-columns: var(--s-8) minmax(0, 1fr) auto; gap: var(--s-4); align-items: center;
+  min-height: var(--s-16); padding-block: var(--s-3); border-bottom: var(--b-hair);
+  text-decoration: none; transition: background-color .15s, padding .2s var(--ease);
+}
+.files a:hover { background: var(--c-accent-wash); padding-inline: var(--s-3); }
+.files .i.os { font-size: var(--t-h3); }
+.files strong { display: block; font: 700 var(--t-body)/1.3 var(--f-display); font-stretch: 100%; }
+.files span.ext { font: 500 var(--t-small)/1.4 var(--f-mono); color: var(--c-muted); }
+.files .go { color: var(--c-accent); font-size: var(--t-lead); }
+.needs { margin-top: var(--s-4); color: var(--c-muted); font-size: var(--t-small); }
+
+.term { border: var(--b-strong); border-radius: var(--r-1); background: var(--c-slate); }
+.term-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--s-4); padding: var(--s-1) var(--s-1) var(--s-1) var(--s-4); border-bottom: var(--b-hair); }
+.term pre { margin: 0; padding: var(--s-4); overflow-x: auto; font: 400 var(--t-small)/1.8 var(--f-mono); color: var(--c-ink); }
+.term .p { color: var(--c-accent); user-select: none; }
+.term .c { color: var(--c-muted); }
+.build { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s-4); }
+.build p { color: var(--c-muted); font-size: var(--t-small); }
+
+.trust { display: grid; gap: 0; margin: var(--s-16) 0 0; border-top: var(--b-strong); }
+.trust div { display: grid; gap: var(--s-2); padding-block: var(--s-5); border-bottom: var(--b-hair); }
+.trust dt { font: 700 var(--t-body)/1.3 var(--f-display); font-stretch: 100%; display: flex; gap: var(--s-2); align-items: center; }
+.trust dt .i { color: var(--c-accent); font-size: var(--t-lead); }
+.trust dd { margin: 0; color: var(--c-muted); }
+@media (min-width: 860px) { .trust div { grid-template-columns: minmax(0, 16rem) minmax(0, 1fr); gap: var(--s-8); } }
 
 /* ---------- footer ---------- */
-footer { background: var(--ink); border-top: 1px solid var(--line); }
-footer .wrap { padding-block: 44px 52px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px 40px; align-items: start; }
-footer p { margin: 0; color: var(--faint); font-size: 14px; max-width: 70ch; }
-footer p a { color: var(--dim); text-decoration: underline; text-underline-offset: 3px; }
-footer nav { display: flex; flex-wrap: wrap; gap: 6px; }
-@media (max-width: 760px) { footer .wrap { grid-template-columns: 1fr; } }
-
-.alt { background: var(--ink); }
+footer { border-top: var(--b-hair); }
+footer .wrap { padding-block: var(--s-12); display: grid; gap: var(--s-6); }
+footer p { color: var(--c-muted); font-size: var(--t-small); max-width: 80ch; }
+footer nav { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-4); }
+footer nav a { font: 500 var(--t-label)/1 var(--f-mono); letter-spacing: var(--track-label); text-transform: uppercase; display: inline-flex; align-items: center; min-height: var(--tap); }
+footer nav a:hover { color: var(--c-accent); }
+footer p a:hover { color: var(--c-accent); }
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  .curtain { animation: none; }
-  * { transition: none !important; }
+  .hero h1 .line > span { animation: none; }
+  *, *::before, *::after { transition: none !important; }
 }
 </style>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
     <linearGradient id="logo-fade" gradientUnits="userSpaceOnUse" x1="0" y1="50" x2="0" y2="8">
-      <stop offset="0" stop-color="#fff" stop-opacity=".85"/>
-      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="0" stop-color="#E6E9EC" stop-opacity=".85"/>
+      <stop offset="1" stop-color="#E6E9EC" stop-opacity="0"/>
     </linearGradient>
     <symbol id="logo" viewBox="0 0 64 64">
       <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30 L54 8 C49 9 45 12 40 17 C31 26 21 30 11 25 Z" fill="url(#logo-fade)"/>
-      <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round"/>
+      <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30" fill="none" stroke="#E6E9EC" stroke-width="5" stroke-linecap="round"/>
     </symbol>
   </defs>
 </svg>
 
-<header class="topbar">
+<header class="top">
   <div class="wrap">
-    <a class="brand" href="#top" aria-label="Aurora, back to top"><svg aria-hidden="true"><use href="#logo"/></svg>Aurora</a>
-    <nav class="tabs" aria-label="Sections">
-      <a class="pill" href="#tour"><i class="i" aria-hidden="true">&#xE470;</i>Tour</a>
-      <a class="pill" href="#games"><i class="i" aria-hidden="true">&#xE26E;</i>Games</a>
-      <a class="pill" href="#benchmarks"><i class="i" aria-hidden="true">&#xE2DE;</i>Benchmarks</a>
-      <a class="pill" href="#download"><i class="i" aria-hidden="true">&#xE20C;</i>Download</a>
+    <a class="mark" href="#main" aria-label="Aurora, back to top"><svg aria-hidden="true"><use href="#logo"/></svg>Aurora</a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#numbers">Numbers</a>
+      <a href="#screens">Screens</a>
+      <a href="#games">Games</a>
+      <a href="#status">Status</a>
+      <a href="#install">Install</a>
     </nav>
-    <span class="spacer"></span>
-    <a class="pill gh" href="https://github.com/mollie2999/Aurora"><i class="i" aria-hidden="true">&#xE278;</i><span>GitHub</span></a>
-    <a class="btn btn-accent get" href="#download">Get Aurora</a>
+    <a class="btn btn-primary" href="#install"><i class="i" aria-hidden="true">&#xE20C;</i>Download</a>
   </div>
 </header>
 
-<main id="top">
-  <section class="hero">
-    <svg class="curtain" viewBox="0 0 64 64" aria-hidden="true">
-      <defs>
-        <linearGradient id="glow" x1="0" y1="1" x2="1" y2="0">
-          <stop offset="0" stop-color="#F07A4A" stop-opacity=".55"/>
-          <stop offset=".55" stop-color="#C9466B" stop-opacity=".22"/>
-          <stop offset="1" stop-color="#1A9FFF" stop-opacity="0"/>
-        </linearGradient>
-      </defs>
-      <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30 L54 8 C49 9 45 12 40 17 C31 26 21 30 11 25 Z" fill="url(#glow)"/>
-    </svg>
-    <div class="wrap hero-grid">
-      <div class="hero-copy">
-        <a class="release" id="release" href="https://github.com/mollie2999/Aurora/releases/latest">
-          <span class="dot" aria-hidden="true"></span><span id="release-text">Latest release on GitHub</span>
-        </a>
-        <h1>Your Steam library. <span class="hot">None of the bloat.</span></h1>
-        <p class="lede">A native Steam client written in Rust. All your games, without a browser hiding inside.</p>
-        <div class="cta">
-          <a class="btn btn-accent" href="#download"><i class="i" aria-hidden="true">&#xE20C;</i>Get Aurora</a>
-          <a class="btn btn-ghost" href="https://github.com/mollie2999/Aurora">github.com/mollie2999/Aurora</a>
-        </div>
-        <div class="platforms">
-          <span><i class="i" aria-hidden="true">&#xEB02;</i>Linux · Wayland &amp; X11</span>
-          <span><i class="i" aria-hidden="true">&#xE692;</i>Windows 10 &amp; 11</span>
+<main id="main">
+  <section class="hero" aria-labelledby="hero-h">
+    <div class="wrap">
+      <dl class="specs" aria-label="Aurora at a glance">
+        <div><dt class="label">Client for</dt><dd>Steam</dd></div>
+        <div><dt class="label">Written in</dt><dd>Rust</dd></div>
+        <div><dt class="label">Interface</dt><dd>egui, drawn natively</dd></div>
+        <div><dt class="label">Runs on</dt><dd>Linux &amp; Windows 10/11</dd></div>
+        <div><dt class="label">License</dt><dd>MIT</dd></div>
+        <div><dt class="label">Fork of</dt><dd>SteamInRust</dd></div>
+      </dl>
+
+      <h1 id="hero-h">
+        <span class="line"><span>Your Steam library.</span></span>
+        <span class="line"><span>None of the bloat.</span></span>
+      </h1>
+
+      <div class="hero-row">
+        <p class="lead">Store, library, downloads, friends, Workshop and Market in one native window. <em>No steamwebhelper, no Chromium: Aurora signs in to your own account and talks to Steam's servers directly.</em></p>
+        <div class="get">
+          <a class="btn btn-primary btn-hero" id="dl-main" href="https://github.com/mollie2999/Aurora/releases/latest"><i class="i" aria-hidden="true">&#xE20C;</i><span id="dl-main-text">Download Aurora</span></a>
+          <p class="label"><span id="dl-version">Latest release</span><span>Linux · Arch · Windows</span><span>46 MB</span></p>
+          <a class="text-link" href="https://github.com/mollie2999/Aurora"><i class="i" aria-hidden="true">&#xE278;</i>Read the source on GitHub</a>
         </div>
       </div>
-      <div class="window">
-        <img src="assets/img/game.webp" width="1440" height="900" alt="Aurora's library with the Hades page open: a download in progress, store and community links, and the latest news">
+
+      <figure class="shot">
+        <div class="plate">
+          <div class="window">
+            <img src="assets/img/game.webp" width="1440" height="900" fetchpriority="high" alt="Aurora's library with the Hades page open: a download at 5.7 of 12.5 GB, links to the store page, Workshop and achievements, and the game's latest news">
+          </div>
+        </div>
+        <figcaption class="fig label"><span>Fig. 1 · Library › Hades</span><span>1440 × 900 · NEVKO theme · demo data</span></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="band" id="numbers" aria-labelledby="numbers-h">
+    <div class="wrap numbers">
+      <div class="head">
+        <p class="label">Measured 16 Nov 2026 · Aurora 0.7.2 vs Steam build 1792618285</p>
+        <h2 id="numbers-h">Steam idles with 16 processes and a copy of Chromium. Aurora runs one.</h2>
+      </div>
+
+      <div class="metric-head" aria-hidden="true">
+        <span class="label spacer">Measure</span>
+        <span class="label">Aurora</span>
+        <span class="label">Steam</span>
+      </div>
+      <div class="metric">
+        <p class="label">Start → first window</p>
+        <p class="now">0.14<small>s</small></p>
+        <p class="was"><s>2.77 s</s><span>20× sooner</span></p>
+      </div>
+      <div class="metric">
+        <p class="label">Start → signed in</p>
+        <p class="now">2.16<small>s</small></p>
+        <p class="was"><s>4.90 s</s><span>2.3× sooner</span></p>
+      </div>
+      <div class="metric">
+        <p class="label">Memory when idle</p>
+        <p class="now">166<small>MB</small></p>
+        <p class="was"><s>1,408 MB</s><span>8.5× less</span></p>
+      </div>
+      <div class="metric">
+        <p class="label">CPU when idle</p>
+        <p class="now">0.2<small>%</small></p>
+        <p class="was"><s>18 %</s><span>of one core</span></p>
+      </div>
+      <div class="metric">
+        <p class="label">Processes</p>
+        <p class="now">1</p>
+        <p class="was"><s>16</s><span>no webhelper</span></p>
+      </div>
+      <div class="metric">
+        <p class="label">Program size</p>
+        <p class="now">46<small>MB</small></p>
+        <p class="was"><s>2,129 MB</s><span>46× smaller</span></p>
+      </div>
+
+      <div class="method">
+        <p>Same PC and account: Ryzen 7 5700X, 16 GB RAM, GeForce RTX 5070, CachyOS with GNOME on Wayland. Each figure is the median of 3 runs after a warm-up. Memory is PSS across all of a client's processes, taken 45 s after the main window opened; CPU over the next 30 s. Steam's first window is its sign-in window, Aurora's its account picker. Steam's size leaves out games, user data, caches and compatibility tools.</p>
+        <a class="text-link" href="https://github.com/mollie2999/Aurora/blob/main/docs/benchmarks-linux.md">Method, script and every run<i class="i" aria-hidden="true">&#xE06C;</i></a>
       </div>
     </div>
   </section>
 
-  <section class="proof" aria-label="Aurora against the official Steam client">
+  <section class="section" id="screens" aria-labelledby="screens-h">
     <div class="wrap">
-      <div class="stat"><div class="n">0.14<small>s</small></div><div class="l">to the first window</div><div class="vs">Steam: 2.77 s</div></div>
-      <div class="stat"><div class="n">166<small>MB</small></div><div class="l">memory when idle</div><div class="vs">Steam: 1,408 MB</div></div>
-      <div class="stat"><div class="n">1</div><div class="l">process</div><div class="vs">Steam: 16, with Chromium</div></div>
-      <div class="stat"><div class="n">46<small>MB</small></div><div class="l">program size</div><div class="vs">Steam: 2,129 MB</div></div>
-    </div>
-  </section>
-
-  <section class="section" id="tour">
-    <div class="wrap">
-      <div class="section-head">
-        <span class="eyebrow">The whole client</span>
-        <h2>Everything you open Steam for, drawn natively.</h2>
-        <p class="lede">Store, library, downloads, friends, chat, Workshop, inventory, Market and Steam Cloud, in one process rendered with egui. It signs in to your own account and talks to Steam's servers directly.</p>
+      <div class="head">
+        <p class="label">Screens</p>
+        <h2 id="screens-h">The parts of Steam you open every day.</h2>
       </div>
-      <div class="tour-tabs" role="tablist" aria-label="Screens">
-        <button class="pill" role="tab" id="t-library" aria-selected="true" aria-controls="p-library"><i class="i" aria-hidden="true">&#xE758;</i>Library</button>
-        <button class="pill" role="tab" id="t-store" aria-selected="false" aria-controls="p-store"><i class="i" aria-hidden="true">&#xE470;</i>Store</button>
-        <button class="pill" role="tab" id="t-game" aria-selected="false" aria-controls="p-game"><i class="i" aria-hidden="true">&#xE26E;</i>Game page</button>
-        <button class="pill" role="tab" id="t-profile" aria-selected="false" aria-controls="p-profile"><i class="i" aria-hidden="true">&#xE4C2;</i>Profile</button>
-        <button class="pill" role="tab" id="t-inventory" aria-selected="false" aria-controls="p-inventory"><i class="i" aria-hidden="true">&#xE922;</i>Inventory</button>
+      <div class="tabs" role="tablist" aria-label="Screens">
+        <button class="tab" role="tab" id="t-library" aria-selected="true" aria-controls="p-library"><i class="i" aria-hidden="true">&#xE758;</i>Library</button>
+        <button class="tab" role="tab" id="t-store" aria-selected="false" aria-controls="p-store"><i class="i" aria-hidden="true">&#xE470;</i>Store</button>
+        <button class="tab" role="tab" id="t-profile" aria-selected="false" aria-controls="p-profile"><i class="i" aria-hidden="true">&#xE4C2;</i>Profile</button>
+        <button class="tab" role="tab" id="t-inventory" aria-selected="false" aria-controls="p-inventory"><i class="i" aria-hidden="true">&#xE922;</i>Inventory</button>
       </div>
-      <div class="tour-frame">
-        <figure id="p-library" role="tabpanel" aria-labelledby="t-library" class="window" data-cap="<b>Library.</b> Recent games, every game in a grid you can resize, collections and filters in the sidebar. Non-Steam games sit next to the rest.">
-          <img src="assets/img/library.webp" width="1440" height="900" loading="lazy" alt="The library: recent games and a grid of covers, with the game list in the sidebar">
+      <div class="stage">
+        <figure id="p-library" role="tabpanel" aria-labelledby="t-library">
+          <div class="window"><img src="assets/img/library.webp" width="1440" height="900" loading="lazy" alt="The library: Hades under recent games, then nine games as a grid of covers, with the game list and filters in the sidebar"></div>
+          <figcaption><span class="label">Fig. 2 · Library</span><p>Recent games, then everything you own as covers you can resize. Collections, filters and hidden games in the sidebar; non-Steam games sit with the rest.</p></figcaption>
         </figure>
-        <figure id="p-store" role="tabpanel" aria-labelledby="t-store" class="window" hidden data-cap="<b>Store.</b> Featured games, specials, top sellers and new releases, with trailers that play inside the client. Wishlist and cart included.">
-          <img src="assets/img/store.webp" width="1440" height="900" loading="lazy" alt="The store front page: a featured game with screenshots and a discount, and a row of specials">
+        <figure id="p-store" role="tabpanel" aria-labelledby="t-store" hidden>
+          <div class="window"><img src="assets/img/store.webp" width="1440" height="900" loading="lazy" alt="The store's front page: a featured game at 30 percent off with four screenshots, and a row of specials"></div>
+          <figcaption><span class="label">Fig. 3 · Store</span><p>Featured, Specials, Top Sellers, New Releases and Coming Soon, with trailers that play inside the client. Checkout opens Steam's website.</p></figcaption>
         </figure>
-        <figure id="p-game" role="tabpanel" aria-labelledby="t-game" class="window" hidden data-cap="<b>Game page.</b> Download progress, Workshop, guides and achievements, the game's news, your own notes and which friends are playing.">
-          <img src="assets/img/game.webp" width="1440" height="900" loading="lazy" alt="The Hades page in the library with a download in progress">
+        <figure id="p-profile" role="tabpanel" aria-labelledby="t-profile" hidden>
+          <div class="window"><img src="assets/img/profile.webp" width="1440" height="900" loading="lazy" alt="A profile at level 27: recent activity, most played, comments, and counts of games, inventory items and friends"></div>
+          <figcaption><span class="label">Fig. 4 · Profile</span><p>Level, recent activity, most played and comments, drawn over the profile's own background.</p></figcaption>
         </figure>
-        <figure id="p-profile" role="tabpanel" aria-labelledby="t-profile" class="window" hidden data-cap="<b>Profile.</b> Your level, recent activity, most played games and comments, over your profile background.">
-          <img src="assets/img/profile.webp" width="1440" height="900" loading="lazy" alt="A profile page: level, recent activity, most played and a side list of games, inventory and friends">
+        <figure id="p-inventory" role="tabpanel" aria-labelledby="t-inventory" hidden>
+          <div class="window"><img src="assets/img/inventory.webp" width="1440" height="900" loading="lazy" alt="The inventory: eighteen Dota 2 items, with Arms of Desolation selected, starting at 11.38 dollars on the Community Market"></div>
+          <figcaption><span class="label">Fig. 5 · Inventory</span><p>Items from every game with their Community Market price, 24-hour sales, the highest buy order and a price chart.</p></figcaption>
         </figure>
-        <figure id="p-inventory" role="tabpanel" aria-labelledby="t-inventory" class="window" hidden data-cap="<b>Inventory and Market.</b> Items from every game, with prices, sales over the last day and the buy orders behind them.">
-          <img src="assets/img/inventory.webp" width="1440" height="900" loading="lazy" alt="The inventory: a grid of Dota 2 items and the selected item's Community Market price">
-        </figure>
-      </div>
-      <p class="tour-cap" id="tour-cap" aria-live="polite"><b>Library.</b> Recent games, every game in a grid you can resize, collections and filters in the sidebar. Non-Steam games sit next to the rest.</p>
-    </div>
-  </section>
-
-  <section class="section alt" id="features" aria-labelledby="features-h">
-    <div class="wrap">
-      <div class="section-head">
-        <span class="eyebrow">What's inside</span>
-        <h2 id="features-h">One window. No webhelper.</h2>
-      </div>
-      <div class="features">
-        <div class="feature"><i class="i" aria-hidden="true">&#xE470;</i><h3>Store with trailers</h3><p>Browse, search, wishlist and fill your cart. Trailers play in the client (ffmpeg on Linux); checkout opens Steam's website.</p></div>
-        <div class="feature"><i class="i" aria-hidden="true">&#xE758;</i><h3>Library and collections</h3><p>Collections, filters, hidden games, your own library folders and non-Steam games.</p></div>
-        <div class="feature"><i class="i" aria-hidden="true">&#xE20C;</i><h3>Downloads</h3><p>Install, update and pause games, straight from Steam's content servers.</p></div>
-        <div class="feature"><i class="i" aria-hidden="true">&#xE17C;</i><h3>Friends and chat</h3><p>See who's online and in game, and chat without opening a browser window.</p></div>
-        <div class="feature"><i class="i" aria-hidden="true">&#xE1DA;</i><h3>Workshop</h3><p>Browse a game's Workshop and subscribe to mods without leaving the client.</p></div>
-        <div class="feature"><i class="i" aria-hidden="true">&#xE78E;</i><h3>Inventory and Market</h3><p>Items from every game, Market prices and price history, and your own listings.</p></div>
-        <div class="feature"><i class="i" aria-hidden="true">&#xE1B0;</i><h3>Steam Cloud</h3><p>Saves sync before and after you play, for every game that uses the Cloud.</p></div>
-        <div class="feature"><i class="i" aria-hidden="true">&#xE6C8;</i><h3>Themes</h3><p>NEVKO, Midnight, Aurora, Classic, OLED and Daylight, each with its own accent and corner radius.</p></div>
-        <div class="feature"><i class="i" aria-hidden="true">&#xE596;</i><h3>Plugins and offline mode</h3><p>Extend the client with plugins, and keep playing installed games when Steam is unreachable.</p></div>
       </div>
     </div>
   </section>
 
-  <section class="section" id="games" aria-labelledby="games-h">
+  <section class="section band" id="games" aria-labelledby="games-h">
     <div class="wrap">
-      <div class="section-head">
-        <span class="eyebrow">Every game launches</span>
-        <h2 id="games-h">Aurora picks how to start each game.</h2>
-        <p class="lede">On Linux, native games, Windows games, Steam DRM and anti-cheat each get their own path. Games with both builds run the Linux one, and Manage › Compatibility switches any game to a Proton version you choose.</p>
+      <div class="head">
+        <p class="label">Launching games on Linux</p>
+        <h2 id="games-h">Native, Proton, Steam DRM or anti-cheat: each gets its own route.</h2>
+        <p>Games with both builds run the Linux one. Manage › Compatibility moves any game to Proton, or to a specific Proton version.</p>
       </div>
-      <div class="launch">
-        <div class="launch-head" aria-hidden="true"><span></span><span>Game</span><span>How it starts</span><span>Steam features in the game</span></div>
-        <div class="launch-row">
-          <div class="ic"><i class="i" aria-hidden="true">&#xEB02;</i></div>
-          <div><h3>Native Linux games</h3></div>
-          <div><span class="k">How it starts</span><p>Directly</p></div>
-          <div><span class="k">Steam features</span><p>Your own Steam's <code>steamclient.so</code>, on a windowless Steam host</p></div>
-        </div>
-        <div class="launch-row">
-          <div class="ic"><i class="i" aria-hidden="true">&#xE692;</i></div>
-          <div><h3>Windows games</h3></div>
-          <div><span class="k">How it starts</span><p>Proton: Steam's default, or the one you pick</p></div>
-          <div><span class="k">Steam features</span><p>Aurora's own <code>steamclient</code>: achievements, stats, cloud, lobbies, Workshop</p></div>
-        </div>
-        <div class="launch-row">
-          <div class="ic"><i class="i" aria-hidden="true">&#xE308;</i></div>
-          <div><h3>Steam DRM (SteamStub)</h3></div>
-          <div><span class="k">How it starts</span><p>Proton, on the windowless Steam host</p></div>
-          <div><span class="k">Steam features</span><p>Valve's engine answers the DRM check itself</p></div>
-        </div>
-        <div class="launch-row">
-          <div class="ic"><i class="i" aria-hidden="true">&#xE40C;</i></div>
-          <div><h3>Anti-cheat</h3><p style="color:var(--faint);font-size:13px;margin-top:4px">VAC, Easy Anti-Cheat, BattlEye</p></div>
-          <div><span class="k">How it starts</span><p>Through the official Steam client, or on the windowless host (experimental)</p></div>
-          <div><span class="k">Steam features</span><p>Steam's own, from Valve's engine either way</p></div>
-        </div>
-      </div>
-      <div class="note">
-        <i class="i" aria-hidden="true">&#xE2CE;</i>
-        <p>The windowless Steam host is your installed Steam's engine without its interface: no <code>steamwebhelper</code>, no Chromium. It checks ownership itself, so it can't start a game you don't own. Running anti-cheat games on it (Settings › Library) is experimental, and the anti-cheat may count it as an unsupported setup and ban you.</p>
+      <table class="launch">
+        <thead><tr><th scope="col">Game</th><th scope="col">How it starts</th><th scope="col">Steam features inside the game</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Native Linux</th><td data-label="How it starts">Directly</td><td data-label="Steam features">Your own Steam's <code>steamclient.so</code>, on a windowless Steam host</td></tr>
+          <tr><th scope="row">Windows</th><td data-label="How it starts">Proton: Steam's default, or the version you pick</td><td data-label="Steam features">Aurora's own <code>steamclient</code>: achievements, stats, cloud saves, lobbies, Workshop</td></tr>
+          <tr><th scope="row">Steam DRM<span class="sub">SteamStub</span></th><td data-label="How it starts">Proton, on the windowless Steam host</td><td data-label="Steam features">Valve's engine answers the DRM check itself</td></tr>
+          <tr><th scope="row">Anti-cheat<span class="sub">VAC, Easy Anti-Cheat, BattlEye</span></th><td data-label="How it starts">Through the official Steam client, or on the windowless host (experimental)</td><td data-label="Steam features">Steam's own, from Valve's engine either way</td></tr>
+        </tbody>
+      </table>
+      <div class="caution">
+        <p class="label">Before you turn on the experimental option</p>
+        <p>The windowless host is your installed Steam's engine without its interface. It checks ownership itself, so it can't start a game you don't own. Running anti-cheat games on it (Settings › Library) may count as an unsupported setup, and the anti-cheat can ban you for it.</p>
       </div>
     </div>
   </section>
 
-  <section class="section alt" id="benchmarks" aria-labelledby="bench-h">
+  <section class="section" id="status" aria-labelledby="status-h">
     <div class="wrap">
-      <div class="section-head">
-        <span class="eyebrow">Benchmarks</span>
-        <h2 id="bench-h">Same PC, same account, a fraction of the weight.</h2>
+      <div class="head">
+        <p class="label">Status · 0.7.2</p>
+        <h2 id="status-h">What works today, and what doesn't yet.</h2>
       </div>
-      <div class="bench">
-        <div class="bars">
-          <div class="metric">
-            <div class="metric-name">Start → first window <span>20× faster</span></div>
-            <div class="bar"><span class="who">Steam</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="v">2.77 s</span></div>
-            <div class="bar us"><span class="who">Aurora</span><div class="track"><div class="fill" style="width:5.1%"></div></div><span class="v">0.14 s</span></div>
-          </div>
-          <div class="metric">
-            <div class="metric-name">Start → main window, signed in <span>2.3× faster</span></div>
-            <div class="bar"><span class="who">Steam</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="v">4.90 s</span></div>
-            <div class="bar us"><span class="who">Aurora</span><div class="track"><div class="fill" style="width:44.1%"></div></div><span class="v">2.16 s</span></div>
-          </div>
-          <div class="metric">
-            <div class="metric-name">Memory when idle (PSS, all processes) <span>8.5× less</span></div>
-            <div class="bar"><span class="who">Steam</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="v">1,408 MB</span></div>
-            <div class="bar us"><span class="who">Aurora</span><div class="track"><div class="fill" style="width:11.8%"></div></div><span class="v">166 MB</span></div>
-          </div>
-          <div class="metric">
-            <div class="metric-name">CPU when idle <span>90× less</span></div>
-            <div class="bar"><span class="who">Steam</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="v">18 % of a core</span></div>
-            <div class="bar us"><span class="who">Aurora</span><div class="track"><div class="fill" style="width:1.1%"></div></div><span class="v">0.2 %</span></div>
-          </div>
-          <div class="metric">
-            <div class="metric-name">Processes <span>16 → 1</span></div>
-            <div class="bar"><span class="who">Steam</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="v">16</span></div>
-            <div class="bar us"><span class="who">Aurora</span><div class="track"><div class="fill" style="width:6.25%"></div></div><span class="v">1</span></div>
-          </div>
-          <div class="metric">
-            <div class="metric-name">Program size <span>46× smaller</span></div>
-            <div class="bar"><span class="who">Steam</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="v">2,129 MB</span></div>
-            <div class="bar us"><span class="who">Aurora</span><div class="track"><div class="fill" style="width:2.2%"></div></div><span class="v">46 MB</span></div>
-          </div>
+      <div class="status">
+        <div class="works">
+          <h3>Works <span class="label">12</span></h3>
+          <ul>
+            <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Sign-in</b> with password, Steam Guard or QR code</span></li>
+            <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Store</b> with trailers, wishlist and cart</span></li>
+            <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Library</b> with collections and non-Steam games</span></li>
+            <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Downloads</b> and updates</span></li>
+            <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Friends and chat</b></span></li>
+            <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Community pages</b> and Workshop</span></li>
+            <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Inventory and Market</b></span></li>
+            <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Steam Cloud</b> saves</span></li>
+            <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Offline mode</b></span></li>
+            <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Plugins</b></span></li>
+            <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Six themes</b>: NEVKO, Midnight, Aurora, Classic, OLED, Daylight</span></li>
+            <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>English and Russian</b></span></li>
+          </ul>
         </div>
-        <div class="rig">
-          <h3>How it was measured</h3>
-          <dl>
-            <dt>Versions</dt><dd>Aurora 0.7.2, Steam build 1792618285 without mods</dd>
-            <dt>CPU</dt><dd>Ryzen 7 5700X</dd>
-            <dt>GPU</dt><dd>GeForce RTX 5070</dd>
-            <dt>Memory</dt><dd>16 GB</dd>
-            <dt>System</dt><dd>CachyOS, GNOME on Wayland</dd>
-            <dt>Date</dt><dd>16 November 2026</dd>
-          </dl>
-          <p>Each figure is the median of 3 runs after a warm-up run. Idle figures are taken 45 s after the main window opened, CPU over the next 30 s. Steam's first window is its sign-in window; Aurora's is its account picker. Steam's size leaves out games, user data, caches and compatibility tools.</p>
-          <a class="link" href="https://github.com/mollie2999/Aurora/blob/main/docs/benchmarks-linux.md">Method, script and every run <i class="i" aria-hidden="true">&#xE06C;</i></a>
+        <div class="missing">
+          <h3>Not yet <span class="label">5</span></h3>
+          <ul>
+            <li><i class="i" aria-hidden="true">&#xE32A;</i><span><b>Linux:</b> tray icon, <code>steam://</code> links, and the Shift+Tab overlay in games</span></li>
+            <li><i class="i" aria-hidden="true">&#xE32A;</i><span><b>Big Picture</b> and <b>Remote Play</b></span></li>
+            <li><i class="i" aria-hidden="true">&#xE32A;</i><span><b>Group chats</b> and <b>voice chat</b></span></li>
+            <li><i class="i" aria-hidden="true">&#xE32A;</i><span><b>Writing reviews</b>. Checkout and trade offers open Steam's website.</span></li>
+            <li><i class="i" aria-hidden="true">&#xE4F6;</i><span><b>Known bug, Linux:</b> the first launch of a Windows game with a new Proton prefix can fail when the game needs Steam. The second launch works.</span></li>
+          </ul>
         </div>
       </div>
     </div>
   </section>
 
-  <section class="section" id="download" aria-labelledby="dl-h">
+  <section class="section band" id="install" aria-labelledby="install-h">
     <div class="wrap">
-      <div class="section-head">
-        <span class="eyebrow">Download</span>
-        <h2 id="dl-h">Get Aurora.</h2>
-        <p class="lede">Every build is on the latest GitHub release. On Linux, Aurora needs Steam installed for Proton and the Steam host; store trailers need <code>ffmpeg</code>, and <code>libpulse</code> for sound.</p>
+      <div class="head">
+        <p class="label">Install</p>
+        <h2 id="install-h">Pick your build.</h2>
       </div>
-      <div class="dl">
-        <a href="https://github.com/mollie2999/Aurora/releases/latest">
-          <i class="i os" aria-hidden="true">&#xEB02;</i><h3>Linux</h3><span class="ext">.tar.gz · x86_64</span>
-          <p>Unpack anywhere and run it.</p>
-          <span class="go">Latest release <i class="i" aria-hidden="true">&#xE06C;</i></span>
-        </a>
-        <a href="https://github.com/mollie2999/Aurora/releases/latest">
-          <i class="i os" aria-hidden="true">&#xE390;</i><h3>Arch Linux</h3><span class="ext">.pkg.tar.zst</span>
-          <p>Install with <code>sudo pacman -U</code>.</p>
-          <span class="go">Latest release <i class="i" aria-hidden="true">&#xE06C;</i></span>
-        </a>
-        <a href="https://github.com/mollie2999/Aurora/releases/latest">
-          <i class="i os" aria-hidden="true">&#xE692;</i><h3>Windows installer</h3><span class="ext">Setup .exe · 10 &amp; 11</span>
-          <p>Installs and keeps itself up to date.</p>
-          <span class="go">Latest release <i class="i" aria-hidden="true">&#xE06C;</i></span>
-        </a>
-        <a href="https://github.com/mollie2999/Aurora/releases/latest">
-          <i class="i os" aria-hidden="true">&#xE2A0;</i><h3>Windows portable</h3><span class="ext">.zip</span>
-          <p>No installer. Unzip and run.</p>
-          <span class="go">Latest release <i class="i" aria-hidden="true">&#xE06C;</i></span>
-        </a>
-      </div>
-      <div class="source">
+      <div class="install">
         <div>
-          <h3>Build from source</h3>
-          <p>Needs <a class="link" href="https://rustup.rs">Rust</a>. The Windows <code>steamclient</code> DLLs that Proton games load are built by CI; copy them next to the binary from a release. <code>--demo</code> opens the client with sample data, without signing in.</p>
+          <ul class="files">
+            <li><a href="https://github.com/mollie2999/Aurora/releases/latest"><i class="i os" aria-hidden="true">&#xEB02;</i><span><strong>Linux</strong><span class="ext">.tar.gz · x86_64 · unpack and run</span></span><i class="i go" aria-hidden="true">&#xE06C;</i></a></li>
+            <li><a href="https://github.com/mollie2999/Aurora/releases/latest"><i class="i os" aria-hidden="true">&#xE390;</i><span><strong>Arch Linux</strong><span class="ext">.pkg.tar.zst · sudo pacman -U</span></span><i class="i go" aria-hidden="true">&#xE06C;</i></a></li>
+            <li><a href="https://github.com/mollie2999/Aurora/releases/latest"><i class="i os" aria-hidden="true">&#xE692;</i><span><strong>Windows installer</strong><span class="ext">Setup .exe · updates itself</span></span><i class="i go" aria-hidden="true">&#xE06C;</i></a></li>
+            <li><a href="https://github.com/mollie2999/Aurora/releases/latest"><i class="i os" aria-hidden="true">&#xE2A0;</i><span><strong>Windows portable</strong><span class="ext">.zip · no installer</span></span><i class="i go" aria-hidden="true">&#xE06C;</i></a></li>
+          </ul>
+          <p class="needs">Linux needs Steam installed, for Proton and the Steam host. Store trailers need <code>ffmpeg</code>, and <code>libpulse</code> for sound.</p>
         </div>
-        <div class="term">
-          <button class="pill copy" id="copy-build" type="button"><i class="i" aria-hidden="true">&#xE1CA;</i><span>Copy</span></button>
+        <div class="build">
+          <div class="term">
+            <div class="term-bar">
+              <span class="label">Build from source · needs Rust</span>
+              <button class="btn btn-line" id="copy-build" type="button"><i class="i" aria-hidden="true">&#xE1CA;</i><span>Copy</span></button>
+            </div>
 <pre id="build-cmd"><span class="p">$ </span>git clone https://github.com/mollie2999/Aurora.git
 <span class="p">$ </span>cd Aurora
 <span class="p">$ </span>cargo build --release -p steam-rs -p steamhost
-<span class="p">$ </span>target/release/steam-rs          <span class="c"># sign in with your account</span>
 <span class="p">$ </span>target/release/steam-rs --demo   <span class="c"># sample data, no sign-in</span></pre>
+          </div>
+          <p>The Windows <code>steamclient</code> DLLs that Proton games load are built by CI; copy them next to <code>steam-rs</code> from a release.</p>
+          <p class="sr-status label" id="copy-status" aria-live="polite"></p>
         </div>
       </div>
-    </div>
-  </section>
 
-  <section class="section alt" id="safety" aria-labelledby="safe-h">
-    <div class="wrap">
-      <div class="section-head">
-        <span class="eyebrow">Is it safe to use?</span>
-        <h2 id="safe-h">Your account stays yours.</h2>
-      </div>
-      <div class="safe">
-        <div><i class="i" aria-hidden="true">&#xE2D6;</i><h3>Your sign-in</h3><p>Aurora signs in the way the official client and the Steam Mobile app do. Your sign-in stays on your PC and is only sent to Steam.</p></div>
-        <div><i class="i" aria-hidden="true">&#xE40C;</i><h3>Anti-cheat</h3><p>By default, anti-cheat games always run through Valve's own client. The windowless host for them is opt-in and marked experimental.</p></div>
-        <div><i class="i" aria-hidden="true">&#xE224;</i><h3>No telemetry</h3><p>Aurora connects to Steam, GitHub for updates, an exchange-rate service for gift regions and, if you add a key, IsThereAnyDeal. Nothing else.</p></div>
-      </div>
+      <dl class="trust" aria-label="Is it safe to use?">
+        <div><dt><i class="i" aria-hidden="true">&#xE2D6;</i>Your sign-in</dt><dd>Aurora signs in the way the official client and the Steam Mobile app do. Your sign-in stays on your PC and is only sent to Steam.</dd></div>
+        <div><dt><i class="i" aria-hidden="true">&#xE40C;</i>Anti-cheat games</dt><dd>Run through Valve's own client by default. The windowless host for them is opt-in and marked experimental.</dd></div>
+        <div><dt><i class="i" aria-hidden="true">&#xE288;</i>Connections</dt><dd>Steam; GitHub, for updates; an exchange-rate service, for gift regions; and IsThereAnyDeal if you add a key. No telemetry.</dd></div>
+      </dl>
     </div>
   </section>
 </main>
 
 <footer>
   <div class="wrap">
-    <div style="display:grid;gap:14px">
-      <a class="brand" href="#top"><svg aria-hidden="true"><use href="#logo"/></svg>Aurora</a>
-      <p>A fork of <a href="https://github.com/madonchik123/SteamInRust">SteamInRust</a> by madonchik123 that adds Linux. Fonts: <a href="https://github.com/vercel/geist-font">Geist</a> and <a href="https://rsms.me/inter/">Inter</a> (OFL). Icons: <a href="https://phosphoricons.com">Phosphor</a> (MIT). MIT licensed.</p>
-      <p>Unofficial. Not affiliated with Valve. Steam is a trademark of Valve Corporation.</p>
-    </div>
+    <a class="mark" href="#main"><svg aria-hidden="true"><use href="#logo"/></svg>Aurora</a>
     <nav aria-label="Project links">
-      <a class="pill" href="https://github.com/mollie2999/Aurora"><i class="i" aria-hidden="true">&#xE278;</i>Source</a>
-      <a class="pill" href="https://github.com/mollie2999/Aurora/releases"><i class="i" aria-hidden="true">&#xE390;</i>Releases</a>
-      <a class="pill" href="https://github.com/mollie2999/Aurora/blob/main/CHANGELOG.md"><i class="i" aria-hidden="true">&#xE19A;</i>Changelog</a>
-      <a class="pill" href="https://github.com/mollie2999/Aurora/issues"><i class="i" aria-hidden="true">&#xE16C;</i>Issues</a>
+      <a href="https://github.com/mollie2999/Aurora">Source</a>
+      <a href="https://github.com/mollie2999/Aurora/releases">Releases</a>
+      <a href="https://github.com/mollie2999/Aurora/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/mollie2999/Aurora/issues">Report a bug</a>
     </nav>
+    <p>A fork of <a href="https://github.com/madonchik123/SteamInRust">SteamInRust</a> by madonchik123 that adds Linux. MIT licensed. Type: <a href="https://github.com/Omnibus-Type/Archivo">Archivo</a> and <a href="https://github.com/vercel/geist-font">Geist</a> (OFL). Icons: <a href="https://phosphoricons.com">Phosphor</a> (MIT).</p>
+    <p>Unofficial. Not affiliated with Valve. Steam is a trademark of Valve Corporation.</p>
   </div>
 </footer>
 
 <script>
 (() => {
-  // Tour tabs: the launcher's pill tabs switch the screenshot.
-  const tabs = [...document.querySelectorAll('.tour-tabs [role="tab"]')];
-  const cap = document.getElementById('tour-cap');
-  function show(tab, focus) {
+  // Screen tabs: arrow keys move between them, as in any tab list.
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  const select = (tab, focus) => {
     tabs.forEach(t => {
       const on = t === tab;
       t.setAttribute('aria-selected', on);
       t.tabIndex = on ? 0 : -1;
-      const panel = document.getElementById(t.getAttribute('aria-controls'));
-      panel.hidden = !on;
-      if (on) cap.innerHTML = panel.dataset.cap;
+      document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
     });
     if (focus) tab.focus();
-  }
+  };
   tabs.forEach((t, i) => {
     t.tabIndex = t.getAttribute('aria-selected') === 'true' ? 0 : -1;
-    t.addEventListener('click', () => show(t));
+    t.addEventListener('click', () => select(t));
     t.addEventListener('keydown', e => {
-      const d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
-      if (d) { e.preventDefault(); show(tabs[(i + d + tabs.length) % tabs.length], true); }
+      const d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+      if (d) { e.preventDefault(); select(tabs[(i + d + tabs.length) % tabs.length], true); }
     });
   });
 
-  // Top bar: mark the section in view, like the app's active tab.
-  const links = [...document.querySelectorAll('.tabs .pill')];
-  const byId = new Map(links.map(a => [a.getAttribute('href').slice(1), a]));
+  // Header: underline the section being read.
+  const links = [...document.querySelectorAll('.nav a')];
   if ('IntersectionObserver' in window) {
-    const io = new IntersectionObserver(entries => {
-      entries.forEach(en => {
-        if (!en.isIntersecting) return;
-        links.forEach(a => a.removeAttribute('aria-current'));
-        const a = byId.get(en.target.id);
-        if (a) a.setAttribute('aria-current', 'true');
-      });
-    }, { rootMargin: '-45% 0px -50% 0px' });
-    byId.forEach((_, id) => { const s = document.getElementById(id); if (s) io.observe(s); });
+    const io = new IntersectionObserver(entries => entries.forEach(en => {
+      if (!en.isIntersecting) return;
+      links.forEach(a => a.toggleAttribute('aria-current', a.hash === '#' + en.target.id));
+      links.forEach(a => a.hasAttribute('aria-current') && a.setAttribute('aria-current', 'true'));
+    }), { rootMargin: '-40% 0px -55% 0px' });
+    links.forEach(a => { const s = document.querySelector(a.hash); if (s) io.observe(s); });
   }
 
-  // Copy the build commands.
+  // Name the visitor's platform on the main button.
+  const ua = navigator.userAgent;
+  const os = /Windows/.test(ua) ? 'Windows' : /Linux|X11/.test(ua) && !/Android/.test(ua) ? 'Linux' : '';
+  if (os) document.getElementById('dl-main-text').textContent = 'Download for ' + os;
+
+  // Copy the build commands, without prompts and comments.
   const btn = document.getElementById('copy-build');
+  const label = btn.querySelector('span');
+  const status = document.getElementById('copy-status');
   btn.addEventListener('click', () => {
     const text = [...document.getElementById('build-cmd').childNodes]
       .filter(n => !(n.classList && (n.classList.contains('p') || n.classList.contains('c'))))
       .map(n => n.textContent).join('').replace(/ +\n/g, '\n').trim();
-    const label = btn.querySelector('span');
-    const done = ok => { label.textContent = ok ? 'Copied' : 'Select and copy'; setTimeout(() => label.textContent = 'Copy', 1800); };
-    try { navigator.clipboard.writeText(text).then(() => done(true), () => done(false)); } catch { done(false); }
+    const show = ok => {
+      btn.classList.toggle('is-done', ok); btn.classList.toggle('is-error', !ok);
+      label.textContent = ok ? 'Copied' : 'Copy failed';
+      status.textContent = ok ? 'Commands copied.' : 'Your browser blocked copying. Select the commands and copy them.';
+      setTimeout(() => { btn.classList.remove('is-done', 'is-error'); label.textContent = 'Copy'; status.textContent = ''; }, 2400);
+    };
+    try { navigator.clipboard.writeText(text).then(() => show(true), () => show(false)); } catch { show(false); }
   });
 
-  // Latest version, from GitHub's API. The pill keeps its text if this fails.
+  // Latest version from GitHub; the label keeps "Latest release" if this fails.
   fetch('https://api.github.com/repos/mollie2999/Aurora/releases/latest')
     .then(r => r.ok ? r.json() : null)
-    .then(rel => {
-      if (!rel || !rel.tag_name) return;
-      const when = rel.published_at ? new Date(rel.published_at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '';
-      document.getElementById('release-text').innerHTML = '<b>' + rel.tag_name.replace(/[<>&]/g, '') + '</b> is out' + (when ? ' · ' + when : '');
-    })
+    .then(rel => { if (rel && /^v?[\w.-]+$/.test(rel.tag_name || '')) document.getElementById('dl-version').textContent = rel.tag_name; })
     .catch(() => {});
 })();
 </script>
