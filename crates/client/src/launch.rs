@@ -1369,13 +1369,80 @@ pub fn proton_override() -> Option<String> {
     PROTON_OVERRIDE.lock().unwrap().clone()
 }
 
+/// Linux: a Proton/compat tool chosen for one game (its Manage menu), like
+/// Steam's "Force the use of a specific Steam Play compatibility tool". It
+/// beats the global choice and Steam's mapping, and runs the Windows build
+/// even when the game has a Linux one.
+static PROTON_PER_APP: Mutex<std::collections::BTreeMap<AppId, String>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// Force a Proton for one game; `None`/empty = the default.
+pub fn set_app_proton(app: AppId, name: Option<String>) {
+    let mut map = PROTON_PER_APP.lock().unwrap();
+    let changed = match name.filter(|s| !s.is_empty()) {
+        Some(n) => map.insert(app, n.clone()).as_ref() != Some(&n),
+        None => map.remove(&app).is_some(),
+    };
+    drop(map);
+    if changed {
+        // A forced Proton can turn a native game into a Proton one.
+        *MODE_CACHE.lock().unwrap() = None;
+    }
+}
+
+/// The Proton forced for this game, if any.
+pub fn app_proton(app: AppId) -> Option<String> {
+    PROTON_PER_APP.lock().unwrap().get(&app).cloned()
+}
+
+/// Every per-game choice (saved with the preferences).
+pub fn app_protons() -> std::collections::BTreeMap<AppId, String> {
+    PROTON_PER_APP.lock().unwrap().clone()
+}
+
+pub fn set_app_protons(map: std::collections::BTreeMap<AppId, String>) {
+    *PROTON_PER_APP.lock().unwrap() = map;
+    *MODE_CACHE.lock().unwrap() = None;
+}
+
+/// What a game runs with when nothing is forced for it here: the global
+/// choice, else Steam's (its mapping or default), else the best installed
+/// Proton. Display name, for "Default (…)".
+pub fn default_proton(app: AppId) -> Option<String> {
+    static CACHE: Mutex<Option<(Instant, AppId, Option<String>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap();
+    if let Some((at, a, d)) = cache.as_ref() {
+        if *a == app && at.elapsed() < Duration::from_secs(5) {
+            return d.clone();
+        }
+    }
+    let d = default_proton_uncached(app);
+    *cache = Some((Instant::now(), app, d.clone()));
+    d
+}
+
+fn default_proton_uncached(app: AppId) -> Option<String> {
+    let root = local::find_steam_root()?;
+    let tools = local::compat::compat_tools(&root);
+    proton_override()
+        .and_then(|n| tools.iter().find(|t| t.name.eq_ignore_ascii_case(&n)).cloned())
+        .or_else(|| local::compat::tool_for(&root, app))
+        .map(|t| t.display)
+}
+
 /// The installed Proton/compat tools as (internal name, display name), for a
 /// chooser. Empty off Linux or without a Steam install.
 pub fn proton_builds() -> Vec<(String, String)> {
-    match local::find_steam_root() {
-        Some(root) => local::compat::compat_tools(&root).into_iter().map(|t| (t.name, t.display)).collect(),
-        None => Vec::new(),
+    // Menus and Settings ask every frame; this reads every app manifest.
+    static CACHE: Mutex<Option<(Instant, Vec<(String, String)>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap();
+    if cache.as_ref().is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(5)) {
+        let builds = match local::find_steam_root() {
+            Some(root) => local::compat::compat_tools(&root).into_iter().map(|t| (t.name, t.display)).collect(),
+            None => Vec::new(),
+        };
+        *cache = Some((Instant::now(), builds));
     }
+    cache.as_ref().map(|(_, b)| b.clone()).unwrap_or_default()
 }
 
 /// Linux: the Windows user folder in the Proton prefix of a game that runs
@@ -1424,7 +1491,9 @@ mod linux {
     pub fn plan(app: &OwnedApp, install_dir: &Path) -> Result<Plan, String> {
         let root = local::find_steam_root();
         let usable = |o: &&LaunchOption| !o.executable.is_empty();
-        let forced = root.as_deref().is_some_and(|r| compat::forced_tool(r, app.app_id));
+        // Forced for this game here, if that tool is still installed.
+        let own = super::app_proton(app.app_id).and_then(|name| root.as_deref().and_then(|r| compat::compat_tools(r).into_iter().find(|t| t.name.eq_ignore_ascii_case(&name))));
+        let forced = own.is_some() || root.as_deref().is_some_and(|r| compat::forced_tool(r, app.app_id));
         // A Linux build, unless the player forced a compatibility tool in Steam.
         let native = app.launch.iter().filter(usable).find(|o| o.os_list.split(',').any(|x| x.trim() == "linux") || (o.os_list.is_empty() && !is_windows_exe(o)));
         let windows = app
@@ -1441,10 +1510,10 @@ mod linux {
         }
         let windows = windows.ok_or_else(|| format!("{} has no launch option for this system", app.name))?;
         let root = root.ok_or("Steam Play needs a Steam install for Proton")?;
-        // The player's choice in SteamInRust wins, then Steam's mapping, then
-        // the best installed Proton.
-        let tool = super::proton_override()
-            .and_then(|name| compat::compat_tools(&root).into_iter().find(|t| t.name.eq_ignore_ascii_case(&name)))
+        // The player's choice for this game wins, then their global choice in
+        // SteamInRust, then Steam's mapping, then the best installed Proton.
+        let tool = own
+            .or_else(|| super::proton_override().and_then(|name| compat::compat_tools(&root).into_iter().find(|t| t.name.eq_ignore_ascii_case(&name))))
             .or_else(|| compat::tool_for(&root, app.app_id))
             .ok_or("No Proton is installed. Install one in Steam (Library → Tools → Proton).")?;
         if !install_dir.join(normalize(&windows.executable)).exists() {

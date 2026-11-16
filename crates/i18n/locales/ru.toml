@@ -1740,3 +1740,6 @@
 "Like Steam’s “Processing Vulkan shaders”: shaders not compiled yet are compiled when you press Play (you can skip it). While this is on, Steam's own background processing of Vulkan shaders is turned off before every game, so it doesn't do the same work while you play." = "Как «Обработка шейдеров Vulkan» в Steam: ещё не скомпилированные шейдеры компилируются при нажатии «Играть» (это можно пропустить). Пока это включено, фоновая обработка шейдеров Vulkan в самом Steam отключается перед каждой игрой, чтобы он не делал ту же работу во время игры."
 "Allow background processing of Vulkan shaders" = "Разрешить фоновую обработку шейдеров Vulkan"
 "Steam compiles downloaded shaders while it's open and idle." = "Steam компилирует загруженные шейдеры, когда открыт и простаивает."
+"Compatibility" = "Совместимость"
+"Run with this Proton:" = "Запускать с этой версией Proton:"
+"Default ({tool})" = "По умолчанию ({tool})"

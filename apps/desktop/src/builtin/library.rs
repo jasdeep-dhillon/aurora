@@ -690,6 +690,8 @@ impl Library {
                     item(ui, icons::DESKTOP, t!("Add desktop shortcut"), MenuAct::Shortcut);
                     item(ui, icons::FOLDER, t!("Browse local files"), MenuAct::Browse);
                     item(ui, icons::SHIELD, t!("Verify game files"), MenuAct::Verify);
+                    #[cfg(not(windows))]
+                    proton_submenu(ui, t, id);
                     w::menu_separator(ui, t);
                     if w::menu_item_tinted(ui, t, icons::TRASH, t!("Uninstall…"), Some(t.danger)).clicked() {
                         pick.set(Some(MenuAct::Uninstall));
@@ -1576,6 +1578,8 @@ impl Library {
                 self.start_verify(ctx, g);
             }
         }
+        #[cfg(not(windows))]
+        proton_submenu(ui, t, id);
         if item(ui, icons::INFO, t!("Get help with this game"), t.text) {
             ctx.navigate("support", Some(format!("game:{id}")));
         }
@@ -2155,4 +2159,40 @@ fn home_button(ui: &mut Ui, t: &Theme, selected: bool, width: f32) -> egui::Resp
 /// App types the library shows by default. Unknown types count as games.
 fn is_game_kind(kind: &str) -> bool {
     matches!(kind, "game" | "demo" | "")
+}
+
+/// Linux: "Compatibility" in a game's Manage menu, like Steam's Properties >
+/// Compatibility: run it with Steam's/the global choice, or force one of the
+/// installed Proton builds for this game only.
+#[cfg(not(windows))]
+fn proton_submenu(ui: &mut Ui, t: &Theme, id: AppId) {
+    let builds = client::proton_builds();
+    if builds.is_empty() {
+        return;
+    }
+    let row = w::submenu_item(ui, t, icons::WINDOWS, t!("Compatibility"));
+    SubMenu::new().show(ui, &row, |ui| {
+        ui.set_min_width(220.0);
+        w::menu_spacing(ui);
+        ui.add_space(2.0);
+        ui.label(w::text(t!("Run with this Proton:"), 12.0, t.text_faint));
+        ui.add_space(2.0);
+        let current = client::app_proton(id);
+        let default = match client::default_proton(id) {
+            Some(d) => t!("Default ({tool})", tool = d),
+            None => t!("Default").to_string(),
+        };
+        if w::menu_item(ui, t, if current.is_none() { icons::CHECK } else { "" }, &default).clicked() {
+            client::set_app_proton(id, None);
+            ui.close();
+        }
+        w::menu_separator(ui, t);
+        for (name, display) in &builds {
+            let on = current.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(name));
+            if w::menu_item(ui, t, if on { icons::CHECK } else { "" }, display).clicked() {
+                client::set_app_proton(id, Some(name.clone()));
+                ui.close();
+            }
+        }
+    });
 }

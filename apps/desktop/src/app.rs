@@ -50,6 +50,9 @@ pub struct Prefs {
     /// with, instead of Steam's pick. `None` follows Steam's choice.
     #[serde(default)]
     pub proton_override: Option<String>,
+    /// Linux: a Proton forced for single games (their Manage menu).
+    #[serde(default)]
+    pub proton_per_app: std::collections::BTreeMap<model::AppId, String>,
     /// Experimental: anti-cheat games start on the headless host instead of
     /// the official Steam client (accepted in Settings > Library).
     #[serde(default)]
@@ -98,6 +101,7 @@ impl Default for Prefs {
             scroll_speed: 2.0,
             drm_host_ack: false,
             proton_override: None,
+            proton_per_app: Default::default(),
             anti_cheat_headless: false,
             precompile_shaders: true,
             gameplay_downloads: false,
@@ -226,6 +230,7 @@ impl SteamApp {
             drm_host_ack: prefs.drm_host_ack,
         }));
         client::set_proton_override(prefs.proton_override.clone());
+        client::set_app_protons(prefs.proton_per_app.clone());
         client::set_anti_cheat_headless(prefs.anti_cheat_headless);
         client::set_gameplay_downloads(prefs.gameplay_downloads);
         #[cfg(not(windows))]
@@ -666,6 +671,7 @@ impl eframe::App for SteamApp {
             self.prefs.scroll_speed = f.scroll_speed;
             self.prefs.drm_host_ack = f.drm_host_ack;
             self.prefs.proton_override = client::proton_override();
+            self.prefs.proton_per_app = client::app_protons();
             self.prefs.anti_cheat_headless = client::anti_cheat_headless();
             self.prefs.gameplay_downloads = client::gameplay_downloads();
             #[cfg(not(windows))]
