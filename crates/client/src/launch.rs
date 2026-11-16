@@ -1310,6 +1310,14 @@ mod linux {
         steam_root: Option<PathBuf>,
     }
 
+    /// Run a game's Linux build? Yes, unless the player forced a compatibility
+    /// tool in Steam and the Windows build is what's installed. A forced
+    /// Proton with only the Linux files on disk (downloaded as a native game,
+    /// or before the choice) runs the Linux build: the Windows one isn't there.
+    pub(super) fn use_native(forced: bool, native_installed: bool, windows_installed: bool) -> bool {
+        !forced || (native_installed && !windows_installed)
+    }
+
     fn is_windows_exe(o: &LaunchOption) -> bool {
         o.executable.to_lowercase().ends_with(".exe") || o.executable.to_lowercase().ends_with(".bat")
     }
@@ -1320,16 +1328,19 @@ mod linux {
         let forced = root.as_deref().is_some_and(|r| compat::forced_tool(r, app.app_id));
         // A Linux build, unless the player forced a compatibility tool in Steam.
         let native = app.launch.iter().filter(usable).find(|o| o.os_list.split(',').any(|x| x.trim() == "linux") || (o.os_list.is_empty() && !is_windows_exe(o)));
-        if let (Some(o), false) = (native, forced) {
-            return Ok(Plan { option: o.clone(), tool: None, steam_root: root });
-        }
         let windows = app
             .launch
             .iter()
             .filter(usable)
             .find(|o| o.os_list.split(',').any(|x| x.trim() == "windows") || (o.os_list.is_empty() && is_windows_exe(o)))
-            .or_else(|| app.launch.iter().filter(usable).find(|o| o.os_list.is_empty()))
-            .ok_or_else(|| format!("{} has no launch option for this system", app.name))?;
+            .or_else(|| app.launch.iter().filter(usable).find(|o| o.os_list.is_empty()));
+        let installed = |o: &LaunchOption| install_dir.join(normalize(&o.executable)).is_file();
+        if let Some(o) = native {
+            if use_native(forced, installed(o), windows.is_some_and(installed)) {
+                return Ok(Plan { option: o.clone(), tool: None, steam_root: root });
+            }
+        }
+        let windows = windows.ok_or_else(|| format!("{} has no launch option for this system", app.name))?;
         let root = root.ok_or("Steam Play needs a Steam install for Proton")?;
         // The player's choice in SteamInRust wins, then Steam's mapping, then
         // the best installed Proton.
@@ -1722,6 +1733,22 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn forced_proton_with_only_the_linux_build_runs_native() {
+        use super::linux::use_native;
+        // Nothing forced: the Linux build.
+        assert!(use_native(false, true, false));
+        assert!(use_native(false, true, true));
+        // Proton forced and the Windows build installed: Proton.
+        assert!(!use_native(true, false, true));
+        assert!(!use_native(true, true, true));
+        // Proton forced, only the Linux build on disk (Dead Island Riptide DE).
+        assert!(use_native(true, true, false));
+        // Proton forced, nothing installed: Proton's error, as before.
+        assert!(!use_native(true, false, false));
+    }
 
     /// A minimal PE file with the given section names.
     fn pe_with_sections(names: &[&str]) -> Vec<u8> {
