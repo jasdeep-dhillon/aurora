@@ -1,0 +1,53 @@
+# Arch package of the release's Linux build. The Release workflow fills in
+# pkgver and the checksum and attaches the built package and this file to the
+# GitHub release; by hand: set pkgver, then `updpkgsums && makepkg -si`.
+pkgname=steamonrust-bin
+pkgver=0.7.0
+pkgrel=1
+pkgdesc="Aurora (SteamOnRust): an unofficial Steam client written in Rust"
+arch=('x86_64')
+url="https://github.com/mollie2999/SteamOnRust-Linux"
+license=('MIT')
+# Linked: glibc, gcc-libs, dbus, OpenSSL 3 (built on Ubuntu 22.04). Loaded at
+# run time by the window code: OpenGL, X11/Wayland, xkbcommon.
+depends=('glibc' 'gcc-libs' 'dbus' 'openssl-3' 'libglvnd' 'libxkbcommon' 'libxkbcommon-x11'
+         'libx11' 'libxcursor' 'libxi' 'libxrandr' 'wayland')
+optdepends=('steam: Proton, and the windowless Steam host for Steam-DRM, native and anti-cheat games')
+provides=('steamonrust')
+conflicts=('steamonrust')
+options=('!strip' '!debug')
+source=("SteamOnRust-Linux-x86_64-$pkgver.tar.gz::$url/releases/download/v$pkgver/SteamOnRust-Linux-x86_64.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd SteamOnRust-Linux-x86_64
+
+  # steamhost and the steamclient DLLs must sit beside steam-rs (it looks for
+  # them next to its own executable, symlinks resolved).
+  install -Dm755 steam-rs "$pkgdir/opt/steamonrust/steam-rs"
+  install -Dm755 steamhost "$pkgdir/opt/steamonrust/steamhost"
+  local dll
+  for dll in steamclient64.dll steamclient32.dll; do
+    if [ -f "$dll" ]; then install -Dm644 "$dll" "$pkgdir/opt/steamonrust/$dll"; fi
+  done
+  install -d "$pkgdir/usr/bin"
+  ln -s /opt/steamonrust/steam-rs "$pkgdir/usr/bin/steamonrust"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  if [ -f icon-256.png ]; then
+    install -Dm644 icon-256.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/steamonrust.png"
+  fi
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/steamonrust.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Aurora
+GenericName=Steam client
+Comment=Unofficial Steam client written in Rust
+Exec=steamonrust
+Icon=steamonrust
+Terminal=false
+Categories=Game;
+StartupWMClass=SteamInRust
+EOF
+}

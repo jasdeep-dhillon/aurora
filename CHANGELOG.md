@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/mollie2999/SteamOnRust-Linux/compare/v0.6.3...v0.7.0) (2026-11-16)
+
+**Mostly Linux fixes.** Nothing changes for Windows in this release, so updating there is optional.
+
+### New
+
+* Arch Linux package on the release page: `sudo pacman -U steamonrust-bin-0.7.0-1-x86_64.pkg.tar.zst` (installs to `/opt/steamonrust`, adds an Aurora menu entry and the `steamonrust` command)
+* Linux, experimental: Settings > Library can start anti-cheat games (Easy Anti-Cheat, BattlEye…) on the windowless Steam host instead of the official client. Off by default, and turning it on first warns about the risks (kicks, game or VAC bans). Tried with Helldivers 2 ([cd285ef](https://github.com/mollie2999/SteamOnRust-Linux/commit/cd285ef1fa27bd446f443718d5f8fd887e936f19))
+
+### Fixes
+
+* Linux (X11): the window froze ("not responding") right after it opened, on the sign-in screen, e.g. on Linux Mint Cinnamon. The Steam Guard code prompt, the nickname dialog and the collection name dialog could freeze the same way. First shipped in 0.6.3-1 ([f9cd0e2](https://github.com/mollie2999/SteamOnRust-Linux/commit/f9cd0e23c5bfe5029939c271648a1ad056b04e21))
+* Linux: a game with Proton forced in Steam but only its Linux build installed (e.g. Dead Island Riptide Definitive Edition) started through the official Steam client; it now runs its Linux build on the windowless Steam host ([e27fa2b](https://github.com/mollie2999/SteamOnRust-Linux/commit/e27fa2b264af2fc726addb3b757c15b998054b81))
+
 ## [0.5.0](https://github.com/madonchik123/SteamInRust/compare/v0.4.1...v0.5.0) (2026-11-10)
 
 

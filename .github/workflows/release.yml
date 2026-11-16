@@ -115,7 +115,7 @@ jobs:
         run: |
           name=SteamOnRust-Linux-x86_64
           mkdir -p dist/$name
-          cp target/release/steam-rs target/release/steamhost README.md LICENSE dist/$name/
+          cp target/release/steam-rs target/release/steamhost README.md LICENSE assets/icon-256.png dist/$name/
           tar -C dist -czf dist/$name.tar.gz $name
           (cd dist && sha256sum $name.tar.gz > $name.tar.gz.sha256)
 
@@ -177,6 +177,11 @@ jobs:
     if: always() && needs.version.outputs.release == 'true' && needs.linux.result == 'success' && (needs.version.outputs.prerelease != 'true' || needs.windows.result == 'success')
     runs-on: ubuntu-24.04
     steps:
+      # For the changelog and the Arch PKGBUILD.
+      - uses: actions/checkout@v4
+        with:
+          path: repo
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -196,18 +201,48 @@ jobs:
           (cd dist && sha256sum $name.tar.gz > $name.tar.gz.sha256)
           tar -tzf dist/$name.tar.gz
 
+      # An Arch package of the same files (packaging/arch/PKGBUILD), built in
+      # an Arch container. Releases only (pkgver can't hold a "-"); it never
+      # holds the release back.
+      - name: Arch package
+        id: arch
+        if: needs.version.outputs.prerelease != 'true'
+        continue-on-error: true
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          case "$VERSION" in *-*) echo "pkgver can't contain '-': no Arch package for $VERSION"; exit 1;; esac
+          name=SteamOnRust-Linux-x86_64
+          mkdir -p arch
+          cp repo/packaging/arch/PKGBUILD arch/
+          cp dist/$name.tar.gz arch/$name-$VERSION.tar.gz
+          sum=$(cut -d' ' -f1 dist/$name.tar.gz.sha256)
+          sed -i -e "s/^pkgver=.*/pkgver=$VERSION/" -e "s/^pkgrel=.*/pkgrel=1/" -e "s/^sha256sums=.*/sha256sums=('$sum')/" arch/PKGBUILD
+          docker run --rm -v "$PWD/arch:/pkg" archlinux:base-devel bash -c \
+            'useradd -m build && chown -R build /pkg && cd /pkg && su build -c "makepkg --nodeps --noconfirm"'
+          cp arch/*.pkg.tar.zst dist/
+          cp arch/PKGBUILD dist/PKGBUILD
+          ls -l dist
+
       - name: Release notes
         env:
           VERSION: ${{ needs.version.outputs.version }}
           WINDOWS: ${{ needs.windows.result }}
           PRERELEASE: ${{ needs.version.outputs.prerelease }}
           BRANCH: ${{ github.ref_name }}
+          ARCH: ${{ steps.arch.outcome }}
         run: |
           {
             echo "## SteamOnRust $VERSION"
             echo
             if [ "$PRERELEASE" = "true" ]; then
               echo "> **Test build** from \`$BRANCH\` ($GITHUB_SHA). Not offered to installed copies as an update."
+              echo
+            fi
+            # This version's section of CHANGELOG.md (heading "## [X.Y.Z]…").
+            awk -v v="[$VERSION]" 'index($0, "## " v) == 1 { f = 1; next } f && /^## / { exit } f' repo/CHANGELOG.md > changes.md
+            if [ -s changes.md ]; then
+              cat changes.md
               echo
             fi
             echo "**Linux (x86_64):** download \`SteamOnRust-Linux-x86_64.tar.gz\`, then:"
@@ -217,6 +252,16 @@ jobs:
             echo './SteamOnRust-Linux-x86_64/steam-rs'
             echo '```'
             echo
+            if [ "$ARCH" = "success" ]; then
+              echo "**Arch Linux:** download \`steamonrust-bin-$VERSION-1-x86_64.pkg.tar.zst\`, then:"
+              echo
+              echo '```sh'
+              echo "sudo pacman -U steamonrust-bin-$VERSION-1-x86_64.pkg.tar.zst"
+              echo '```'
+              echo
+              echo "It installs to \`/opt/steamonrust\` with an **Aurora** menu entry and the \`steamonrust\` command. The \`PKGBUILD\` is attached too."
+              echo
+            fi
             if [ "$WINDOWS" = "success" ]; then
               echo "**Windows:** run \`SteamInRust-Setup-$VERSION.exe\`, or unzip the portable zip."
             else
