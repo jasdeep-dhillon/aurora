@@ -650,7 +650,7 @@ impl Library {
     }
 
     /// Right-click menu for a game anywhere in the library, like Steam's.
-    fn game_menu(&mut self, t: &Theme, resp: &egui::Response, id: AppId, installed: bool, running: bool) {
+    fn game_menu(&mut self, t: &Theme, ctx: &Ctx, resp: &egui::Response, id: AppId, installed: bool, running: bool) {
         let fav = self.favorites.contains(&id);
         let hid = self.hidden.contains(&id);
         let pick = std::cell::Cell::new(None);
@@ -691,7 +691,7 @@ impl Library {
                     item(ui, icons::FOLDER, t!("Browse local files"), MenuAct::Browse);
                     item(ui, icons::SHIELD, t!("Verify game files"), MenuAct::Verify);
                     #[cfg(not(windows))]
-                    proton_submenu(ui, t, id);
+                    proton_submenu(ui, t, ctx, id);
                     w::menu_separator(ui, t);
                     if w::menu_item_tinted(ui, t, icons::TRASH, t!("Uninstall…"), Some(t.danger)).clicked() {
                         pick.set(Some(MenuAct::Uninstall));
@@ -1102,7 +1102,7 @@ impl Library {
                         ui.painter().rect_filled(fill, CornerRadius::same(1), if d.paused { t.text_faint } else { t.accent });
                     }
                     let id = e.app_id;
-                    self.game_menu(t, &resp, id, e.installed.is_some(), ctx.state.playing == Some(id));
+                    self.game_menu(t, ctx, &resp, id, e.installed.is_some(), ctx.state.playing == Some(id));
                     if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         self.selected = Some(id);
                         self.custom_selected = None;
@@ -1256,7 +1256,7 @@ impl Library {
                     if let Some(m) = g.playtime_minutes {
                         c.label(w::text_medium(t!("{time} played", time = ui::playtime(m)), 14.0, Color32::from_white_alpha(220)));
                     }
-                    self.game_menu(t, &resp, g.app_id, true, playing);
+                    self.game_menu(t, ctx, &resp, g.app_id, true, playing);
                     if resp.clicked() {
                         self.selected = Some(g.app_id);
                     }
@@ -1282,7 +1282,7 @@ impl Library {
                             ui.vertical(|ui| {
                                 ui.set_width(size.x);
                                 let r = w::game_tile(ui, t, &art::capsule(*id), &art::header(*id), name, installed, size);
-                                self.game_menu(t, &r, *id, installed, ctx.state.playing == Some(*id));
+                                self.game_menu(t, ctx, &r, *id, installed, ctx.state.playing == Some(*id));
                                 if r.clicked() {
                                     self.selected = Some(*id);
                                 }
@@ -1325,7 +1325,7 @@ impl Library {
                                 ui.set_width(size.x);
                                 ui.spacing_mut().item_spacing.y = 6.0;
                                 let r = w::game_tile(ui, t, &art::capsule(e.app_id), &art::header(e.app_id), e.name, e.installed.is_some(), size);
-                                self.game_menu(t, &r, e.app_id, e.installed.is_some(), ctx.state.playing == Some(e.app_id));
+                                self.game_menu(t, ctx, &r, e.app_id, e.installed.is_some(), ctx.state.playing == Some(e.app_id));
                                 if r.clicked() {
                                     self.selected = Some(e.app_id);
                                 }
@@ -1579,7 +1579,7 @@ impl Library {
             }
         }
         #[cfg(not(windows))]
-        proton_submenu(ui, t, id);
+        proton_submenu(ui, t, ctx, id);
         if item(ui, icons::INFO, t!("Get help with this game"), t.text) {
             ctx.navigate("support", Some(format!("game:{id}")));
         }
@@ -2163,11 +2163,20 @@ fn is_game_kind(kind: &str) -> bool {
 
 /// Linux: "Compatibility" in a game's Manage menu, like Steam's Properties >
 /// Compatibility: run it with Steam's/the global choice, or force one of the
-/// installed Proton builds for this game only.
+/// installed Proton builds for this game only. Games with a Linux build also
+/// get "Native", the default for them.
 #[cfg(not(windows))]
-fn proton_submenu(ui: &mut Ui, t: &Theme, id: AppId) {
+fn proton_submenu(ui: &mut Ui, t: &Theme, ctx: &Ctx, id: AppId) {
     let builds = client::proton_builds();
-    if builds.is_empty() {
+    // (runs natively without a choice, the Windows build is installed too)
+    let native = ctx
+        .state
+        .apps
+        .as_ref()
+        .and_then(|a| a.get(&id))
+        .zip(ctx.local.games.iter().find(|g| g.app_id == id))
+        .and_then(|(o, g)| client::native_build(o, &g.install_dir));
+    if builds.is_empty() && native.is_none() {
         return;
     }
     let row = w::submenu_item(ui, t, icons::WINDOWS, t!("Compatibility"));
@@ -2175,23 +2184,50 @@ fn proton_submenu(ui: &mut Ui, t: &Theme, id: AppId) {
         ui.set_min_width(220.0);
         w::menu_spacing(ui);
         ui.add_space(2.0);
-        ui.label(w::text(t!("Run with this Proton:"), 12.0, t.text_faint));
+        let heading = if native.is_some() { t!("Run with:") } else { t!("Run with this Proton:") };
+        ui.label(w::text(heading, 12.0, t.text_faint));
         ui.add_space(2.0);
         let current = client::app_proton(id);
+        let check = |on: bool| if on { icons::CHECK } else { "" };
         let default = match client::default_proton(id) {
             Some(d) => t!("Default ({tool})", tool = d),
             None => t!("Default").to_string(),
         };
-        if w::menu_item(ui, t, if current.is_none() { icons::CHECK } else { "" }, &default).clicked() {
-            client::set_app_proton(id, None);
+        let pick = |ui: &mut Ui, choice: Option<&str>| {
+            client::set_app_proton(id, choice.map(String::from));
             ui.close();
+        };
+        match native {
+            Some((by_default, windows)) => {
+                // No choice here = whatever runs by default; picking that is
+                // the same as clearing the choice.
+                let native_on = current.as_deref() == Some(client::NATIVE) || (current.is_none() && by_default);
+                if w::menu_item(ui, t, check(native_on), t!("Native (Linux)")).clicked() {
+                    pick(ui, (!by_default).then_some(client::NATIVE));
+                }
+                if !windows {
+                    // Only the Linux files are on disk: Proton has nothing to run.
+                    return;
+                }
+                let proton_on = current.as_deref() == Some(client::DEFAULT_PROTON) || (current.is_none() && !by_default);
+                if w::menu_item(ui, t, check(proton_on), &default).clicked() {
+                    pick(ui, by_default.then_some(client::DEFAULT_PROTON));
+                }
+            }
+            None => {
+                if w::menu_item(ui, t, check(current.is_none()), &default).clicked() {
+                    pick(ui, None);
+                }
+            }
+        }
+        if builds.is_empty() {
+            return;
         }
         w::menu_separator(ui, t);
         for (name, display) in &builds {
             let on = current.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(name));
-            if w::menu_item(ui, t, if on { icons::CHECK } else { "" }, display).clicked() {
-                client::set_app_proton(id, Some(name.clone()));
-                ui.close();
+            if w::menu_item(ui, t, check(on), display).clicked() {
+                pick(ui, Some(name));
             }
         }
     });

@@ -1375,7 +1375,22 @@ pub fn proton_override() -> Option<String> {
 /// even when the game has a Linux one.
 static PROTON_PER_APP: Mutex<std::collections::BTreeMap<AppId, String>> = Mutex::new(std::collections::BTreeMap::new());
 
-/// Force a Proton for one game; `None`/empty = the default.
+/// Per-game choice: run the Linux build, even if Steam maps a tool to it.
+pub const NATIVE: &str = "@native";
+/// Per-game choice: run the Windows build with the default Proton, for a
+/// game that has a Linux build too.
+pub const DEFAULT_PROTON: &str = "@proton";
+
+/// Linux: see [`linux::native_build`]; `None` elsewhere.
+pub fn native_build(app: &OwnedApp, install_dir: &Path) -> Option<(bool, bool)> {
+    #[cfg(not(windows))]
+    return linux::native_build(app, install_dir);
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Force a Proton for one game ([`NATIVE`], [`DEFAULT_PROTON`] or a tool's
+/// internal name); `None`/empty = the default.
 pub fn set_app_proton(app: AppId, name: Option<String>) {
     let mut map = PROTON_PER_APP.lock().unwrap();
     let changed = match name.filter(|s| !s.is_empty()) {
@@ -1488,13 +1503,9 @@ mod linux {
         o.executable.to_lowercase().ends_with(".exe") || o.executable.to_lowercase().ends_with(".bat")
     }
 
-    pub fn plan(app: &OwnedApp, install_dir: &Path) -> Result<Plan, String> {
-        let root = local::find_steam_root();
+    /// The Linux and the Windows launch options, if the game has them.
+    fn builds(app: &OwnedApp) -> (Option<&LaunchOption>, Option<&LaunchOption>) {
         let usable = |o: &&LaunchOption| !o.executable.is_empty();
-        // Forced for this game here, if that tool is still installed.
-        let own = super::app_proton(app.app_id).and_then(|name| root.as_deref().and_then(|r| compat::compat_tools(r).into_iter().find(|t| t.name.eq_ignore_ascii_case(&name))));
-        let forced = own.is_some() || root.as_deref().is_some_and(|r| compat::forced_tool(r, app.app_id));
-        // A Linux build, unless the player forced a compatibility tool in Steam.
         let native = app.launch.iter().filter(usable).find(|o| o.os_list.split(',').any(|x| x.trim() == "linux") || (o.os_list.is_empty() && !is_windows_exe(o)));
         let windows = app
             .launch
@@ -1502,6 +1513,38 @@ mod linux {
             .filter(usable)
             .find(|o| o.os_list.split(',').any(|x| x.trim() == "windows") || (o.os_list.is_empty() && is_windows_exe(o)))
             .or_else(|| app.launch.iter().filter(usable).find(|o| o.os_list.is_empty()));
+        (native, windows)
+    }
+
+    /// For the Compatibility menu: `None` if no Linux build is installed,
+    /// else (the Linux build is what runs without a choice here, the Windows
+    /// build is installed too).
+    pub fn native_build(app: &OwnedApp, install_dir: &Path) -> Option<(bool, bool)> {
+        let installed = |o: &LaunchOption| install_dir.join(normalize(&o.executable)).is_file();
+        let (native, windows) = builds(app);
+        let native = native.is_some_and(installed);
+        let windows = windows.is_some_and(installed);
+        if !native {
+            return None;
+        }
+        let steam_forced = local::find_steam_root().is_some_and(|r| compat::forced_tool(&r, app.app_id));
+        Some((use_native(steam_forced, native, windows), windows))
+    }
+
+    pub fn plan(app: &OwnedApp, install_dir: &Path) -> Result<Plan, String> {
+        let root = local::find_steam_root();
+        // The choice for this game here: the Linux build, Proton, or one
+        // Proton build (if that tool is still installed).
+        let choice = super::app_proton(app.app_id);
+        let want_native = choice.as_deref() == Some(super::NATIVE);
+        let own = choice
+            .clone()
+            .filter(|c| c != super::NATIVE && c != super::DEFAULT_PROTON)
+            .and_then(|name| root.as_deref().and_then(|r| compat::compat_tools(r).into_iter().find(|t| t.name.eq_ignore_ascii_case(&name))));
+        let forced = !want_native
+            && (choice.as_deref() == Some(super::DEFAULT_PROTON) || own.is_some() || root.as_deref().is_some_and(|r| compat::forced_tool(r, app.app_id)));
+        // A Linux build, unless the player forced a compatibility tool.
+        let (native, windows) = builds(app);
         let installed = |o: &LaunchOption| install_dir.join(normalize(&o.executable)).is_file();
         if let Some(o) = native {
             if use_native(forced, installed(o), windows.is_some_and(installed)) {
@@ -1918,6 +1961,34 @@ mod tests {
         assert!(use_native(true, true, false));
         // Proton forced, nothing installed: Proton's error, as before.
         assert!(!use_native(true, false, false));
+    }
+
+    /// A game with both builds on disk (like BeamNG.drive): native unless
+    /// the Compatibility menu picks Proton.
+    #[cfg(not(windows))]
+    #[test]
+    fn native_is_the_default_choice_for_games_with_a_linux_build() {
+        let dir = std::env::temp_dir().join(format!("sir-native-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("BinLinux")).unwrap();
+        std::fs::write(dir.join("Game.exe"), b"MZ").unwrap();
+        std::fs::write(dir.join("BinLinux/Game.x64"), b"").unwrap();
+        let opt = |exe: &str, os: &str| model::LaunchOption { executable: exe.into(), arguments: String::new(), working_dir: String::new(), description: String::new(), os_list: os.into() };
+        // An app id no real Steam config maps a tool to.
+        let app = OwnedApp { app_id: 4_000_000_123, name: "Both".into(), launch: vec![opt("Game.exe", "windows"), opt("BinLinux/Game.x64", "linux")], ..Default::default() };
+        let runs_native = || linux::plan(&app, &dir).is_ok_and(|p| !p.uses_proton());
+        assert_eq!(native_build(&app, &dir), Some((true, true)));
+        assert!(runs_native());
+        set_app_proton(app.app_id, Some(NATIVE.into()));
+        assert!(runs_native());
+        // Proton (fails without a Proton installed, but never runs native).
+        set_app_proton(app.app_id, Some(DEFAULT_PROTON.into()));
+        assert!(!runs_native());
+        set_app_proton(app.app_id, None);
+        // Only the Windows build: no Native choice.
+        let win = OwnedApp { launch: vec![opt("Game.exe", "windows")], ..app.clone() };
+        assert_eq!(native_build(&win, &dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A minimal PE file with the given section names.
