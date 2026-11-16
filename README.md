@@ -52,7 +52,7 @@ need it signed in, unless they run on the windowless Steam host: that option
 (Settings › Library, experimental) starts them without the official client.
 The anti-cheat may count that as an unsupported setup and ban you.
 
-On Windows, games run as in SteamInRust: Aurora's `steamclient` for most games,
+On Windows, games run as in Aurora: Aurora's `steamclient` for most games,
 the official client for anti-cheat.
 
 ## Status
@@ -71,7 +71,7 @@ Missing:
 - **Everywhere:** Big Picture, Remote Play, group chats and voice chat, writing
   reviews. Checkout and trade offers open Steam's website.
 
-Area-by-area detail (from SteamInRust): [docs/parity.md](docs/parity.md).
+Area-by-area detail (from Aurora): [docs/parity.md](docs/parity.md).
 
 ## Benchmarks
 
@@ -104,10 +104,10 @@ From [the latest release](https://github.com/mollie2999/Aurora/releases/latest):
 
 | File | Platform |
 | --- | --- |
-| `SteamOnRust-Linux-x86_64.tar.gz` | Linux x86_64. Unpack and run `steam-rs` |
-| `steamonrust-bin-<version>-x86_64.pkg.tar.zst` | Arch Linux package (`sudo pacman -U …`) |
-| `SteamInRust-Setup-<version>.exe` | Windows 10/11 installer, updates itself |
-| `SteamInRust-<version>-portable.zip` | Windows, no installer |
+| `Aurora-Linux-x86_64.tar.gz` | Linux x86_64. Unpack and run `aurora` |
+| `aurora-bin-<version>-x86_64.pkg.tar.zst` | Arch Linux package (`sudo pacman -U …`) |
+| `Aurora-Setup-<version>.exe` | Windows 10/11 installer, updates itself |
+| `Aurora-<version>-portable.zip` | Windows, no installer |
 
 Store trailers on Linux need `ffmpeg`, and `libpulse` for sound.
 
@@ -118,13 +118,13 @@ Needs [Rust](https://rustup.rs).
 ```sh
 git clone https://github.com/mollie2999/Aurora.git
 cd Aurora
-cargo build --release -p steam-rs -p steamhost
-target/release/steam-rs            # sign in with your account
-target/release/steam-rs --demo     # sample data, no sign-in
+cargo build --release -p aurora -p steamhost
+target/release/aurora            # sign in with your account
+target/release/aurora --demo     # sample data, no sign-in
 ```
 
 The Windows `steamclient` DLLs that Proton games load are built by CI
-(`.github/workflows/build.yml`); copy them next to `steam-rs` from a release.
+(`.github/workflows/build.yml`); copy them next to `aurora` from a release.
 
 ## Is it safe to use?
 
