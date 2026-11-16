@@ -502,6 +502,11 @@ pub fn wide_chip(ui: &mut Ui, t: &Theme, label: &str, selected: bool, width: f32
     chip_impl(ui, t, label, None, selected, Some(width))
 }
 
+/// The width [`chip`] gives `label`.
+pub fn chip_width(ui: &Ui, label: &str) -> f32 {
+    ui.painter().layout_no_wrap(label.to_string(), font_medium(13.0), Color32::PLACEHOLDER).size().x + 24.0
+}
+
 fn chip_impl(ui: &mut Ui, t: &Theme, label: &str, tint: Option<Color32>, selected: bool, width: Option<f32>) -> Response {
     let galley = ui.painter().layout_no_wrap(label.to_string(), font_medium(13.0), Color32::PLACEHOLDER);
     let dot = if tint.is_some() { 14.0 } else { 0.0 };

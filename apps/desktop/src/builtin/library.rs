@@ -961,7 +961,7 @@ impl Library {
 
     fn sidebar(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
         ui.horizontal(|ui| {
-            let home = home_button(ui, t, self.selected.is_none() && self.custom_selected.is_none(), ui.available_width() - 48.0);
+            let home = home_button(ui, t, self.selected.is_none() && self.custom_selected.is_none(), ui.available_width() - 46.0);
             if home.clicked() {
                 self.selected = None;
                 self.custom_selected = None;
@@ -974,23 +974,26 @@ impl Library {
         let width = ui.available_width() - 6.0;
         w::search(ui, t, &mut self.search, t!("Search games"), width);
         ui.add_space(6.0);
-        // The chips' span, so Filters below lines up from "All" to "Played".
-        let mut span = egui::Rect::NOTHING;
+        // The chips fill the search box's width (the Filters button below
+        // too), sharing the extra room; if they don't fit, they wrap.
+        let chips = [(Filter::All, t!("All")), (Filter::Installed, t!("Installed")), (Filter::Favorites, icons::STAR), (Filter::Playing, t!("Played"))];
+        let gap = 6.0;
+        let natural: f32 = chips.iter().map(|(_, l)| w::chip_width(ui, l)).sum::<f32>() + gap * (chips.len() - 1) as f32;
+        let extra = (width - natural) / chips.len() as f32;
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-            for (f, label) in [(Filter::All, t!("All")), (Filter::Installed, t!("Installed")), (Filter::Favorites, icons::STAR), (Filter::Playing, t!("Played"))] {
-                let r = w::chip(ui, t, label, self.filter == f);
-                span = span.union(r.rect);
+            ui.spacing_mut().item_spacing = vec2(gap, gap);
+            for (f, label) in chips {
+                let r = if extra > 0.0 { w::wide_chip(ui, t, label, self.filter == f, w::chip_width(ui, label) + extra) } else { w::chip(ui, t, label, self.filter == f) };
                 if r.clicked() {
                     self.filter = f;
                 }
             }
         });
-        ui.add_space(6.0 - ui.spacing().item_spacing.y);
+        ui.add_space(gap - ui.spacing().item_spacing.y);
         // Steam-style filters in a popup.
         let n = self.adv.count();
         let label = if n > 0 { format!("{}  {} ({n})", icons::FUNNEL, t!("Filters")) } else { format!("{}  {}", icons::FUNNEL, t!("Filters")) };
-        let r = w::wide_chip(ui, t, &label, n > 0, span.width());
+        let r = w::wide_chip(ui, t, &label, n > 0, width);
         egui::Popup::from_toggle_button_response(&r)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .width(720.0)
