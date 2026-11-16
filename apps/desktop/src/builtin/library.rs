@@ -8,6 +8,7 @@ mod news;
 #[path = "library_props.rs"]
 mod props;
 use client::Command;
+use egui::containers::menu::SubMenu;
 use egui::{Align, Align2, Color32, CornerRadius, Layout, Margin, Rect, Sense, Stroke, Ui, pos2, vec2};
 use extensions::{Ctx, Extension, Manifest, PageSpec};
 use local::manage::{Progress, VerifyReport};
@@ -654,7 +655,8 @@ impl Library {
         let hid = self.hidden.contains(&id);
         let pick = std::cell::Cell::new(None);
         resp.context_menu(|ui| {
-            ui.set_min_width(220.0);
+            ui.set_min_width(200.0);
+            w::menu_spacing(ui);
             let item = |ui: &mut Ui, icon: &str, label: &str, act: MenuAct| {
                 if w::menu_item(ui, t, icon, label).clicked() {
                     pick.set(Some(act));
@@ -677,36 +679,43 @@ impl Library {
             } else {
                 item(ui, icons::DOWNLOAD, t!("Install"), MenuAct::Install);
             }
-            ui.separator();
+            w::menu_separator(ui, t);
             item(ui, icons::STAR, if fav { t!("Remove from favorites") } else { t!("Add to favorites") }, MenuAct::Favorite);
             item(ui, icons::EYE, if hid { t!("Unhide") } else { t!("Hide this game") }, MenuAct::Hide);
             if installed {
-                ui.menu_button(format!("{}   {}", icons::GEAR, t!("Manage")), |ui| {
-                    ui.set_min_width(220.0);
-                    let sub = item;
-                    sub(ui, icons::DESKTOP, t!("Add desktop shortcut"), MenuAct::Shortcut);
-                    sub(ui, icons::FOLDER, t!("Browse local files"), MenuAct::Browse);
-                    sub(ui, icons::SHIELD, t!("Verify game files"), MenuAct::Verify);
-                    sub(ui, icons::TRASH, t!("Uninstall…"), MenuAct::Uninstall);
+                let manage = w::submenu_item(ui, t, icons::GEAR, t!("Manage"));
+                SubMenu::new().show(ui, &manage, |ui| {
+                    ui.set_min_width(200.0);
+                    w::menu_spacing(ui);
+                    item(ui, icons::DESKTOP, t!("Add desktop shortcut"), MenuAct::Shortcut);
+                    item(ui, icons::FOLDER, t!("Browse local files"), MenuAct::Browse);
+                    item(ui, icons::SHIELD, t!("Verify game files"), MenuAct::Verify);
+                    w::menu_separator(ui, t);
+                    if w::menu_item_tinted(ui, t, icons::TRASH, t!("Uninstall…"), Some(t.danger)).clicked() {
+                        pick.set(Some(MenuAct::Uninstall));
+                        ui.close();
+                    }
                 });
             }
             if self.show_collections {
-            ui.menu_button(format!("{}   {}", icons::STACK, t!("Add to collection")), |ui| {
-                ui.set_min_width(200.0);
-                for (i, c) in self.collections.iter().enumerate() {
-                    let mut on = c.games.contains(&id);
-                    if ui.checkbox(&mut on, &c.name).clicked() {
-                        pick.set(Some(MenuAct::ToggleCollection(i)));
-                        ui.close();
+                let add = w::submenu_item(ui, t, icons::STACK, t!("Add to collection"));
+                SubMenu::new().show(ui, &add, |ui| {
+                    ui.set_min_width(200.0);
+                    w::menu_spacing(ui);
+                    for (i, c) in self.collections.iter().enumerate() {
+                        let on = c.games.contains(&id);
+                        if w::menu_item(ui, t, if on { icons::CHECK } else { "" }, &c.name).clicked() {
+                            pick.set(Some(MenuAct::ToggleCollection(i)));
+                            ui.close();
+                        }
                     }
-                }
-                if !self.collections.is_empty() {
-                    ui.separator();
-                }
-                item(ui, icons::PLUS, t!("New collection…"), MenuAct::NewCollection);
-            });
+                    if !self.collections.is_empty() {
+                        w::menu_separator(ui, t);
+                    }
+                    item(ui, icons::PLUS, t!("New collection…"), MenuAct::NewCollection);
+                });
             }
-            ui.separator();
+            w::menu_separator(ui, t);
             item(ui, icons::STORE, t!("Store page"), MenuAct::Store);
             item(ui, icons::INFO, t!("Get help with this game"), MenuAct::Help);
             item(ui, icons::SLIDERS, t!("Properties…"), MenuAct::Properties);
@@ -1554,6 +1563,7 @@ impl Library {
 
     fn manage_menu(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, id: AppId, installed: Option<&InstalledGame>) {
         ui.set_min_width(240.0);
+        w::menu_spacing(ui);
         let item = |ui: &mut Ui, icon: &str, label: &str, color: Color32| w::menu_item_tinted(ui, t, icon, label, (color != t.text).then_some(color)).clicked();
         if let Some(g) = installed {
             if item(ui, icons::DESKTOP, t!("Add desktop shortcut"), t.text) {
@@ -1573,7 +1583,7 @@ impl Library {
             self.props = Some(props::Props { app: id, tab: props::PropTab::General, ..Default::default() });
         }
         if installed.is_some() {
-            ui.separator();
+            w::menu_separator(ui, t);
             if item(ui, icons::TRASH, t!("Uninstall…"), t.danger) {
                 self.dialog = Some(Dialog::Uninstall);
             }

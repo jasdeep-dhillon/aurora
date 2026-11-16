@@ -400,10 +400,38 @@ pub fn menu_item(ui: &mut Ui, t: &Theme, icon: &str, label: &str) -> Response {
 
 /// [`menu_item`] in its own color, e.g. red for "Uninstall…".
 pub fn menu_item_tinted(ui: &mut Ui, t: &Theme, icon: &str, label: &str, tint: Option<Color32>) -> Response {
-    let width = ui.available_width().max(160.0);
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
+    menu_row(ui, t, icon, label, tint, false)
+}
+
+/// A menu row that opens a submenu (a caret on the right), shown with
+/// [`egui::containers::menu::SubMenu`].
+pub fn submenu_item(ui: &mut Ui, t: &Theme, icon: &str, label: &str) -> Response {
+    menu_row(ui, t, icon, label, None, true)
+}
+
+/// A thin line between groups of menu rows.
+pub fn menu_separator(ui: &mut Ui, t: &Theme) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.min_rect().width().max(1.0), 9.0), Sense::hover());
+    let x = ui.max_rect().x_range();
+    ui.painter().hline(x, rect.center().y, Stroke::new(1.0, t.border));
+}
+
+/// The tight row spacing of a popup menu (call at the top of its contents).
+pub fn menu_spacing(ui: &mut Ui) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+}
+
+fn menu_row(ui: &mut Ui, t: &Theme, icon: &str, label: &str, tint: Option<Color32>, sub: bool) -> Response {
+    // As wide as the label needs; the rest of the menu's width otherwise.
+    // Asking for all the available width while egui measures the popup
+    // (its sizing pass) made menus as wide as the screen allowed.
+    let text_w = ui.painter().layout_no_wrap(label.to_string(), font_medium(13.5), t.text).size().x;
+    let natural = 36.0 + text_w + if sub { 40.0 } else { 16.0 };
+    let width = if ui.is_sizing_pass() { natural } else { ui.available_width().max(natural) };
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
     if ui.is_rect_visible(rect) {
-        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.08);
+        let open = sub && egui::Popup::is_id_open(ui.ctx(), egui::containers::menu::SubMenu::id_from_widget_id(resp.id));
+        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() || open, 0.08);
         let p = ui.painter();
         if hover > 0.0 {
             p.rect_filled(rect, t.corner_small(), t.surface_hover.gamma_multiply(hover));
@@ -415,6 +443,9 @@ pub fn menu_item_tinted(ui: &mut Ui, t: &Theme, icon: &str, label: &str, tint: O
         };
         p.text(pos2(rect.left() + 18.0, y), egui::Align2::CENTER_CENTER, icon, font(14.0), icon_c);
         p.text(pos2(rect.left() + 36.0, y), egui::Align2::LEFT_CENTER, label, font_medium(13.5), text_c);
+        if sub {
+            p.text(pos2(rect.right() - 12.0, y), egui::Align2::CENTER_CENTER, crate::icons::CARET_RIGHT, font(12.0), icon_c);
+        }
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
