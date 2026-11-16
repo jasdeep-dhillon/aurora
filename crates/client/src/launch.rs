@@ -41,6 +41,11 @@ pub enum LaunchMode {
 /// files, the executable's bitness), so callers should cache it.
 pub fn mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
     if let Some(ac) = anti_cheat(app, install_dir) {
+        // Experimental (Settings > Library): the headless host instead. It is
+        // the user's own Steam engine, so the game sees real Steam.
+        if anti_cheat_headless() && headless_host_available() && !official_steam_open() {
+            return LaunchMode::HeadlessHost;
+        }
         return LaunchMode::OfficialSteam { anti_cheat: ac };
     }
     // Steam DRM checks with Valve's client before the game even starts
@@ -1233,6 +1238,22 @@ pub fn set_prefer_official(on: bool) {
 
 fn prefer_official() -> bool {
     PREFER_OFFICIAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static ANTI_CHEAT_HEADLESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Experimental: start anti-cheat games (EAC, BattlEye…) on the headless host
+/// instead of the official client. Off by default; the player accepts the
+/// risks in Settings > Library.
+pub fn set_anti_cheat_headless(on: bool) {
+    if ANTI_CHEAT_HEADLESS.swap(on, std::sync::atomic::Ordering::Relaxed) != on {
+        // Cached modes would keep the old choice for up to a minute.
+        *MODE_CACHE.lock().unwrap() = None;
+    }
+}
+
+pub fn anti_cheat_headless() -> bool {
+    ANTI_CHEAT_HEADLESS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Linux: a Proton/compat tool (its internal name) the player chose in

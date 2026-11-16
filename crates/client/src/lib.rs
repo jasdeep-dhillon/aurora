@@ -33,7 +33,7 @@ pub mod state;
 pub mod store;
 
 pub use auth::Guard;
-pub use launch::{LaunchMode, STEAM_DRM, mode as launch_mode, mode_cached as launch_mode_cached, proton_builds, proton_override, set_prefer_official as launch_through_steam, set_proton_override};
+pub use launch::{LaunchMode, STEAM_DRM, anti_cheat_headless, mode as launch_mode, mode_cached as launch_mode_cached, proton_builds, proton_override, set_anti_cheat_headless, set_prefer_official as launch_through_steam, set_proton_override};
 pub use state::State;
 pub use store::SavedAccount;
 

@@ -50,6 +50,10 @@ pub struct Prefs {
     /// with, instead of Steam's pick. `None` follows Steam's choice.
     #[serde(default)]
     pub proton_override: Option<String>,
+    /// Experimental: anti-cheat games start on the headless host instead of
+    /// the official Steam client (accepted in Settings > Library).
+    #[serde(default)]
+    pub anti_cheat_headless: bool,
     /// The main window's last size, position and maximized state, restored on
     /// the next run (the sign-in and splash windows always center small).
     #[serde(default)]
@@ -88,6 +92,7 @@ impl Default for Prefs {
             scroll_speed: 2.0,
             drm_host_ack: false,
             proton_override: None,
+            anti_cheat_headless: false,
             win_size: None,
             win_pos: None,
             win_maximized: false,
@@ -213,6 +218,7 @@ impl SteamApp {
             drm_host_ack: prefs.drm_host_ack,
         }));
         client::set_proton_override(prefs.proton_override.clone());
+        client::set_anti_cheat_headless(prefs.anti_cheat_headless);
         let mut registry = crate::builtin::registry(rt.handle().clone(), cc.egui_ctx.clone(), flags.clone());
         for id in &prefs.disabled {
             registry.set_enabled(id, false);
@@ -649,6 +655,7 @@ impl eframe::App for SteamApp {
             self.prefs.scroll_speed = f.scroll_speed;
             self.prefs.drm_host_ack = f.drm_host_ack;
             self.prefs.proton_override = client::proton_override();
+            self.prefs.anti_cheat_headless = client::anti_cheat_headless();
             if self.prefs.cloud != f.cloud {
                 self.prefs.cloud = f.cloud;
                 self.client.send(Command::CloudSettings { steam_root: Some(self.local.steam_root.clone()), disabled: if f.cloud { vec![] } else { self.state.apps.as_ref().map(|a| a.keys().copied().collect()).unwrap_or_default() } });
