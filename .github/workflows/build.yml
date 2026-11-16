@@ -1,4 +1,4 @@
-# SteamOnRust-Linux builds: a Linux binary and the Windows release files
+# Aurora builds: a Linux binary and the Windows release files
 # (setup + portable zip), attached to each run as artifacts.
 name: Build
 

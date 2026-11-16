@@ -4,9 +4,11 @@
 pkgname=steamonrust-bin
 pkgver=0.7.1
 pkgrel=1
+# The release tag; a "0.7.1-1" release is pkgver 0.7.1, pkgrel 2.
+_tag=v$pkgver
 pkgdesc="Aurora (SteamOnRust): an unofficial Steam client written in Rust"
 arch=('x86_64')
-url="https://github.com/mollie2999/SteamOnRust-Linux"
+url="https://github.com/mollie2999/Aurora"
 license=('MIT')
 # Linked: glibc, gcc-libs, dbus, OpenSSL 3 (built on Ubuntu 22.04). Loaded at
 # run time by the window code: OpenGL, X11/Wayland, xkbcommon.
@@ -16,7 +18,7 @@ optdepends=('steam: Proton, and the windowless Steam host for Steam-DRM, native 
 provides=('steamonrust')
 conflicts=('steamonrust')
 options=('!strip' '!debug')
-source=("SteamOnRust-Linux-x86_64-$pkgver.tar.gz::$url/releases/download/v$pkgver/SteamOnRust-Linux-x86_64.tar.gz")
+source=("SteamOnRust-Linux-x86_64-${_tag#v}.tar.gz::$url/releases/download/$_tag/SteamOnRust-Linux-x86_64.tar.gz")
 sha256sums=('SKIP')
 
 package() {

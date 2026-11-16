@@ -202,8 +202,9 @@ jobs:
           tar -tzf dist/$name.tar.gz
 
       # An Arch package of the same files (packaging/arch/PKGBUILD), built in
-      # an Arch container. Releases only (pkgver can't hold a "-"); it never
-      # holds the release back.
+      # an Arch container. Releases only; pkgver can't hold a "-", so a
+      # "X.Y.Z-N" release is pkgver X.Y.Z, pkgrel N+1. It never holds the
+      # release back.
       - name: Arch package
         id: arch
         if: needs.version.outputs.prerelease != 'true'
@@ -211,13 +212,18 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          case "$VERSION" in *-*) echo "pkgver can't contain '-': no Arch package for $VERSION"; exit 1;; esac
+          case "$VERSION" in
+            *-*[!0-9]*) echo "pkgver can't contain '-': no Arch package for $VERSION"; exit 1;;
+            *-*) pkgver=${VERSION%-*}; pkgrel=$(( ${VERSION##*-} + 1 ));;
+            *) pkgver=$VERSION; pkgrel=1;;
+          esac
           name=SteamOnRust-Linux-x86_64
           mkdir -p arch
           cp repo/packaging/arch/PKGBUILD arch/
           cp dist/$name.tar.gz arch/$name-$VERSION.tar.gz
           sum=$(cut -d' ' -f1 dist/$name.tar.gz.sha256)
-          sed -i -e "s/^pkgver=.*/pkgver=$VERSION/" -e "s/^pkgrel=.*/pkgrel=1/" -e "s/^sha256sums=.*/sha256sums=('$sum')/" arch/PKGBUILD
+          sed -i -e "s/^pkgver=.*/pkgver=$pkgver/" -e "s/^pkgrel=.*/pkgrel=$pkgrel/" -e "s/^_tag=.*/_tag=v$VERSION/" -e "s/^sha256sums=.*/sha256sums=('$sum')/" arch/PKGBUILD
+          echo "pkg=steamonrust-bin-$pkgver-$pkgrel-x86_64.pkg.tar.zst" >> "$GITHUB_OUTPUT"
           docker run --rm -v "$PWD/arch:/pkg" archlinux:base-devel bash -c \
             'useradd -m build && chown -R build /pkg && cd /pkg && su build -c "makepkg --nodeps --noconfirm"'
           cp arch/*.pkg.tar.zst dist/
@@ -231,9 +237,10 @@ jobs:
           PRERELEASE: ${{ needs.version.outputs.prerelease }}
           BRANCH: ${{ github.ref_name }}
           ARCH: ${{ steps.arch.outcome }}
+          ARCH_PKG: ${{ steps.arch.outputs.pkg }}
         run: |
           {
-            echo "## SteamOnRust $VERSION"
+            echo "## Aurora $VERSION"
             echo
             if [ "$PRERELEASE" = "true" ]; then
               echo "> **Test build** from \`$BRANCH\` ($GITHUB_SHA). Not offered to installed copies as an update."
@@ -253,10 +260,10 @@ jobs:
             echo '```'
             echo
             if [ "$ARCH" = "success" ]; then
-              echo "**Arch Linux:** download \`steamonrust-bin-$VERSION-1-x86_64.pkg.tar.zst\`, then:"
+              echo "**Arch Linux:** download \`$ARCH_PKG\`, then:"
               echo
               echo '```sh'
-              echo "sudo pacman -U steamonrust-bin-$VERSION-1-x86_64.pkg.tar.zst"
+              echo "sudo pacman -U $ARCH_PKG"
               echo '```'
               echo
               echo "It installs to \`/opt/steamonrust\` with an **Aurora** menu entry and the \`steamonrust\` command. The \`PKGBUILD\` is attached too."
@@ -275,7 +282,7 @@ jobs:
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: SteamOnRust ${{ needs.version.outputs.version }}${{ needs.version.outputs.prerelease == 'true' && format(' (test {0})', github.run_number) || '' }}
+          name: Aurora ${{ needs.version.outputs.version }}${{ needs.version.outputs.prerelease == 'true' && format(' (test {0})', github.run_number) || '' }}
           prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
           make_latest: ${{ needs.version.outputs.prerelease == 'true' && 'false' || 'true' }}
           files: dist/*

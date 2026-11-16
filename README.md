@@ -18,7 +18,7 @@
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2FB36B?style=flat-square">
 </p>
 
-# SteamOnRust-Linux
+# Aurora (SteamOnRust-Linux)
 
 A Linux fork of [SteamInRust](https://github.com/madonchik123/SteamInRust).
 What it changes:

@@ -14,7 +14,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use ui::{Theme, icons, widgets as w};
 
-const REPO: &str = "mollie2999/SteamOnRust-Linux";
+const REPO: &str = "mollie2999/Aurora";
 const EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[derive(Clone, Debug)]
@@ -93,10 +93,14 @@ pub fn is_installed() -> bool {
     install_dir().is_some_and(|d| d.join("uninstall.exe").exists())
 }
 
-/// "v1.2.3" -> (1, 2, 3).
-fn parse(v: &str) -> (u32, u32, u32) {
-    let mut n = v.trim().trim_start_matches(['v', 'V']).split(['.', '-', '+']).map(|p| p.parse::<u32>().unwrap_or(0));
-    (n.next().unwrap_or(0), n.next().unwrap_or(0), n.next().unwrap_or(0))
+/// "v1.2.3" -> (1, 2, 3, 0); a numeric revision "1.2.3-4" -> (1, 2, 3, 4).
+/// Other suffixes ("-beta", "-test.5") count as no revision.
+fn parse(v: &str) -> (u32, u32, u32, u32) {
+    let v = v.trim().trim_start_matches(['v', 'V']);
+    let v = v.split('+').next().unwrap_or(v);
+    let (core, rev) = v.split_once('-').unwrap_or((v, ""));
+    let mut n = core.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    (n.next().unwrap_or(0), n.next().unwrap_or(0), n.next().unwrap_or(0), rev.parse().unwrap_or(0))
 }
 
 pub fn is_newer(candidate: &str, current: &str) -> bool {
@@ -549,5 +553,8 @@ mod tests {
         assert!(!super::is_newer("v0.1.0", "0.1.0"));
         assert!(!super::is_newer("0.1.0-beta", "0.1.0"));
         assert!(super::is_newer("0.1.10", "0.1.9"));
+        assert!(super::is_newer("v0.7.1-1", "0.7.1"));
+        assert!(super::is_newer("0.7.2", "0.7.1-1"));
+        assert!(!super::is_newer("0.7.1-test.5", "0.7.1"));
     }
 }
