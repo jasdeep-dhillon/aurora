@@ -36,7 +36,7 @@ On Linux, Aurora picks how to start each game:
 | Native Linux games | Directly | From your own Steam's `steamclient.so`, on a windowless Steam host |
 | Windows games | Proton (Steam's default, or one you pick in Manage › Compatibility) | Aurora's own `steamclient`: achievements, stats, cloud, lobbies, Workshop |
 | Steam DRM (SteamStub) | Proton, on the windowless Steam host | Valve's engine answers the DRM check itself |
-| Anti-cheat (VAC, Easy Anti-Cheat, BattlEye) | Through the official Steam client | Steam's own |
+| Anti-cheat (VAC, Easy Anti-Cheat, BattlEye) | Through the official Steam client, or on the windowless Steam host (experimental, Settings › Library) | Steam's own, from Valve's engine either way |
 
 The windowless Steam host is your installed Steam's engine without its
 interface: no `steamwebhelper`, no Chromium. It checks ownership itself, so it
@@ -47,9 +47,9 @@ Manage › Compatibility switches a game to Proton or to a specific Proton
 version.
 
 Needs Steam installed (for Proton and the Steam host). Anti-cheat games also
-need it signed in. Settings › Library has an experimental option to run
-anti-cheat games on the Steam host instead; the anti-cheat may count that as an
-unsupported setup and ban you.
+need it signed in, unless they run on the windowless Steam host: that option
+(Settings › Library, experimental) starts them without the official client.
+The anti-cheat may count that as an unsupported setup and ban you.
 
 On Windows, games run as in SteamInRust: Aurora's `steamclient` for most games,
 the official client for anti-cheat.
