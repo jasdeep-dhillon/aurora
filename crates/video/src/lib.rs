@@ -2,9 +2,10 @@
 //!
 //! - Streams HLS (fMP4 segments, what Steam serves for trailers) or plain MP4
 //!   (Steam's microtrailers) over HTTP, a few segments ahead.
-//! - Decodes H.264 and AAC with Windows Media Foundation (built into Windows).
-//! - Plays audio through WASAPI; its clock drives A/V sync (a wall clock when
-//!   there's no audio).
+//! - Decodes H.264 and AAC with Windows Media Foundation (built into Windows),
+//!   or on Linux with the system's `ffmpeg` program (`ffdec`).
+//! - Plays audio through WASAPI, or PulseAudio/PipeWire on Linux (`pulse`);
+//!   its clock drives A/V sync (a wall clock when there's no audio).
 //! - Hands frames to egui as a texture; [`widget`] draws a Steam-like player.
 //!
 //! Threads: a tokio task downloads, one thread decodes video into a short
@@ -17,10 +18,13 @@ pub mod mp4;
 pub mod widget;
 mod yuv;
 
-#[cfg(windows)]
 mod engine;
+#[cfg(not(windows))]
+mod ffdec;
 #[cfg(windows)]
 mod mf;
+#[cfg(not(windows))]
+mod pulse;
 #[cfg(windows)]
 mod wasapi;
 
@@ -302,8 +306,13 @@ impl Player {
         };
         let sh = Arc::new(Shared { m: Mutex::new(st), cv: Condvar::new(), stop: AtomicBool::new(false), epoch: AtomicU64::new(0), ctx: ctx.clone() });
         rt.spawn(download(sh.clone(), source));
+        #[cfg(not(windows))]
+        let decoder = ffdec::available();
         #[cfg(windows)]
-        {
+        let decoder = true;
+        if !decoder {
+            sh.fail(i18n::t!("Trailers need FFmpeg. Install the ffmpeg package, then restart SteamInRust."));
+        } else {
             let (a, b) = (sh.clone(), sh.clone());
             let ok = std::thread::Builder::new().name("video-decode".into()).spawn(move || engine::video_thread(a)).is_ok()
                 && std::thread::Builder::new().name("video-audio".into()).spawn(move || engine::audio_thread(b)).is_ok();
@@ -311,8 +320,6 @@ impl Player {
                 sh.fail("could not start decoder threads");
             }
         }
-        #[cfg(not(windows))]
-        sh.fail("video playback needs Windows Media Foundation");
         Self { sh, tex: None, shown_epoch: u64::MAX, shown_pts: 0.0, pos: 0.0, status: Status::Loading, ended_flag: false, fullscreen: false, ui: Default::default() }
     }
 

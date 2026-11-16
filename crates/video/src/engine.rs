@@ -2,7 +2,16 @@
 //! the sound card (which also keeps the clock).
 
 use crate::mp4::{self, Codec, Sample, Track};
-use crate::{Audio, Frame, MAX_FRAMES, Plan, Shared, UNSEEN, mf, wasapi, yuv};
+use crate::{Audio, Frame, MAX_FRAMES, Plan, Shared, UNSEEN, yuv};
+// Windows: Media Foundation and WASAPI. Linux: ffmpeg and PulseAudio.
+#[cfg(not(windows))]
+use crate::{ffdec as mf, pulse as wasapi};
+#[cfg(windows)]
+use crate::{mf, wasapi};
+#[cfg(not(windows))]
+type AudioResult<T> = wasapi::Result<T>;
+#[cfg(windows)]
+type AudioResult<T> = windows::core::Result<T>;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,7 +34,7 @@ fn track_of(data: &[u8], video: bool) -> Option<Track> {
 
 pub fn video_thread(sh: Arc<Shared>) {
     if let Err(e) = mf::init_thread() {
-        return sh.fail(format!("Media Foundation: {e}"));
+        return sh.fail(if cfg!(windows) { format!("Media Foundation: {e}") } else { e.to_string() });
     }
     let mut dec: Option<(mf::H264, String)> = None;
     let mut track: Option<(String, Track)> = None;
@@ -245,6 +254,9 @@ pub fn audio_thread(sh: Arc<Shared>) {
         if !eos && pcm.len() < 2 * rate as usize * ch {
             let n = if plan.single { 1 } else { plan.segs.len() };
             chunks.clear();
+            // ffmpeg decodes on its own time: collect what it has finished.
+            #[cfg(not(windows))]
+            aac.ready(&mut chunks);
             if seg >= n {
                 let _ = aac.drain(&mut chunks);
                 eos = true;
@@ -278,7 +290,7 @@ pub fn audio_thread(sh: Arc<Shared>) {
         }
 
         // Feed the device.
-        let result = (|| -> windows::core::Result<()> {
+        let result = (|| -> AudioResult<()> {
             let free = out.free()? as usize;
             let n = free.min(pcm.len() / ch);
             if n > 0 {
