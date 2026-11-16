@@ -39,6 +39,8 @@ pub struct State {
     /// Last Steam Cloud result per game, and games syncing right now.
     pub cloud: HashMap<AppId, model::CloudReport>,
     pub cloud_syncing: std::collections::HashSet<AppId>,
+    /// Games whose shaders are compiling before launch: (done, total).
+    pub shader_compiling: HashMap<AppId, (u32, u32)>,
     pub comments: HashMap<SteamId, Result<model::Comments, String>>,
     pub badges: HashMap<SteamId, Result<model::Badges, String>>,
     pub notifications: Option<model::Notifications>,
@@ -174,6 +176,12 @@ impl State {
             Event::Email { address, validated } => self.email = Some((address.clone(), *validated)),
             Event::Regions(_) => {}
             Event::SteamCollections(_) => {}
+            Event::ShaderCompile { app_id, done, total } => {
+                self.shader_compiling.insert(*app_id, (*done, *total));
+            }
+            Event::ShaderCompileDone { app_id } => {
+                self.shader_compiling.remove(app_id);
+            }
             Event::CloudSyncing { app_id } => {
                 self.cloud_syncing.insert(*app_id);
             }

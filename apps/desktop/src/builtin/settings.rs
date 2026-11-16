@@ -477,6 +477,75 @@ fn downloads(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, flags: &SharedFlags) {
     *flags.lock().unwrap() = f;
     // Region, bandwidth limit, schedule… (kept by the Downloads component).
     ctx.settings_for("downloads", ui);
+    steam_download_settings(ui, t);
+}
+
+/// Steam's own download and shader switches (kept in Steam's config, so the
+/// official client and the windowless host follow them too), plus
+/// compiling shaders before a game starts.
+fn steam_download_settings(ui: &mut Ui, t: &Theme) {
+    use client::SteamSetting as S;
+    ui.add_space(18.0);
+    ui.label(w::text_semibold(t!("While playing"), 15.0, t.text));
+    ui.add_space(6.0);
+    let locked = client::steam_settings_locked();
+    let steam_switch = |ui: &mut Ui, s: S, title: &str, body: &str| {
+        let Some(was) = client::steam_setting(s) else { return };
+        let mut on = was;
+        ui.add_enabled_ui(locked.is_none(), |ui| switch(ui, t, title, body, &mut on));
+        if on != was {
+            if let Err(e) = client::set_steam_setting(s, on) {
+                tracing::warn!("Steam setting {s:?}: {e}");
+            }
+        }
+    };
+    // SteamInRust's choice, put into Steam's settings before every game.
+    let mut dl = client::gameplay_downloads();
+    switch(
+        ui,
+        t,
+        t!("Allow downloads during gameplay"),
+        t!("Let Steam update other games and download shaders while you play. Off uses less memory while a game runs. SteamInRust sets this in Steam before every game."),
+        &mut dl,
+    );
+    if dl != client::gameplay_downloads() {
+        client::set_gameplay_downloads(dl);
+        client::apply_steam_prefs();
+    }
+    ui.add_space(12.0);
+    ui.label(w::text_semibold(t!("Shader pre-caching"), 15.0, t.text));
+    ui.add_space(6.0);
+    steam_switch(
+        ui,
+        S::ShaderPreCaching,
+        t!("Enable shader pre-caching"),
+        t!("Download shaders already compiled for your GPU and driver, so games stutter less the first time you play."),
+    );
+    // Linux: SteamInRust compiles before launch instead, and turns Steam's
+    // background processing off before every game while it does.
+    #[cfg(not(windows))]
+    {
+        let mut on = client::shaders::precompile();
+        switch(
+            ui,
+            t,
+            t!("Compile shaders before a game starts"),
+            t!("Like Steam’s “Processing Vulkan shaders”: shaders not compiled yet are compiled when you press Play (you can skip it). While this is on, Steam's own background processing of Vulkan shaders is turned off before every game, so it doesn't do the same work while you play."),
+            &mut on,
+        );
+        if on != client::shaders::precompile() {
+            client::shaders::set_precompile(on);
+            client::apply_steam_prefs();
+        }
+        if !on {
+            steam_switch(ui, S::ShaderBackgroundProcessing, t!("Allow background processing of Vulkan shaders"), t!("Steam compiles downloaded shaders while it's open and idle."));
+        }
+    }
+    #[cfg(windows)]
+    steam_switch(ui, S::ShaderBackgroundProcessing, t!("Allow background processing of Vulkan shaders"), t!("Steam compiles downloaded shaders while it's open and idle."));
+    if let Some(why) = locked {
+        ui.add(egui::Label::new(w::text(i18n::tr_dyn(why), 12.5, t.text_dim)).wrap());
+    }
 }
 
 fn cloud(ui: &mut Ui, t: &Theme, flags: &SharedFlags) {

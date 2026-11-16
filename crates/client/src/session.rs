@@ -383,6 +383,8 @@ struct Online {
     cache_saved: std::time::Instant,
     /// Games whose pending Steam Cloud upload is running.
     cloud_flushing: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AppId>>>,
+    /// Games compiling their shaders before launch; set to skip the rest.
+    shader_jobs: HashMap<AppId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Seconds before reconnect attempt `n` (1, 2, …), like Steam: quick at
@@ -489,6 +491,7 @@ async fn online(
         cache_dirty: false,
         cache_saved: std::time::Instant::now(),
         cloud_flushing: Default::default(),
+        shader_jobs: Default::default(),
         from_offline: false,
     };
     let (dl_tx, mut dl_rx) = mpsc::unbounded_channel::<(AppId, Result<String, String>)>();
@@ -498,6 +501,8 @@ async fn online(
     let (launch_tx, mut launch_rx) = mpsc::unbounded_channel::<(AppId, std::path::PathBuf, String)>();
     // Launches that waited for Workshop downloads (Steam Cloud comes next).
     let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<(AppId, std::path::PathBuf, String)>();
+    // Launches that waited for their shaders to compile.
+    let (sh_tx, mut sh_rx) = mpsc::unbounded_channel::<(AppId, std::path::PathBuf, String)>();
     // Verifications that ended.
     let (vf_tx, mut vf_rx) = mpsc::unbounded_channel::<(AppId, local::manage::VerifyReport)>();
     // Reconnect attempts, and checks of a connection that went quiet.
@@ -540,6 +545,60 @@ async fn online(
         }};
     }
 
+    // The last step before a game starts, like Steam's "Processing Vulkan
+    // shaders": compile its shaders (Linux). Games the official client runs
+    // get Steam's own.
+    macro_rules! launch_now {
+        ($app_id:expr, $install_dir:expr, $args:expr) => {{
+            let (app_id, install_dir, args): (AppId, std::path::PathBuf, String) = ($app_id, $install_dir, $args);
+            // Steam's download and shader settings as chosen in SteamInRust,
+            // before anything of Steam's starts for this game.
+            if !st.shader_jobs.contains_key(&app_id) && !st.running.contains_key(&app_id) {
+                launch::apply_steam_prefs();
+            }
+            #[cfg(not(windows))]
+            {
+                let busy = st.running.contains_key(&app_id) || st.shader_jobs.contains_key(&app_id);
+                let pending = st
+                    .apps
+                    .get(&app_id)
+                    .filter(|a| !busy && !matches!(launch::mode(a, &install_dir), crate::LaunchMode::OfficialSteam { .. }))
+                    .and_then(|_| crate::shaders::pending(&install_dir, app_id));
+                match pending {
+                    // Already compiling: Play again doesn't start it twice.
+                    _ if st.shader_jobs.contains_key(&app_id) => {}
+                    Some(p) => {
+                        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        st.shader_jobs.insert(app_id, cancel.clone());
+                        sink(Event::ShaderCompile { app_id, done: 0, total: 0 });
+                        let (sink, tx) = (sink.clone(), sh_tx.clone());
+                        tokio::task::spawn_blocking(move || {
+                            let mut last = None;
+                            let result = crate::shaders::compile(&p, &cancel, |done, total| {
+                                if last != Some((done, total)) {
+                                    last = Some((done, total));
+                                    sink(Event::ShaderCompile { app_id, done, total });
+                                }
+                            });
+                            if let Err(e) = result {
+                                tracing::warn!("shaders for {app_id}: {e}");
+                            }
+                            sink(Event::ShaderCompileDone { app_id });
+                            let _ = tx.send((app_id, install_dir, args));
+                        });
+                    }
+                    None => {
+                        let _ = st.launch(app_id, &install_dir, &args, sink, &exit_tx);
+                    }
+                }
+            }
+            #[cfg(windows)]
+            {
+                let _ = st.launch(app_id, &install_dir, &args, sink, &exit_tx);
+            }
+        }};
+    }
+
     // Launch with Steam Cloud first, like Steam: bring down newer cloud
     // saves (games the official client runs get its own cloud sync).
     macro_rules! launch_cloud {
@@ -552,7 +611,7 @@ async fn online(
                     // Offline: play with the saves on this PC; they go up once online.
                     Some(_) if st.link != Link::Online && !st.running.contains_key(&app_id) => {
                         sink(Event::CloudSkipped { app_id });
-                        let _ = st.launch(app_id, &install_dir, &args, sink, &exit_tx);
+                        launch_now!(app_id, install_dir, args);
                     }
                     Some(target) if !st.running.contains_key(&app_id) => {
                         sink(Event::CloudSyncing { app_id });
@@ -566,9 +625,7 @@ async fn online(
                             }
                         });
                     }
-                    _ => {
-                        let _ = st.launch(app_id, &install_dir, &args, sink, &exit_tx);
-                    }
+                    _ => launch_now!(app_id, install_dir, args),
                 }
         }};
     }
@@ -692,8 +749,11 @@ async fn online(
                     }
                 }
                 Some(Command::SyncWorkshop { app_id }) => st.sync_workshop(app_id, Vec::new(), sink),
-                Some(Command::LaunchWithoutCloud { app_id, install_dir, args }) => {
-                    let _ = st.launch(app_id, &install_dir, &args, sink, &exit_tx);
+                Some(Command::LaunchWithoutCloud { app_id, install_dir, args }) => launch_now!(app_id, install_dir, args),
+                Some(Command::SkipShaderCompile { app_id }) => {
+                    if let Some(cancel) = st.shader_jobs.get(&app_id) {
+                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 Some(Command::ProbeRegions) => {
                     let (sink, root) = (sink.clone(), st.steam_root.clone());
@@ -1010,7 +1070,9 @@ async fn online(
                 st.pump(sink, &dl_tx);
                 st.save_downloads();
             }
-            Some((app_id, dir, args)) = launch_rx.recv() => {
+            Some((app_id, dir, args)) = launch_rx.recv() => launch_now!(app_id, dir, args),
+            Some((app_id, dir, args)) = sh_rx.recv() => {
+                st.shader_jobs.remove(&app_id);
                 let _ = st.launch(app_id, &dir, &args, sink, &exit_tx);
             }
             Some((app_id, dir, args)) = ws_rx.recv() => launch_cloud!(app_id, dir, args),

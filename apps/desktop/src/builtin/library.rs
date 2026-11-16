@@ -1378,6 +1378,15 @@ impl Library {
                                     self.queue_install(ctx, id, Some(g.library.clone()));
                                 }
                             }
+                            Some(_) if ctx.state.shader_compiling.contains_key(&id) => {
+                                // Like Steam's "Processing Vulkan shaders": the game starts after.
+                                let (done, total) = ctx.state.shader_compiling[&id];
+                                compile_bar(ui, t, done, total);
+                                ui.add_space(8.0);
+                                if w::button(ui, t, None, t!("Skip"), w::Kind::Secondary, w::Size::Lg).on_hover_text(t!("Start the game now; it compiles what's missing while you play")).clicked() {
+                                    ctx.send(Command::SkipShaderCompile { app_id: id });
+                                }
+                            }
                             Some(_) if ctx.state.cloud_syncing.contains(&id) => {
                                 // Like Steam: the game starts once its saves are in sync.
                                 ui.add_enabled_ui(false, |ui| w::button(ui, t, Some(icons::CLOUD_CHECK), t!("Syncing Steam Cloud…"), w::Kind::Play, w::Size::Lg));
@@ -2029,6 +2038,29 @@ impl Library {
 }
 
 /// The play button while a game is being deleted: red, filling up, like Steam.
+/// The Play button while shaders compile: Play's green, a spinner and the
+/// percentage inside, and a lighter fill that grows with the progress.
+fn compile_bar(ui: &mut Ui, t: &Theme, done: u32, total: u32) {
+    let fraction = if total > 0 { done.min(total) as f32 / total as f32 } else { 0.0 };
+    let label = if total > 0 {
+        t!("Compiling shaders… {pct}%", pct = (fraction * 100.0).floor() as u32)
+    } else {
+        t!("Compiling shaders…").to_string()
+    };
+    let galley = ui.painter().layout_no_wrap(label, w::font_semibold(16.0), Color32::WHITE);
+    let spinner = 18.0;
+    let (rect, _) = ui.allocate_exact_size(vec2((galley.size().x + spinner + 58.0).max(240.0), 48.0), Sense::hover());
+    let r = t.corner_small();
+    let p = ui.painter();
+    p.rect_filled(rect, r, t.play);
+    let fill = Rect::from_min_size(rect.min, vec2(rect.width() * fraction, rect.height()));
+    p.rect_filled(fill, r, Color32::WHITE.gamma_multiply(0.18));
+    let x = rect.center().x - (spinner + 10.0 + galley.size().x) / 2.0;
+    let spin = Rect::from_center_size(pos2(x + spinner / 2.0, rect.center().y), vec2(spinner, spinner));
+    egui::Spinner::new().size(spinner).color(Color32::WHITE).paint_at(ui, spin);
+    ui.painter().galley(pos2(x + spinner + 10.0, rect.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
+}
+
 fn uninstall_bar(ui: &mut Ui, t: &Theme, fraction: f32) {
     let label = t!("Uninstalling… {pct}%", pct = (fraction.clamp(0.0, 1.0) * 100.0).round() as u32);
     let galley = ui.painter().layout_no_wrap(format!("{}  {label}", icons::TRASH), w::font_semibold(16.0), t.danger);

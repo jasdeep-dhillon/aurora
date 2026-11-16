@@ -752,6 +752,104 @@ fn official_steam_open() -> bool {
     steam_running()
 }
 
+pub use local::steam_settings::Setting as SteamSetting;
+
+/// Headless hosts running now (Valve's engine holds Steam's config then).
+static HOSTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Why Steam's own settings can't be changed right now: Steam (the official
+/// client or the headless host) is running and would overwrite them.
+pub fn steam_settings_locked() -> Option<&'static str> {
+    if HOSTS.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        Some("Steam is running for a game. Change these after it closes.")
+    } else if official_steam_open() {
+        Some("Close the official Steam client to change these.")
+    } else {
+        None
+    }
+}
+
+/// Cached reads of Steam's settings (the Settings page asks every frame).
+static SETTINGS_CACHE: Mutex<Option<(std::time::Instant, Vec<(SteamSetting, Option<bool>)>)>> = Mutex::new(None);
+
+/// One of Steam's own settings, `None` without a Steam install.
+pub fn steam_setting(s: SteamSetting) -> Option<bool> {
+    let mut cache = SETTINGS_CACHE.lock().unwrap();
+    if cache.as_ref().is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(2)) {
+        let root = local::find_steam_root();
+        let all = [SteamSetting::DownloadsDuringGameplay, SteamSetting::ShaderPreCaching, SteamSetting::ShaderBackgroundProcessing];
+        *cache = Some((std::time::Instant::now(), all.iter().map(|&s| (s, root.as_deref().and_then(|r| local::steam_settings::get(r, s)))).collect()));
+    }
+    cache.as_ref().and_then(|(_, v)| v.iter().find(|(k, _)| *k == s)).and_then(|(_, v)| *v)
+}
+
+/// Change one of Steam's own settings (only while Steam isn't running).
+pub fn set_steam_setting(s: SteamSetting, on: bool) -> Result<(), String> {
+    if let Some(why) = steam_settings_locked() {
+        return Err(why.into());
+    }
+    let root = local::find_steam_root().ok_or("no Steam install found")?;
+    local::steam_settings::set(&root, s, on)?;
+    *SETTINGS_CACHE.lock().unwrap() = None;
+    Ok(())
+}
+
+/// The player's choice for Steam's "Allow downloads during gameplay", which
+/// SteamInRust applies before each game (off by default: with it on, Valve's
+/// engine keeps starting and suspending updates and shader downloads while
+/// the game runs, a few hundred MB on the headless host).
+static GAMEPLAY_DOWNLOADS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_gameplay_downloads(on: bool) {
+    GAMEPLAY_DOWNLOADS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn gameplay_downloads() -> bool {
+    GAMEPLAY_DOWNLOADS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Before each game starts: put Steam's download and shader settings the way
+/// the player chose them in SteamInRust. Downloads during gameplay as chosen;
+/// Steam's background shader processing off while SteamInRust compiles
+/// shaders before launch (so the engine doesn't do the same work again while
+/// the game runs). Shader pre-caching (the downloads) is left as it is.
+/// Skipped while Steam is running, since it would overwrite the file.
+pub fn apply_steam_prefs() {
+    if steam_settings_locked().is_some() {
+        return;
+    }
+    let Some(root) = local::find_steam_root() else { return };
+    let mut wanted = vec![(SteamSetting::DownloadsDuringGameplay, gameplay_downloads())];
+    #[cfg(not(windows))]
+    if crate::shaders::precompile() {
+        wanted.push((SteamSetting::ShaderBackgroundProcessing, false));
+    }
+    for (s, on) in wanted {
+        match local::steam_settings::set(&root, s, on) {
+            Ok(true) => tracing::info!("Steam setting {s:?} set to {on}"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("couldn't set Steam's {s:?}: {e}"),
+        }
+    }
+    *SETTINGS_CACHE.lock().unwrap() = None;
+}
+
+/// Counts a running host in [`HOSTS`] while alive.
+struct HostCount;
+
+impl HostCount {
+    fn new() -> HostCount {
+        HOSTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        HostCount
+    }
+}
+
+impl Drop for HostCount {
+    fn drop(&mut self) {
+        HOSTS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Printed by `steamhost serve` once it is signed in and serving.
 const STEAMHOST_READY: &str = "STEAMHOST-READY";
 
@@ -789,6 +887,7 @@ pub fn run_through_host(
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     let mut host = cmd.spawn().map_err(|e| format!("couldn't start the headless Steam host: {e}"))?;
+    let _counted = HostCount::new();
 
     // Its diagnostics go to our log; the last line explains a failure.
     let last_err = std::sync::Arc::new(Mutex::new(String::new()));
@@ -1452,6 +1551,8 @@ mod linux {
             };
             tracing::info!("launching {} ({}) {}", app.name, exe.display(), self.describe());
             cmd.current_dir(cwd).env("SteamAppId", &id).env("SteamGameId", &id).env("SteamOverlayGameId", &id);
+            // Like Steam: the driver reads and writes the game's shader cache.
+            crate::shaders::apply_env(&mut cmd, install_dir, app.app_id);
             // Its own process group, so stopping the game stops everything it started.
             cmd.process_group(0);
             cmd

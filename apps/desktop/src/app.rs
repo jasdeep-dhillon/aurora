@@ -54,6 +54,12 @@ pub struct Prefs {
     /// the official Steam client (accepted in Settings > Library).
     #[serde(default)]
     pub anti_cheat_headless: bool,
+    /// Linux: compile a game's shaders before it starts (Settings > Downloads).
+    #[serde(default = "yes")]
+    pub precompile_shaders: bool,
+    /// Steam's "Allow downloads during gameplay", set before every game.
+    #[serde(default)]
+    pub gameplay_downloads: bool,
     /// The main window's last size, position and maximized state, restored on
     /// the next run (the sign-in and splash windows always center small).
     #[serde(default)]
@@ -93,6 +99,8 @@ impl Default for Prefs {
             drm_host_ack: false,
             proton_override: None,
             anti_cheat_headless: false,
+            precompile_shaders: true,
+            gameplay_downloads: false,
             win_size: None,
             win_pos: None,
             win_maximized: false,
@@ -219,6 +227,9 @@ impl SteamApp {
         }));
         client::set_proton_override(prefs.proton_override.clone());
         client::set_anti_cheat_headless(prefs.anti_cheat_headless);
+        client::set_gameplay_downloads(prefs.gameplay_downloads);
+        #[cfg(not(windows))]
+        client::shaders::set_precompile(prefs.precompile_shaders);
         let mut registry = crate::builtin::registry(rt.handle().clone(), cc.egui_ctx.clone(), flags.clone());
         for id in &prefs.disabled {
             registry.set_enabled(id, false);
@@ -656,6 +667,11 @@ impl eframe::App for SteamApp {
             self.prefs.drm_host_ack = f.drm_host_ack;
             self.prefs.proton_override = client::proton_override();
             self.prefs.anti_cheat_headless = client::anti_cheat_headless();
+            self.prefs.gameplay_downloads = client::gameplay_downloads();
+            #[cfg(not(windows))]
+            {
+                self.prefs.precompile_shaders = client::shaders::precompile();
+            }
             if self.prefs.cloud != f.cloud {
                 self.prefs.cloud = f.cloud;
                 self.client.send(Command::CloudSettings { steam_root: Some(self.local.steam_root.clone()), disabled: if f.cloud { vec![] } else { self.state.apps.as_ref().map(|a| a.keys().copied().collect()).unwrap_or_default() } });

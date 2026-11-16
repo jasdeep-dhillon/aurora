@@ -6,6 +6,7 @@
 pub mod manage;
 
 pub mod compat;
+pub mod steam_settings;
 
 use model::{AppId, InstallState, InstalledGame, LocalAccount};
 use std::collections::HashMap;
