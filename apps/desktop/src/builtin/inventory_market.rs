@@ -75,6 +75,15 @@ impl Inventory {
             if !item.tradable && item.trade_hold_days > 0 && item.owner_notes.is_empty() {
                 ui.label(w::text(t!("New items of this kind can't be traded for {n} days.", n = item.trade_hold_days), 12.5, t.text_faint));
             }
+            // A trading card: its whole set, and which cards this inventory has.
+            if let Some((game, foil)) = item.card_set {
+                ui.add_space(10.0);
+                let owner = self.owner.unwrap_or(ctx.state.steam_id);
+                let hint = if mine { t!("Every card of this game, and which ones you have") } else { t!("Every card of this game, and which ones they have") };
+                if w::button(ui, t, Some(icons::MEDAL), t!("See set"), w::Kind::Secondary, w::Size::Sm).on_hover_text(hint).clicked() {
+                    ctx.navigate("profile", Some(format!("{owner}/cards/{game}{}", if foil { "/foil" } else { "" })));
+                }
+            }
 
             if item.marketable && !item.market_hash_name.is_empty() {
                 ui.add_space(14.0);

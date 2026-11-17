@@ -552,6 +552,9 @@ pub struct InventoryItem {
     pub commodity: bool,
     /// The game's own market fee (e.g. 0.10); Steam's is separate.
     pub market_fee: Option<f64>,
+    /// A trading card: its game, and whether it's foil (for its card set).
+    #[serde(default)]
+    pub card_set: Option<(AppId, bool)>,
 }
 
 /// What an item sells for on the Community Market, in the wallet currency.
