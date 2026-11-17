@@ -1,9 +1,17 @@
 # Patched egui crates
 
-`epaint` and `egui_glow` 0.37.0, copied from crates.io and wired in through
-`[patch.crates-io]` in the root `Cargo.toml`, to give text subpixel (LCD)
-anti-aliasing like the rest of the desktop. egui only does grayscale, which
-looks jagged next to other apps at 1x.
+`epaint`, `egui_glow` and `eframe` 0.37.0, copied from crates.io and wired in
+through `[patch.crates-io]` in the root `Cargo.toml`. `epaint` and `egui_glow`
+give text subpixel (LCD) anti-aliasing like the rest of the desktop (egui only
+does grayscale, which looks jagged next to other apps at 1x). `eframe` keeps
+the in-game overlay responsive on Wayland.
+
+## eframe
+
+- `native/run.rs` `MISSED_REDRAW_TIMEOUT`: 20 ms instead of 250 ms. On Wayland
+  a window behind a fullscreen game gets no frame callbacks, so eframe only
+  runs `App::logic` once a requested redraw is this late. Aurora runs the
+  in-game Shift+Tab overlay there, so this is its response time.
 
 ## epaint
 
@@ -29,6 +37,7 @@ looks jagged next to other apps at 1x.
 
 ## Upgrading egui
 
-Copy the new `epaint` and `egui_glow` from `~/.cargo/registry/src/*/` and
-reapply the changes above, or drop the patch and stop calling
-`ui::install_fonts_with(ctx, true)`.
+Copy the new `epaint`, `egui_glow` and `eframe` from
+`~/.cargo/registry/src/*/` and reapply the changes above, or drop the patch
+and stop calling `ui::install_fonts_with(ctx, true)` (and accept a slower
+in-game overlay on Wayland).

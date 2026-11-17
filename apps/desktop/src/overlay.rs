@@ -536,9 +536,24 @@ fn keep_ticking(app: &mut SteamApp, ctx: &egui::Context) {
     });
 }
 
+/// The overlay drawn inside a game (from `App::logic`, which also runs when
+/// the app's window gets no frames): read the game's input, run the UI, send
+/// the frame. Window commands it asks for wait for the next real frame.
+pub fn logic(app: &mut SteamApp, ctx: &egui::Context) {
+    poll_ingame(app, ctx);
+    if app.overlay.ingame.is_none() {
+        return;
+    }
+    let mut actions = std::mem::take(&mut app.overlay.pending);
+    ingame_frame(app, ctx, &mut actions);
+    app.overlay.pending = actions;
+    if !app.overlay.pending.is_empty() {
+        ctx.request_repaint();
+    }
+}
+
 pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) {
     actions.append(&mut app.overlay.pending);
-    poll_ingame(app, ctx);
     // Shift+Tab belongs to the game only while the game is in front.
     if let Some((id, _)) = app.overlay.game {
         let dir = app.local.games.iter().find(|g| g.app_id == id).map(|g| g.install_dir.clone());
@@ -567,9 +582,9 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
         }
     }
     let t = app.prefs.theme.clone();
-    // Drawn inside the game: run the overlay's UI on the game's input.
+    // Drawn inside the game: `logic` runs its UI (before this frame, and
+    // while the window gets no frames).
     if app.overlay.ingame.is_some() {
-        ingame_frame(app, ctx, actions);
         keep_ticking(app, ctx);
         return;
     }
