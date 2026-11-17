@@ -21,16 +21,16 @@ use std::path::{Path, PathBuf};
 /// Steam's own client does.
 pub const SEND_TO_STEAM: bool = true;
 
-fn dir(steam_id: SteamId) -> PathBuf {
+pub(crate) fn dir(steam_id: SteamId) -> PathBuf {
     crate::store::config_dir().join("offline").join(model::account_id(steam_id).to_string())
 }
 
-fn read<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+pub(crate) fn read<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
 /// Write through a temporary file so a crash never leaves half a file.
-fn write<T: Serialize>(path: &Path, value: &T) {
+pub(crate) fn write<T: Serialize>(path: &Path, value: &T) {
     if let Some(d) = path.parent() {
         let _ = std::fs::create_dir_all(d);
     }

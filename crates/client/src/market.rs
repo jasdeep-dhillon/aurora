@@ -22,7 +22,7 @@ pub struct Web {
 impl Web {
     /// A signed-out session, for public pages.
     pub fn anonymous() -> Web {
-        Web { http: reqwest::Client::new(), me: 0, session_id: String::new() }
+        Web { http: crate::http(), me: 0, session_id: String::new() }
     }
 }
 
@@ -75,7 +75,7 @@ pub async fn inventory_apps(web: Option<&Web>, steam_id: SteamId) -> (Result<Vec
     let url = format!("{COMMUNITY}/profiles/{steam_id}/inventory/");
     let resp = match web {
         Some(w) => w.http.get(&url).send().await,
-        None => reqwest::Client::new().get(&url).send().await,
+        None => crate::http().get(&url).send().await,
     };
     let body = match resp {
         Ok(r) => r.text().await.map_err(|e| e.to_string()),
@@ -215,7 +215,7 @@ fn ladder(v: Option<&Value>) -> Vec<(u64, u64)> {
 }
 
 pub async fn price(web: Option<&Web>, app: AppId, hash_name: &str, currency: i32, country: &str, full: bool) -> Result<model::MarketPrice, String> {
-    let fallback = reqwest::Client::new();
+    let fallback = crate::http();
     let http = web.map(|w| &w.http).unwrap_or(&fallback);
     let currency = if currency > 0 { currency } else { 1 };
     let mut out = model::MarketPrice { currency, ..Default::default() };

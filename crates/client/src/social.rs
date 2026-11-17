@@ -207,7 +207,7 @@ pub fn parse_badges(body: &str) -> model::Badges {
 
 /// A game's Workshop tag groups, as its Workshop page declares them.
 pub async fn workshop_tags(app: model::AppId, language: &str) -> Result<Vec<model::WorkshopTagCategory>, String> {
-    let body = reqwest::Client::new()
+    let body = crate::http()
         .get(format!("{COMMUNITY}/workshop/browse/"))
         .query(&[("appid", app.to_string()), ("l", language.to_string())])
         .send()

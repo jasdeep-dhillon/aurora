@@ -559,6 +559,24 @@ async fn online(
             if !st.shader_jobs.contains_key(&app_id) && !st.running.contains_key(&app_id) {
                 launch::apply_steam_prefs();
             }
+            // First launch: the game's install script (registry keys,
+            // anti-cheat setup…), like Steam's "Running install script".
+            // The official client runs its own.
+            let script = st
+                .apps
+                .get(&app_id)
+                .filter(|a| !st.running.contains_key(&app_id) && !st.shader_jobs.contains_key(&app_id) && !matches!(launch::mode(a, &install_dir), crate::LaunchMode::OfficialSteam { .. }))
+                .and_then(|a| crate::installscript::pending(a, &install_dir));
+            if let Some(p) = script {
+                sink(Event::InstallScript { app_id, step: Some(String::new()) });
+                let (sink, tx) = (sink.clone(), launch_tx.clone());
+                tokio::task::spawn_blocking(move || {
+                    crate::installscript::run(p, |s| sink(Event::InstallScript { app_id, step: Some(s.to_string()) }));
+                    sink(Event::InstallScript { app_id, step: None });
+                    // Back through launch_now: shaders, then the game.
+                    let _ = tx.send((app_id, install_dir, args));
+                });
+            } else {
             #[cfg(not(windows))]
             {
                 let busy = st.running.contains_key(&app_id) || st.shader_jobs.contains_key(&app_id);
@@ -598,6 +616,7 @@ async fn online(
             #[cfg(windows)]
             {
                 let _ = st.launch(app_id, &install_dir, &args, sink, &exit_tx);
+            }
             }
         }};
     }
@@ -1274,9 +1293,9 @@ impl Online {
                     .map(|l| (l.package_id(), l.access_token()))
                     .collect();
                 sink(Event::Licenses { count: licenses.len() });
-                let (conn, tx, sink) = (self.conn.clone(), apps_tx.clone(), sink.clone());
+                let (conn, tx, sink, me) = (self.conn.clone(), apps_tx.clone(), sink.clone(), self.me);
                 tokio::spawn(async move {
-                    match pics::resolve(&conn, &licenses).await {
+                    match pics::resolve(&conn, &licenses, me).await {
                         Ok(apps) => {
                             let _ = tx.send(apps);
                         }

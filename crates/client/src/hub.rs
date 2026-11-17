@@ -692,7 +692,7 @@ async fn file_comments(web: &Web, file_id: u64, creator: SteamId, start: u32) ->
 }
 
 async fn news(app_id: AppId, count: u32) -> Result<Vec<News>, String> {
-    let v: serde_json::Value = reqwest::Client::new()
+    let v: serde_json::Value = crate::http()
         .get("https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/")
         .query(&[("appid", app_id.to_string()), ("count", count.to_string()), ("maxlength", "0".into()), ("format", "json".into())])
         .send()
