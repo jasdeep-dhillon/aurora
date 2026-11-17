@@ -15,7 +15,11 @@ mod offline_ui;
 mod overlay;
 mod shell;
 mod tray;
+#[cfg(target_os = "linux")]
+mod tray_linux;
 mod updater;
+#[cfg(target_os = "linux")]
+mod wayland_activate;
 
 fn main() -> eframe::Result {
     tune_malloc();
