@@ -427,8 +427,14 @@ pub fn spawn_non_steam(exe: &str, args: &str) -> Result<Option<Child>, String> {
 fn command(app: &OwnedApp, install_dir: &Path, extra_args: &str) -> Result<Command, String> {
     #[cfg(not(windows))]
     {
-        let mut cmd = linux::plan(app, install_dir)?.command(app, install_dir);
+        let plan = linux::plan(app, install_dir)?;
+        let mut cmd = plan.command(app, install_dir);
         cmd.args(split_args(extra_args));
+        // Mono games can't start under a path with a colon; see `colon`.
+        #[cfg(target_os = "linux")]
+        if !plan.uses_proton() {
+            cmd = colon::redirect(cmd, install_dir);
+        }
         return Ok(cmd);
     }
     #[allow(unreachable_code)]
@@ -1566,6 +1572,10 @@ pub fn proton_user_dir(app: &OwnedApp, install_dir: &Path) -> Option<PathBuf> {
 pub(crate) fn in_prefix(app: &OwnedApp, install_dir: &Path, program: &str, args: &[String]) -> Option<Command> {
     linux::plan(app, install_dir).ok()?.in_prefix(app, install_dir, program, args)
 }
+
+#[cfg(target_os = "linux")]
+#[path = "launch_colon.rs"]
+mod colon;
 
 #[cfg(not(windows))]
 mod linux {
