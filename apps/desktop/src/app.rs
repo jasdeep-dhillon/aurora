@@ -22,6 +22,8 @@ pub struct Prefs {
     pub auto_login: Option<String>,
     /// Interface language code; `None` follows the system.
     pub language: Option<String>,
+    /// The first-launch language question was answered.
+    pub language_asked: bool,
     pub close_to_tray: bool,
     /// Show the account picker at startup instead of signing in automatically.
     pub ask_account: bool,
@@ -89,6 +91,7 @@ impl Default for Prefs {
             overlay_enabled: true,
             auto_login: None,
             language: None,
+            language_asked: false,
             close_to_tray: true,
             ask_account: false,
             auto_updates: true,
@@ -134,6 +137,8 @@ pub struct SteamApp {
     pub registry: Registry,
     pub prefs: Prefs,
     pub saved: Vec<SavedAccount>,
+    /// First launch: the language picker is showing, with this one picked.
+    pub ask_language: Option<i18n::Lang>,
     pub login: crate::login::LoginForm,
     pub toasts: Vec<Toast>,
     pub friend_filter: String,
@@ -185,7 +190,10 @@ impl SteamApp {
         let lang_flag = std::env::args().find_map(|a| a.strip_prefix("--lang=").map(String::from));
         // The language picked in setup counts until one is chosen in the app.
         let from_setup = || std::fs::read_to_string(client::store::config_dir().join("language")).ok().map(|s| s.trim().to_string());
+        // First launch (nothing chosen anywhere yet): ask before sign-in.
+        let first_launch = lang_flag.is_none() && prefs.language.is_none() && !prefs.language_asked && from_setup().is_none();
         i18n::set_language(lang_flag.or_else(|| prefs.language.clone()).or_else(from_setup).as_deref().and_then(i18n::Lang::from_code).unwrap_or_else(i18n::Lang::detect));
+        let ask_language = first_launch.then(i18n::language);
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(3)
@@ -246,6 +254,8 @@ impl SteamApp {
         }
 
         let saved = client::store::load();
+        // Someone who already signed in here has used the app before.
+        let ask_language = ask_language.filter(|_| saved.is_empty());
         let demo = std::env::args().any(|a| a == "--demo");
         let mut auto_account = None;
         if demo {
@@ -270,6 +280,7 @@ impl SteamApp {
             registry,
             prefs,
             saved,
+            ask_language,
             login: Default::default(),
             toasts: Vec::new(),
             friend_filter: String::new(),
