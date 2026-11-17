@@ -258,6 +258,17 @@ pub async fn install(cdn: Arc<Cdn>, dir: &Path, jobs: Vec<DepotJob>, progress: A
             }
         }
     }
+    // Programs the manifest marks executable (a Linux build's game binary,
+    // its launcher): new files and ones already there, so an install from
+    // before this gets fixed by its next update or check.
+    #[cfg(unix)]
+    for job in &jobs {
+        for f in job.manifest.files.iter().filter(|f| f.executable && !f.directory && f.link.is_none()) {
+            if let Err(e) = make_executable(&dir.join(&f.name)) {
+                tracing::warn!("couldn't mark {} executable: {e}", f.name);
+            }
+        }
+    }
     report.reused_bytes = reused.load(Ordering::Relaxed);
     report.downloaded_bytes = progress.downloaded.load(Ordering::Relaxed);
     progress.set_phase(Phase::Done);
@@ -310,6 +321,18 @@ fn write_at(path: &Path, offset: u64, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Add the x bits wherever the r bits are (like `chmod +x` with a umask).
+#[cfg(unix)]
+fn make_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path)?.permissions().mode();
+    let want = mode | ((mode & 0o444) >> 2);
+    if want != mode {
+        fs::set_permissions(path, fs::Permissions::from_mode(want))?;
+    }
+    Ok(())
+}
+
 fn finish_file(path: &Path) -> Result<()> {
     let part = part_path(path);
     if path.exists() {
@@ -317,4 +340,18 @@ fn finish_file(path: &Path) -> Result<()> {
     }
     fs::rename(&part, path)?;
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod exec_tests {
+    #[test]
+    fn marks_programs_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::env::temp_dir().join(format!("sir-exec-{}", std::process::id()));
+        std::fs::write(&p, b"x").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::make_executable(&p).unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o755);
+        let _ = std::fs::remove_file(p);
+    }
 }

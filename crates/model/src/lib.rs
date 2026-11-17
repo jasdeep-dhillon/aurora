@@ -552,6 +552,9 @@ pub struct InventoryItem {
     pub commodity: bool,
     /// The game's own market fee (e.g. 0.10); Steam's is separate.
     pub market_fee: Option<f64>,
+    /// A trading card: its game, and whether it's foil (for its card set).
+    #[serde(default)]
+    pub card_set: Option<(AppId, bool)>,
 }
 
 /// What an item sells for on the Community Market, in the wallet currency.
@@ -672,6 +675,77 @@ pub struct Comment {
 pub struct Comments {
     pub items: Vec<Comment>,
     pub total: u32,
+}
+
+/// A review on a profile (its Reviews page).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UserReview {
+    pub app_id: AppId,
+    /// The game's small capsule image.
+    pub capsule: Option<String>,
+    pub recommended: bool,
+    /// e.g. "1,083.3 hrs on record (223.8 hrs at review time)".
+    pub hours: String,
+    /// e.g. "Posted 24 March, 2017."
+    pub posted: String,
+    pub text: String,
+    /// e.g. "63 people found this review helpful".
+    pub helpful: String,
+    pub url: String,
+}
+
+/// One page (10) of a profile's reviews.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UserReviews {
+    pub items: Vec<UserReview>,
+    /// All reviews on the profile.
+    pub total: u32,
+}
+
+/// A Steam group a profile belongs to.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UserGroup {
+    pub name: String,
+    pub url: String,
+    pub avatar: Option<String>,
+    /// e.g. "14 Members".
+    pub members: String,
+    /// e.g. "4 Online".
+    pub online: String,
+}
+
+/// A game's trading-card collection on a profile (its badge's page).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CardSet {
+    /// e.g. "The Witcher 2 Badge".
+    pub title: String,
+    /// The badge reached so far (`None` before the first craft).
+    pub badge: Option<CardBadge>,
+    /// e.g. "29 hrs on record".
+    pub playtime: String,
+    /// e.g. "No card drops remaining" (only on your own profile).
+    pub drops: String,
+    pub cards: Vec<Card>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CardBadge {
+    pub name: String,
+    pub icon: Option<String>,
+    /// e.g. "Level 1, 100 XP".
+    pub level: String,
+    pub unlocked: String,
+}
+
+/// One card of a set.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Card {
+    pub name: String,
+    pub image: String,
+    /// How many the profile has (0 = missing).
+    pub count: u32,
+    /// e.g. "1 of 8, Series 1".
+    pub series: String,
 }
 
 /// A badge on a profile.
