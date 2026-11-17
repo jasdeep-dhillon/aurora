@@ -313,8 +313,8 @@ impl Library {
 
     fn tab_general(&mut self, ui: &mut Ui, t: &Theme, app: AppId, owned: Option<&OwnedApp>) {
         let s = self.settings_mut(app);
-        section(ui, t, t!("Launch options"), t!("Extra arguments added when the game starts."), |ui| {
-            ui.add(egui::TextEdit::singleline(&mut s.args).hint_text("-novid -fullscreen").desired_width(f32::INFINITY).margin(vec2(10.0, 8.0))).with_edit_menu();
+        section(ui, t, t!("Launch options"), t!("Extra arguments added when the game starts. As in Steam, %command% stands for the game: MANGOHUD=1 gamemoderun %command% -novid"), |ui| {
+            ui.add(egui::TextEdit::singleline(&mut s.args).hint_text("MANGOHUD=1 %command% -novid").desired_width(f32::INFINITY).margin(vec2(10.0, 8.0))).with_edit_menu();
         });
         section(ui, t, t!("In-game overlay"), t!("Open friends and chat with Shift+Tab while playing."), |ui| {
             ui.add(crate::builtin::settings::toggle(&mut s.overlay_on));

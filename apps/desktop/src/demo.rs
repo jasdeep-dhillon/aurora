@@ -14,6 +14,12 @@ pub fn events(local: &local::LocalState) -> Vec<Event> {
             apps.push(app(id, name));
         }
     }
+    // Windows and Linux builds, so the install dialog offers the choice
+    // (`--page=library --arg=install:413150`).
+    if let Some(a) = apps.iter_mut().find(|a| a.app_id == 413150) {
+        let depot = |id, os: &str, size| model::DepotInfo { id, os: os.into(), manifests: vec![("public".into(), 1, size)], ..Default::default() };
+        a.depots = vec![depot(413151, "windows", 640_000_000), depot(413153, "linux", 655_000_000)];
+    }
 
     let friends = [
         ("Ferris", PersonaState::Online, Some(620)),
