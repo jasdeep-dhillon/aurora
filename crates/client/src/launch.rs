@@ -639,8 +639,53 @@ pub fn kill_in_folder(dir: &Path) {
 }
 
 pub fn wait(app_id: AppId, mut child: Child) -> AppId {
-    let _ = child.wait();
+    wait_all(&mut child);
     app_id
+}
+
+/// Wait for a game: its first process, then (Linux) everything it started
+/// that's still in its process group, like Steam's reaper. Launchers
+/// (Cities: Skylines' Paradox Launcher, War Thunder's) start the game and
+/// exit at once; the game, and the Steam host it needs, must outlive them.
+pub fn wait_all(child: &mut Child) {
+    let _ = child.wait();
+    #[cfg(not(windows))]
+    {
+        // A launcher handing over can leave its group empty for a moment
+        // (dowser: none for ~0.1 s, then the Paradox Launcher), so the game
+        // only counts as closed once the group stays empty for a while.
+        const GRACE: Duration = Duration::from_secs(5);
+        let group = child.id();
+        let mut logged = false;
+        let mut empty_since: Option<Instant> = None;
+        loop {
+            if group_alive(group) {
+                if !logged {
+                    tracing::info!("process {group} exited; waiting for the processes it started");
+                    logged = true;
+                }
+                empty_since = None;
+            } else if empty_since.get_or_insert_with(Instant::now).elapsed() >= GRACE {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+}
+
+/// Any live (not zombie) process in process group `pgid`?
+#[cfg(not(windows))]
+fn group_alive(pgid: u32) -> bool {
+    let Ok(dir) = std::fs::read_dir("/proc") else { return false };
+    dir.flatten().filter(|e| e.file_name().to_str().is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))).any(|e| {
+        let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else { return false };
+        // `pid (comm) state ppid pgrp …`; comm may hold spaces or parentheses.
+        let Some((_, rest)) = stat.rsplit_once(')') else { return false };
+        let mut f = rest.split_whitespace();
+        let state = f.next();
+        let pgrp = f.nth(1).and_then(|v| v.parse::<u32>().ok());
+        pgrp == Some(pgid) && state != Some("Z") && state != Some("X")
+    })
 }
 
 // ------------------------------------------------- the registry swap
@@ -1175,7 +1220,7 @@ pub fn run_through_host(
         }
     };
     started();
-    let _ = child.wait();
+    wait_all(&mut child);
 
     // Game closed: drop the pipe so the host signs out and exits.
     tracing::info!("{} closed; shutting down the headless Steam host", app.name);
@@ -2479,6 +2524,45 @@ mod tests {
         assert!(!has_steam_drm(&dir.join("missing.exe")));
         assert_eq!(pe_is_64bit(&wrapped), Some(true));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A launcher that starts the game in the background and exits.
+    #[cfg(not(windows))]
+    #[test]
+    fn waits_for_what_a_launcher_started() {
+        use std::os::unix::process::CommandExt;
+        let mut c = Command::new("sh");
+        c.args(["-c", "sleep 2 & exit 0"]).process_group(0);
+        let mut child = c.spawn().unwrap();
+        let t = Instant::now();
+        super::wait_all(&mut child);
+        assert!(t.elapsed() >= Duration::from_millis(1500), "returned after {:?}", t.elapsed());
+        assert!(!super::group_alive(child.id()));
+    }
+
+    /// The real hand-off: Cities: Skylines' dowser leaves its group empty for
+    /// a moment before the Paradox Launcher shows up in it. Needs the game
+    /// (`AURORA_TEST_DOWSER=<game folder>`) and a display; kills the launcher.
+    #[cfg(not(windows))]
+    #[test]
+    #[ignore]
+    fn waits_through_a_launcher_hand_off() {
+        use std::os::unix::process::CommandExt;
+        let Ok(game) = std::env::var("AURORA_TEST_DOWSER") else { return };
+        let mut c = Command::new(std::path::Path::new(&game).join("dowser"));
+        c.current_dir(&game).process_group(0);
+        let mut child = c.spawn().unwrap();
+        let group = child.id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            super::wait_all(&mut child);
+            let _ = tx.send(());
+        });
+        // Still "running" well after dowser exits: the launcher is up.
+        assert!(rx.recv_timeout(Duration::from_secs(10)).is_err(), "treated the game as closed during the hand-off");
+        assert!(super::group_alive(group));
+        let _ = Command::new("kill").args(["-KILL", &format!("-{group}")]).status();
+        assert!(rx.recv_timeout(Duration::from_secs(15)).is_ok(), "didn't notice the launcher closing");
     }
 
     #[cfg(not(windows))]
