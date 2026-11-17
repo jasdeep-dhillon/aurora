@@ -23,15 +23,35 @@ pub struct InstallRequest {
     /// DLC the user turned on after installing: added on this update.
     #[serde(default)]
     pub add_dlc: Vec<AppId>,
+    /// Which build to download: "windows" or "linux". Empty: keep what's
+    /// installed (updates), else Windows.
+    #[serde(default)]
+    pub platform: String,
 }
 
-/// Choose the depots a Windows 64-bit install needs. `installed` = the
+/// The build an install or update downloads: the one asked for, else the
+/// one on disk (a Linux install stays Linux), else Windows.
+pub fn platform_for<'a>(app: &OwnedApp, req: &'a InstallRequest, installed: &HashSet<u32>) -> &'a str {
+    if !req.platform.is_empty() {
+        return &req.platform;
+    }
+    let on = |os: &str| app.depots.iter().any(|d| installed.contains(&d.id) && d.os.split(',').any(|o| o.trim() == os));
+    if on("linux") && !on("windows") { "linux" } else { "windows" }
+}
+
+/// Does the game have its own depots for `os` (a build for that system)?
+pub fn has_build(app: &OwnedApp, os: &str) -> bool {
+    app.depots.iter().any(|d| d.dlc_app.is_none() && !d.manifests.is_empty() && d.os.split(',').any(|o| o.trim() == os))
+}
+
+/// Choose the depots a 64-bit install of the chosen build needs (see `platform_for`). `installed` = the
 /// depots on disk now (empty for a new install). Like Steam, a new install
 /// gets the owned DLC, and an update only keeps the DLC already installed
 /// (plus any the user turned on), so owned-but-uninstalled DLC never turns
 /// an update into a multi-gigabyte download.
 pub fn pick_depots<'a>(app: &'a OwnedApp, owned: &HashSet<AppId>, req: &InstallRequest, installed: &HashSet<u32>) -> Vec<&'a model::DepotInfo> {
-    let os_ok = |d: &&model::DepotInfo| d.os.is_empty() || d.os.split(',').any(|o| o.trim() == "windows");
+    let platform = platform_for(app, req, installed);
+    let os_ok = |d: &&model::DepotInfo| d.os.is_empty() || d.os.split(',').any(|o| o.trim() == platform);
     let lang_ok = |d: &&model::DepotInfo| d.language.is_empty() || d.language == req.language;
     // An update keeps every depot already installed (its language, 32 or
     // 64-bit), like Steam; the OS/language/arch choice is for new content.
@@ -163,7 +183,8 @@ pub async fn run(
     let on_disk: HashSet<u32> = old.iter().map(|(d, _)| *d).collect();
     let depots = pick_depots(&app, &owned, &req, &on_disk);
     if depots.is_empty() {
-        return Err(format!("{} has no downloadable content for Windows", app.name));
+        let system = if platform_for(&app, &req, &on_disk) == "linux" { "Linux" } else { "Windows" };
+        return Err(format!("{} has no downloadable content for {system}", app.name));
     }
     let mut servers = content_servers(&conn, cell_id).await?;
     // A host the player picked goes first (the others stay as fallbacks).
@@ -423,7 +444,7 @@ mod tests {
             depots: vec![d(11, "windows", "64", "", None), d(12, "windows", "32", "", None), d(13, "linux", "", "", None), d(14, "", "", "german", None), d(15, "windows", "", "", Some(99))],
             ..Default::default()
         };
-        let req = InstallRequest { app_id: 10, library: ".".into(), steam_root: ".".into(), branch: "public".into(), language: "english".into(), skip_dlc: vec![], add_dlc: vec![] };
+        let req = InstallRequest { app_id: 10, library: ".".into(), steam_root: ".".into(), branch: "public".into(), language: "english".into(), skip_dlc: vec![], add_dlc: vec![], platform: String::new() };
         let fresh = HashSet::new();
         let ids: Vec<u32> = pick_depots(&app, &HashSet::new(), &req, &fresh).iter().map(|d| d.id).collect();
         assert_eq!(ids, vec![11]);
@@ -452,6 +473,16 @@ mod tests {
         let with32: HashSet<u32> = [11, 12].into_iter().collect();
         let ids: Vec<u32> = pick_depots(&app, &HashSet::new(), &req, &with32).iter().map(|d| d.id).collect();
         assert!(ids.contains(&12), "kept the installed 32-bit depot: {ids:?}");
+        // The Linux build when asked for, and its updates stay Linux.
+        let linux = InstallRequest { platform: "linux".into(), ..req.clone() };
+        let ids: Vec<u32> = pick_depots(&app, &HashSet::new(), &linux, &fresh).iter().map(|d| d.id).collect();
+        assert_eq!(ids, vec![13]);
+        let on_disk: HashSet<u32> = [13].into_iter().collect();
+        assert_eq!(platform_for(&app, &req, &on_disk), "linux");
+        let ids: Vec<u32> = pick_depots(&app, &HashSet::new(), &req, &on_disk).iter().map(|d| d.id).collect();
+        assert_eq!(ids, vec![13]);
+        assert_eq!(platform_for(&app, &req, &installed), "windows");
+        assert!(has_build(&app, "linux") && has_build(&app, "windows") && !has_build(&app, "macos"));
     }
 }
 
@@ -466,7 +497,7 @@ mod cancel_tests {
         std::fs::create_dir_all(game.join("data")).unwrap();
         std::fs::write(game.join("game.exe"), b"done").unwrap();
         std::fs::write(game.join("data").join("big.pak.sirpart"), b"half").unwrap();
-        let req = InstallRequest { app_id: 1, library: lib.clone(), steam_root: lib.clone(), branch: "public".into(), language: "english".into(), skip_dlc: vec![], add_dlc: vec![] };
+        let req = InstallRequest { app_id: 1, library: lib.clone(), steam_root: lib.clone(), branch: "public".into(), language: "english".into(), skip_dlc: vec![], add_dlc: vec![], platform: String::new() };
         // An update: the finished file stays, the unfinished one goes.
         remove_unfinished(&req, &game, false);
         assert!(game.join("game.exe").exists());
