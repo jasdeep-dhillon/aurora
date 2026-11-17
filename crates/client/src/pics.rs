@@ -7,7 +7,8 @@ use crate::Error;
 use model::{AppId, LaunchOption, OwnedApp};
 use net::{Connection, emsg};
 use proto::*;
-use std::collections::{BTreeSet, HashMap};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
 
 type Result<T> = std::result::Result<T, Error>;
@@ -15,17 +16,136 @@ type Result<T> = std::result::Result<T, Error>;
 /// App types shown in the library.
 const LIBRARY_TYPES: &[&str] = &["game", "demo", "application", "tool", "music", "video", "dlc"];
 
-pub async fn resolve(conn: &Connection, licenses: &[(u32, u64)]) -> Result<Vec<OwnedApp>> {
+/// Bump when [`parse_app`] reads something new, so saved libraries are
+/// fetched again in full instead of missing the new field.
+const PARSE_VERSION: u32 = 1;
+/// A full refresh at least this often, whatever the change numbers say.
+const FULL_EVERY: u64 = 7 * 24 * 60 * 60;
+
+/// What the last library refresh found, so the next sign-in only asks
+/// Steam for what changed since (PICS change numbers, like Steam's own
+/// appinfo cache) instead of every app the account owns.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct Cache {
+    parse_version: u32,
+    app_version: String,
+    /// Unix seconds of the last full refresh.
+    full_at: u64,
+    change_number: u32,
+    /// Each owned package's app ids.
+    packages: BTreeMap<u32, Vec<AppId>>,
+    /// Library apps, as resolved.
+    apps: Vec<OwnedApp>,
+    /// Other app ids already looked at (not shown in the library).
+    others: BTreeSet<AppId>,
+}
+
+fn cache_path(steam_id: model::SteamId) -> std::path::PathBuf {
+    crate::offline::dir(steam_id).join("pics.json")
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// The library for these licenses. With a saved library, only the packages
+/// and apps that changed since are fetched (falls back to everything).
+pub async fn resolve(conn: &Connection, licenses: &[(u32, u64)], steam_id: model::SteamId) -> Result<Vec<OwnedApp>> {
     let started = std::time::Instant::now();
-    let app_ids = package_apps(conn, licenses).await?;
-    tracing::info!("{} licenses -> {} app ids", licenses.len(), app_ids.len());
-    let ids: Vec<AppId> = app_ids.into_iter().collect();
-    let tokens = app_tokens(conn, &ids).await?;
-    let mut apps = app_info(conn, &ids, &tokens).await?;
-    apps.retain(|a| LIBRARY_TYPES.contains(&a.kind.as_str()));
+    let path = cache_path(steam_id);
+    let saved: Option<Cache> = crate::offline::read(&path)
+        .filter(|c: &Cache| c.parse_version == PARSE_VERSION && c.app_version == env!("CARGO_PKG_VERSION") && c.change_number != 0)
+        .filter(|c| unix_now().saturating_sub(c.full_at) < FULL_EVERY);
+    let changes = changes_since(conn, saved.as_ref().map_or(0, |c| c.change_number)).await;
+    let current = changes.as_ref().map(|c| c.current_change_number()).unwrap_or(0);
+    let (cache, how) = match (saved, changes) {
+        (Some(c), Ok(ch)) if !(ch.force_full_update() || ch.force_full_app_update() || ch.force_full_package_update()) => {
+            let (c, fetched) = update(conn, licenses, c, &ch).await?;
+            (c, format!("{fetched} changed (change {})", ch.current_change_number()))
+        }
+        _ => (full(conn, licenses).await?, "full refresh".to_string()),
+    };
+    let mut cache = cache;
+    cache.change_number = current;
+    cache.parse_version = PARSE_VERSION;
+    cache.app_version = env!("CARGO_PKG_VERSION").to_string();
+    let mut apps = cache.apps.clone();
+    if current != 0 {
+        tokio::task::spawn_blocking(move || crate::offline::write(&path, &cache));
+    }
     apps.sort_by_key(|a| a.name.to_lowercase());
-    tracing::info!("library: {} apps in {:.1} s", apps.len(), started.elapsed().as_secs_f32());
+    tracing::info!("library: {} apps in {:.1} s ({how})", apps.len(), started.elapsed().as_secs_f32());
     Ok(apps)
+}
+
+async fn changes_since(conn: &Connection, since: u32) -> Result<CMsgClientPicsChangesSinceResponse> {
+    let req = CMsgClientPicsChangesSinceRequest { since_change_number: Some(since), send_app_info_changes: Some(true), send_package_info_changes: Some(true), ..Default::default() };
+    Ok(conn.request(emsg::CLIENT_PICS_CHANGES_SINCE_REQUEST, &req).await?.body()?)
+}
+
+/// Everything, from scratch.
+async fn full(conn: &Connection, licenses: &[(u32, u64)]) -> Result<Cache> {
+    let packages = package_apps(conn, licenses).await?;
+    let ids: BTreeSet<AppId> = packages.values().flatten().copied().collect();
+    tracing::info!("{} licenses -> {} app ids", licenses.len(), ids.len());
+    let mut cache = Cache { packages, full_at: unix_now(), ..Default::default() };
+    fetch_apps(conn, &mut cache, ids.into_iter().collect()).await?;
+    Ok(cache)
+}
+
+/// Only what changed: new or changed packages, then new or changed apps.
+async fn update(conn: &Connection, licenses: &[(u32, u64)], mut cache: Cache, ch: &CMsgClientPicsChangesSinceResponse) -> Result<(Cache, usize)> {
+    let changed_packages: HashSet<u32> = ch.package_changes.iter().map(|p| p.packageid()).collect();
+    let stale = stale_packages(&mut cache, licenses, &changed_packages);
+    if !stale.is_empty() {
+        let fresh = package_apps(conn, &stale).await?;
+        for (p, _) in &stale {
+            cache.packages.insert(*p, fresh.get(p).cloned().unwrap_or_default());
+        }
+    }
+    let changed_apps: HashSet<AppId> = ch.app_changes.iter().map(|a| a.appid()).collect();
+    let fetch = apps_to_fetch(&mut cache, &changed_apps);
+    let n = fetch.len();
+    if n > 0 {
+        fetch_apps(conn, &mut cache, fetch).await?;
+    }
+    Ok((cache, n))
+}
+
+/// Forget packages no longer owned; the owned ones that are new or changed.
+fn stale_packages(cache: &mut Cache, licenses: &[(u32, u64)], changed: &HashSet<u32>) -> Vec<(u32, u64)> {
+    let owned: HashSet<u32> = licenses.iter().map(|l| l.0).collect();
+    cache.packages.retain(|p, _| owned.contains(p));
+    licenses.iter().copied().filter(|(p, _)| !cache.packages.contains_key(p) || changed.contains(p)).collect()
+}
+
+/// Forget apps no longer owned and changed ones; the apps to fetch (new or changed).
+fn apps_to_fetch(cache: &mut Cache, changed: &HashSet<AppId>) -> Vec<AppId> {
+    let ids: BTreeSet<AppId> = cache.packages.values().flatten().copied().collect();
+    let known: HashSet<AppId> = cache.apps.iter().map(|a| a.app_id).chain(cache.others.iter().copied()).collect();
+    let fetch: Vec<AppId> = ids.iter().copied().filter(|id| !known.contains(id) || changed.contains(id)).collect();
+    let refetch: HashSet<AppId> = fetch.iter().copied().collect();
+    cache.apps.retain(|a| ids.contains(&a.app_id) && !refetch.contains(&a.app_id));
+    cache.others.retain(|id| ids.contains(id) && !refetch.contains(id));
+    fetch
+}
+
+/// Fetch these apps' info into the cache: library apps, and the rest as
+/// "seen" so they aren't asked for again until they change.
+async fn fetch_apps(conn: &Connection, cache: &mut Cache, ids: Vec<AppId>) -> Result<()> {
+    let tokens = app_tokens(conn, &ids).await?;
+    let apps = app_info(conn, &ids, &tokens).await?;
+    let got: HashSet<AppId> = apps.iter().map(|a| a.app_id).collect();
+    for a in apps {
+        if LIBRARY_TYPES.contains(&a.kind.as_str()) {
+            cache.apps.push(a);
+        } else {
+            cache.others.insert(a.app_id);
+        }
+    }
+    cache.others.extend(ids.into_iter().filter(|id| !got.contains(id)));
+    Ok(())
 }
 
 fn pending(p: &net::Packet) -> bool {
@@ -44,8 +164,9 @@ async fn product_info(
     replies.iter().map(|p| p.body().map_err(Error::from)).collect()
 }
 
-async fn package_apps(conn: &Connection, licenses: &[(u32, u64)]) -> Result<BTreeSet<AppId>> {
-    let mut out = BTreeSet::new();
+/// Each package's app ids.
+async fn package_apps(conn: &Connection, licenses: &[(u32, u64)]) -> Result<BTreeMap<u32, Vec<AppId>>> {
+    let mut out: BTreeMap<u32, Vec<AppId>> = BTreeMap::new();
     for chunk in licenses.chunks(500) {
         let req = CMsgClientPicsProductInfoRequest {
             packages: chunk
@@ -60,11 +181,13 @@ async fn package_apps(conn: &Connection, licenses: &[(u32, u64)]) -> Result<BTre
         for resp in product_info(conn, &req).await? {
             for pkg in resp.packages {
                 // Buffer is a u32 package id followed by binary KV.
+                let id = pkg.packageid();
                 let Some(buf) = pkg.buffer.filter(|b| b.len() > 4) else { continue };
                 let Ok(kv) = vdf::binary::parse(&buf[4..]) else { continue };
+                let list = out.entry(id).or_default();
                 for (_, v) in kv.iter() {
                     let Some(apps) = v.get("appids").and_then(|a| a.as_obj()) else { continue };
-                    out.extend(apps.iter().filter_map(|(_, a)| a.as_str()?.parse::<AppId>().ok()));
+                    list.extend(apps.iter().filter_map(|(_, a)| a.as_str()?.parse::<AppId>().ok()));
                 }
             }
         }
@@ -367,5 +490,47 @@ mod tests {
         assert_eq!(app.name, "Team Fortress 2");
         assert_eq!(app.kind, "game");
         assert_eq!(app.launch[0].executable, "tf_win64.exe");
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    fn app(id: AppId) -> OwnedApp {
+        OwnedApp { app_id: id, kind: "game".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn only_new_or_changed_things_are_fetched() {
+        let mut cache = Cache {
+            packages: BTreeMap::from([(1, vec![10, 11]), (2, vec![20]), (3, vec![30])]),
+            apps: vec![app(10), app(11), app(20), app(30)],
+            others: BTreeSet::from([12]),
+            ..Default::default()
+        };
+        cache.packages.get_mut(&1).unwrap().push(12);
+        // Package 3 refunded, package 4 new, package 2 changed.
+        let licenses = [(1, 0), (2, 0), (4, 0)];
+        let stale = stale_packages(&mut cache, &licenses, &HashSet::from([2]));
+        assert_eq!(stale, vec![(2, 0), (4, 0)]);
+        assert!(!cache.packages.contains_key(&3));
+        // Package 2 now also has 21; package 4 brings 40.
+        cache.packages.insert(2, vec![20, 21]);
+        cache.packages.insert(4, vec![40]);
+        // App 11 changed upstream; app 99 changed but isn't ours.
+        let fetch = apps_to_fetch(&mut cache, &HashSet::from([11, 99]));
+        assert_eq!(fetch, vec![11, 21, 40]);
+        let kept: Vec<AppId> = cache.apps.iter().map(|a| a.app_id).collect();
+        assert_eq!(kept, vec![10, 20], "30 is gone with its package, 11 is fetched again");
+        assert_eq!(cache.others, BTreeSet::from([12]));
+    }
+
+    #[test]
+    fn nothing_changed_fetches_nothing() {
+        let mut cache = Cache { packages: BTreeMap::from([(1, vec![10])]), apps: vec![app(10)], ..Default::default() };
+        assert!(stale_packages(&mut cache, &[(1, 0)], &HashSet::new()).is_empty());
+        assert!(apps_to_fetch(&mut cache, &HashSet::new()).is_empty());
+        assert_eq!(cache.apps.len(), 1);
     }
 }
