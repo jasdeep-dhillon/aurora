@@ -183,7 +183,7 @@
 "General" = "Общие"
 "DLC" = "DLC"
 "Installed files" = "Файлы"
-"Extra arguments added when the game starts." = "Дополнительные аргументы при запуске игры."
+"Extra arguments added when the game starts. As in Steam, %command% stands for the game: MANGOHUD=1 gamemoderun %command% -novid" = "Дополнительные аргументы при запуске игры. Как в Steam, %command% означает саму игру: MANGOHUD=1 gamemoderun %command% -novid"
 "You don't own any DLC for this game." = "У вас нет DLC для этой игры."
 "DLC {id}" = "DLC {id}"
 "Turned-off DLC is skipped when the game is installed or updated. Your choice is saved now and used by the download manager." = "Отключённые DLC не скачиваются при установке и обновлении. Выбор сохраняется сразу и используется менеджером загрузок."
