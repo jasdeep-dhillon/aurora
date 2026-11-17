@@ -175,6 +175,7 @@ impl State {
                 self.reviews.insert((*steam_id, *page), result.clone());
             }
             Event::StoreRecommendations(r) => self.store_recs = Some(r.clone()),
+            Event::TradeOfferSent { .. } => {}
             Event::Groups { steam_id, result } => {
                 self.groups.insert(*steam_id, result.clone());
             }
@@ -194,7 +195,7 @@ impl State {
             Event::AppNames(list) => self.app_names.extend(list.iter().cloned()),
             Event::Email { address, validated } => self.email = Some((address.clone(), *validated)),
             Event::Regions(_) => {}
-            Event::SteamCollections(_) => {}
+            Event::SteamCollections(_) | Event::SteamCollectionsSaved { .. } => {}
             Event::ShaderCompile { app_id, done, total } => {
                 self.shader_compiling.insert(*app_id, (*done, *total));
             }

@@ -13,6 +13,8 @@ use ui::{Theme, icons, widgets as w};
 
 #[path = "inventory_market.rs"]
 mod market;
+#[path = "inventory_trade.rs"]
+mod trade;
 
 /// Games with community inventories: (app, context, name). 753/6 is Steam's
 /// own inventory (trading cards, backgrounds, emoticons, boosters).
@@ -71,7 +73,8 @@ pub struct Inventory {
     full_asked: HashSet<(AppId, String)>,
     next_price_at: f64,
     sell: Option<market::SellDialog>,
-    gift: Option<u64>,
+    /// The trade offer being put together.
+    trade: Option<trade::TradeDialog>,
     listings_requested: bool,
 }
 
@@ -421,12 +424,13 @@ impl Extension for Inventory {
                 });
             });
             self.sell_dialog(ui, &t, ctx);
-            self.gift_picker(ui, &t, ctx);
+            self.trade_dialog(ui, &t, ctx);
         });
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut Ctx) {
         match event {
+            Event::TradeOfferSent { result, .. } => self.trade_sent(ctx, result),
             Event::ItemListed { result, .. } => {
                 match result {
                     Ok(true) => ctx.toast(t!("Listed. Confirm the sale in the Steam Mobile app to put it on the market.")),

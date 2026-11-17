@@ -837,6 +837,20 @@ async fn online(
                         });
                     }
                 }
+                Some(Command::CloudDelete { app_id, install_dir, names }) => {
+                    if let Some(target) = st.cloud_target_any(app_id, &install_dir) {
+                        sink(Event::CloudSyncing { app_id });
+                        let (conn, sink) = (conn.clone(), sink.clone());
+                        tokio::spawn(async move {
+                            let deleted = crate::cloud::delete(&conn, &target, &names).await;
+                            let mut report = crate::cloud::sync(&conn, &target, crate::cloud::Mode::Check, &[], &[]).await;
+                            if let Err(e) = deleted {
+                                report.errors.push((String::new(), format!("Couldn't delete from Steam Cloud: {e}")));
+                            }
+                            sink(Event::CloudReport { report, held_launch: None });
+                        });
+                    }
+                }
                 Some(Command::StopGame { app_id }) => {
                     if let Some(dir) = st.official.get(&app_id).cloned() {
                         tokio::task::spawn_blocking(move || launch::kill_in_folder(&dir));
@@ -875,6 +889,16 @@ async fn online(
                             .map_err(|e| e.to_string())
                             .map(|r| crate::social::collections(r.data.iter().flat_map(|d| d.entries.iter()).map(|e| (e.key(), e.is_deleted(), e.value()))));
                         sink(Event::SteamCollections(result));
+                    });
+                }
+                Some(Command::SaveSteamCollections { save, delete }) => {
+                    let (conn, sink) = (conn.clone(), sink.clone());
+                    tokio::spawn(async move {
+                        let result = crate::collections::save(&conn, &save, &delete).await;
+                        if let Err(e) = &result {
+                            tracing::warn!("saving collections to Steam failed: {e}");
+                        }
+                        sink(Event::SteamCollectionsSaved { save, delete, result });
                     });
                 }
                 Some(Command::LoadComments { steam_id, start }) => st.with_web(sink, move |web, sink| async move {
@@ -964,6 +988,13 @@ async fn online(
                         sink(Event::StoreRecommendations(crate::store_recs::load(&conn, &language).await));
                     });
                 }
+                Some(Command::SendTradeOffer { partner, token, message, give, take }) => st.with_web(sink, move |web, sink| async move {
+                    let result = match web {
+                        Ok(w) => crate::market::send_trade_offer(&w, partner, token.as_deref(), &message, &give, &take).await,
+                        Err(e) => Err(e),
+                    };
+                    sink(Event::TradeOfferSent { partner, result });
+                }),
                 Some(Command::LoadCardSet { steam_id, app_id, foil }) => st.with_web(sink, move |web, sink| async move {
                     let result = crate::social::card_set(web.as_deref().ok(), steam_id, app_id, foil).await;
                     sink(Event::CardSet { steam_id, app_id, foil, result });
