@@ -38,6 +38,9 @@ impl Cdn {
             .user_agent("Valve/Steam HTTP Client 1.0")
             .timeout(Duration::from_secs(60))
             .pool_max_idle_per_host(32)
+            // Downloads spread over many connections; HTTP/2 would put them
+            // all on one.
+            .http1_only()
             .build()
             .expect("http client");
         let mut s: Vec<(Server, f64)> = servers.into_iter().map(|s| (s, 0.0)).collect();

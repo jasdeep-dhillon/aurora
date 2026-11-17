@@ -93,7 +93,7 @@ async fn app_info(
     tokens: &HashMap<AppId, u64>,
 ) -> Result<Vec<OwnedApp>> {
     use futures_util::stream::{self, StreamExt, TryStreamExt};
-    let http = reqwest::Client::new();
+    let http = crate::http();
     // A few batches at once instead of one after another.
     let requests: Vec<CMsgClientPicsProductInfoRequest> = ids
         .chunks(200)
@@ -157,7 +157,7 @@ pub async fn raw_app_info(conn: &Connection, id: AppId) -> Option<vdf::Obj> {
         apps: vec![c_msg_client_pics_product_info_request::AppInfo { appid: Some(id), access_token: tokens.get(&id).copied(), only_public_obsolete: None }],
         ..Default::default()
     };
-    let http = reqwest::Client::new();
+    let http = crate::http();
     for resp in product_info(conn, &req).await.ok()? {
         let host = resp.http_host.clone().filter(|h| !h.is_empty());
         for app in resp.apps.into_iter().filter(|a| a.appid() == id) {

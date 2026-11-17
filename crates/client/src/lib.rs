@@ -27,6 +27,13 @@ pub mod game_servers;
 mod input_config;
 pub mod account;
 mod notify;
+
+/// One HTTP client for plain requests (one connection pool and TLS setup,
+/// instead of a new client per request).
+pub(crate) fn http() -> reqwest::Client {
+    static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(reqwest::Client::new);
+    HTTP.clone()
+}
 pub mod offline;
 pub mod support;
 mod pics;
