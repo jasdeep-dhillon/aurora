@@ -224,7 +224,11 @@ impl Overlay {
 fn foreground_window() -> isize {
     unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() as isize }
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn foreground_window() -> isize {
+    x11::active_window().map(|w| w as isize).unwrap_or(0)
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 fn foreground_window() -> isize {
     0
 }
@@ -261,9 +265,52 @@ fn foreground_is_in(dir: &std::path::Path) -> bool {
         exe.starts_with(dir.trim_end_matches('\\'))
     }
 }
-#[cfg(not(windows))]
+/// Linux: the focused X window (games run on X11 or XWayland) belongs to a
+/// process whose program, folder or command line is inside the game's
+/// folder. Proton games are Wine processes, so their command line holds the
+/// game's Windows path (`Z:\home\…\Game.exe`).
+#[cfg(target_os = "linux")]
+fn foreground_is_in(dir: &std::path::Path) -> bool {
+    let Some(pid) = x11::active_window().and_then(x11::window_pid) else { return false };
+    if pid == std::process::id() {
+        return false;
+    }
+    process_in(pid, dir)
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 fn foreground_is_in(_: &std::path::Path) -> bool {
     false
+}
+
+/// A process runs from `dir`: its executable, working directory or any
+/// command-line argument (Wine paths too) is inside it.
+#[cfg(target_os = "linux")]
+fn process_in(pid: u32, dir: &std::path::Path) -> bool {
+    let dir = dir.to_string_lossy().trim_end_matches('/').to_lowercase();
+    if dir.is_empty() {
+        return false;
+    }
+    let inside = |p: &str| {
+        let p = wine_to_unix(p).to_lowercase();
+        p == dir || p.starts_with(&format!("{dir}/"))
+    };
+    let proc_ = std::path::PathBuf::from(format!("/proc/{pid}"));
+    for link in ["exe", "cwd"] {
+        if std::fs::read_link(proc_.join(link)).is_ok_and(|p| inside(&p.to_string_lossy())) {
+            return true;
+        }
+    }
+    std::fs::read(proc_.join("cmdline")).is_ok_and(|c| c.split(|b| *b == 0).any(|a| !a.is_empty() && inside(&String::from_utf8_lossy(a))))
+}
+
+/// `Z:\home\me\Game.exe` (Wine's drive for `/`) → `/home/me/Game.exe`;
+/// other paths unchanged.
+#[cfg(target_os = "linux")]
+fn wine_to_unix(p: &str) -> String {
+    match p.get(..2) {
+        Some(d) if d.eq_ignore_ascii_case("z:") => p[2..].replace('\\', "/"),
+        _ => p.to_string(),
+    }
 }
 
 #[cfg(windows)]
@@ -272,8 +319,85 @@ fn give_focus(window: isize) {
         unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(window as _) };
     }
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn give_focus(window: isize) {
+    if window != 0 {
+        x11::activate(window as u32);
+    }
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 fn give_focus(_: isize) {}
+
+/// The few X11 calls the overlay needs, on one shared connection.
+#[cfg(target_os = "linux")]
+mod x11 {
+    use std::sync::{Mutex, OnceLock};
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt, EventMask};
+    use x11rb::rust_connection::RustConnection;
+
+    struct X {
+        conn: RustConnection,
+        root: u32,
+        active: u32,
+        pid: u32,
+    }
+
+    fn x() -> Option<&'static Mutex<X>> {
+        static X11: OnceLock<Option<Mutex<X>>> = OnceLock::new();
+        X11.get_or_init(|| {
+            let (conn, screen) = x11rb::connect(None).map_err(|e| tracing::info!("overlay: no X11 display ({e})")).ok()?;
+            let root = conn.setup().roots.get(screen)?.root;
+            let atom = |name: &str| conn.intern_atom(false, name.as_bytes()).ok()?.reply().ok().map(|r| r.atom);
+            let (active, pid) = (atom("_NET_ACTIVE_WINDOW")?, atom("_NET_WM_PID")?);
+            Some(Mutex::new(X { conn, root, active, pid }))
+        })
+        .as_ref()
+    }
+
+    fn property_u32(x: &X, window: u32, prop: u32, kind: AtomEnum) -> Option<u32> {
+        let r = x.conn.get_property(false, window, prop, kind, 0, 1).ok()?.reply().ok()?;
+        r.value32()?.next()
+    }
+
+    /// The window the window manager says is in front.
+    pub fn active_window() -> Option<u32> {
+        let x = x()?.lock().ok()?;
+        property_u32(&x, x.root, x.active, AtomEnum::WINDOW).filter(|w| *w != 0)
+    }
+
+    /// The process that owns a window (`_NET_WM_PID`).
+    pub fn window_pid(window: u32) -> Option<u32> {
+        let x = x()?.lock().ok()?;
+        property_u32(&x, window, x.pid, AtomEnum::CARDINAL).filter(|p| *p != 0)
+    }
+
+    /// Ask the window manager to bring a window to the front and focus it.
+    pub fn activate(window: u32) {
+        let Some(Ok(x)) = x().map(|m| m.lock()) else { return };
+        // Source 2: a pager-like request, which window managers honour.
+        let ev = ClientMessageEvent::new(32, window, x.active, [2u32, x11rb::CURRENT_TIME, 0, 0, 0]);
+        let mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
+        let _ = x.conn.send_event(false, x.root, mask, ev);
+        let _ = x.conn.flush();
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    #[test]
+    fn wine_paths_become_unix_paths() {
+        assert_eq!(super::wine_to_unix(r"Z:\home\me\Games\Celeste\Celeste.exe"), "/home/me/Games/Celeste/Celeste.exe");
+        assert_eq!(super::wine_to_unix("/usr/bin/foo"), "/usr/bin/foo");
+    }
+
+    #[test]
+    fn finds_this_process_in_its_own_folder() {
+        let exe = std::env::current_exe().unwrap();
+        assert!(super::process_in(std::process::id(), exe.parent().unwrap()));
+        assert!(!super::process_in(std::process::id(), std::path::Path::new("/nonexistent-aurora-dir")));
+    }
+}
 
 /// Pick up games that draw the overlay themselves and read what they sent.
 fn poll_ingame(app: &mut SteamApp, ctx: &egui::Context) {
@@ -496,7 +620,15 @@ fn clock() -> String {
         unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
         format!("{:02}:{:02}", st.wHour, st.wMinute)
     }
-    #[cfg(not(windows))]
+    // Local time, not UTC.
+    #[cfg(target_os = "linux")]
+    {
+        let now = unsafe { libc::time(std::ptr::null_mut()) };
+        let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+        unsafe { libc::localtime_r(&now, &mut tm) };
+        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) % 86_400;
         format!("{:02}:{:02}", s / 3600, (s / 60) % 60)
