@@ -1,21 +1,35 @@
 # Changelog
 
-## [0.7.3](https://github.com/mollie2999/Aurora/compare/v0.7.2...v0.7.3) (2026-11-17)
+## [0.8.0](https://github.com/mollie2999/Aurora/compare/v0.7.2...v0.8.0) (2026-11-17)
 
 **SteamInRust is now Aurora everywhere:** the program is `aurora`, the Windows setup `Aurora-Setup`, the Linux archive `Aurora-Linux-x86_64`, the Arch package `aurora-bin` (it replaces `steamonrust-bin`). Your settings, sign-ins and caches stay where they are, and installed copies update and move over by themselves ([f87388a](https://github.com/mollie2999/Aurora/commit/f87388a5f5f79ad8a00c12bdd11a433650439e1e))
 
+Thanks to [madonchik123](https://github.com/madonchik123) for the clipboard and font fixes below, ported from upstream SteamInRust.
+
 ### New
 
+* Windows: PlayStation, Switch, Steam Controller and other non-Xbox controllers work in games, like with Steam. Aurora reads them (SDL3) and games see them as Xbox pads, through Steam Input and XInput; rumble works. Button prompts stay Xbox's, and there's no gyro yet ([cb79247](https://github.com/mollie2999/Aurora/commit/cb79247b22178dd21a9bc5de686d1b422fdf950a))
 * Linux: a tray icon (KDE, GNOME with the AppIndicator extension, Cinnamon, XFCE…) with the desktop's own menu. Closing the window keeps Aurora running in the tray; the icon brings it back, also on Wayland ([920412e](https://github.com/mollie2999/Aurora/commit/920412ef2f0eceb86d7ae8d67479754e0e5d8226))
-* Steam install scripts run on a game's first launch, like Steam's "Running install script": the registry keys and setup steps some games need to start (e.g. EasyAntiCheat). On Linux inside the game's Proton prefix ([46ba8d7](https://github.com/mollie2999/Aurora/commit/46ba8d72987e23197ce00ee04c4289cd6e200a9d))
-* Store pages and game news are saved on disk: a game opened before shows at once, also after a restart or offline ([ddc0486](https://github.com/mollie2999/Aurora/commit/ddc048647c4c98fd3874a34242d741a765011efd))
+* Steam install scripts run on a game's first launch, like Steam's "Running install script": the registry keys and setup steps some games need to start (e.g. EasyAntiCheat). On Linux inside the game's Proton prefix ([dcb5676](https://github.com/mollie2999/Aurora/commit/dcb56760c73c282b9b4b49593d2d00ef19bacacf))
+* Store pages and game news are saved on disk: a game opened before shows at once, also after a restart or offline ([57e1d4a](https://github.com/mollie2999/Aurora/commit/57e1d4a65ce560f6f25c2b1d6e448f83241e269d))
+* A right-click Cut / Copy / Paste menu in text fields. By [madonchik123](https://github.com/madonchik123), from [upstream #40](https://github.com/madonchik123/SteamInRust/pull/40) ([67800bd](https://github.com/mollie2999/Aurora/commit/67800bd28541453e52576e3a0f1681ff9c2859a9))
 * A new Aurora logo ([b5c3e31](https://github.com/mollie2999/Aurora/commit/b5c3e3161dc25cfcdd0639f53e341f9f71dad559))
-* Debian/Ubuntu package (`aurora_<version>_amd64.deb`) next to the Arch one
+* Debian/Ubuntu package (`aurora_<version>_amd64.deb`) next to the Arch one ([467aa30](https://github.com/mollie2999/Aurora/commit/467aa30309c6fa998948902bbf645bbffe2a9a89))
+
+### Faster and lighter
+
+* Clicking a game in the library no longer freezes the window for a moment: how the game launches is worked out in the background, and game and workshop manifests are no longer read every frame ([59bda3d](https://github.com/mollie2999/Aurora/commit/59bda3d2281341d734ddf9a43035841ea71cad1b))
+* Pictures are decoded at the size they're shown, a few at a time: a store page's pictures take a quarter of the memory (44.6 → 11.7 MB on Hades), the library's less than half ([7ea2cd3](https://github.com/mollie2999/Aurora/commit/7ea2cd37a683e3243a673c3f0bb12dfcd2cdeccc))
+* Signing in only fetches the apps that changed since last time, instead of the whole library ([1ab86fe](https://github.com/mollie2999/Aurora/commit/1ab86fe7e65658a3bf78b178a3449acaff5c1575))
+* Pictures and Steam's web API load over HTTP/2, on one connection ([c094472](https://github.com/mollie2999/Aurora/commit/c094472aa41e1ce57a5dd299422100732514f007))
+* Windows: the fallback fonts for Chinese, Japanese, Korean and other scripts are memory-mapped instead of read whole: about 70 MB less memory. By [madonchik123](https://github.com/madonchik123), from [upstream #57](https://github.com/madonchik123/SteamInRust/pull/57) ([c7e7c37](https://github.com/mollie2999/Aurora/commit/c7e7c37aeafd184f38e456d99595ea3d9586eefa))
+* Memory no longer grows as you open game pages: about a third less after browsing the library ([57e1d4a](https://github.com/mollie2999/Aurora/commit/57e1d4a65ce560f6f25c2b1d6e448f83241e269d))
 
 ### Fixes
 
-* Non-Steam games launch: on Linux, Windows programs run with Proton and others are made executable; on Windows, shortcuts, quoted paths and games that need admin rights work ([46ba8d7](https://github.com/mollie2999/Aurora/commit/46ba8d72987e23197ce00ee04c4289cd6e200a9d))
-* Memory no longer grows as you open game pages: about a third less after browsing the library ([ddc0486](https://github.com/mollie2999/Aurora/commit/ddc048647c4c98fd3874a34242d741a765011efd))
+* Paste, copy and cut (Ctrl+V / Ctrl+C / Ctrl+X) did nothing in any text field. By [madonchik123](https://github.com/madonchik123), from [upstream #40](https://github.com/madonchik123/SteamInRust/pull/40) ([67800bd](https://github.com/mollie2999/Aurora/commit/67800bd28541453e52576e3a0f1681ff9c2859a9))
+* Non-Steam games launch: on Linux, Windows programs run with Proton and others are made executable; on Windows, shortcuts, quoted paths and games that need admin rights work ([dcb5676](https://github.com/mollie2999/Aurora/commit/dcb56760c73c282b9b4b49593d2d00ef19bacacf))
+* Notifications start with a capital letter: "A game from your wishlist is on sale" ([28f5aee](https://github.com/mollie2999/Aurora/commit/28f5aeec2c722c8ecb7d0d6298a7698df4c91e6a))
 * Linux: the app no longer needs GTK ([920412e](https://github.com/mollie2999/Aurora/commit/920412ef2f0eceb86d7ae8d67479754e0e5d8226))
 
 ## [0.7.2](https://github.com/mollie2999/Aurora/compare/v0.7.1-1...v0.7.2) (2026-11-16)
