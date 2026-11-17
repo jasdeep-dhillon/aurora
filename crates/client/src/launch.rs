@@ -1589,7 +1589,6 @@ pub(crate) fn prefix_setup(app: &OwnedApp, install_dir: &Path) -> Option<Command
 }
 
 /// Run a helper to the end with its output dropped; killed after `limit`.
-#[cfg(not(windows))]
 pub(crate) fn run_quietly(cmd: &mut Command, limit: Duration) -> Result<(), String> {
     use std::process::Stdio;
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
