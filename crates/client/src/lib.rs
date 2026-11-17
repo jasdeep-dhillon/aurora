@@ -20,6 +20,7 @@ mod installscript;
 pub mod market;
 pub mod social;
 pub mod cloud;
+pub mod collections;
 pub mod regions;
 pub mod a2s;
 pub mod game_ugc;
@@ -86,6 +87,9 @@ pub enum Command {
     /// Sync a game's saves now. Conflicts listed in `keep_local` are uploaded,
     /// in `keep_cloud` downloaded. `then_launch` starts the game afterwards.
     CloudSync { app_id: AppId, install_dir: PathBuf, mode: cloud::Mode, keep_local: Vec<String>, keep_cloud: Vec<String>, then_launch: Option<String> },
+    /// Delete files from a game's Steam Cloud (`CloudFile::raw` names),
+    /// then report the cloud again.
+    CloudDelete { app_id: AppId, install_dir: PathBuf, names: Vec<String> },
     /// Close a running game (and the processes it started).
     StopGame { app_id: AppId },
     /// For developers: let a game started by hand (a debugger, a test probe)
@@ -120,6 +124,8 @@ pub enum Command {
     /// Fetch one game's inventory for an account (753/6 is the Steam
     /// inventory: cards, backgrounds, emoticons). `language` is Steam's name.
     LoadInventory { steam_id: SteamId, app_id: AppId, context_id: u64, language: String },
+    /// Send a trade offer (`token` from the partner's trade URL, for non-friends).
+    SendTradeOffer { partner: SteamId, token: Option<String>, message: String, give: Vec<model::TradeAsset>, take: Vec<model::TradeAsset> },
     /// Find every game that has items in an account's inventory.
     LoadInventoryApps { steam_id: SteamId },
     /// Community Market price of an item in your wallet currency. `full` also
@@ -131,6 +137,9 @@ pub enum Command {
     LoadMyListings,
     /// Your library collections from Steam (Favorites, Hidden, your own).
     LoadSteamCollections,
+    /// Write library collections to Steam: `save` are created or replaced
+    /// (by Steam id), `delete` removed.
+    SaveSteamCollections { save: Vec<(String, collections::Entry)>, delete: Vec<String> },
     /// Comments on a profile (newest first), from `start`.
     LoadComments { steam_id: SteamId, start: u32 },
     /// Leave a comment on a profile.
@@ -301,6 +310,9 @@ pub enum Event {
     ItemListed { asset_id: u64, result: Result<bool, String> },
     MyListings(Result<model::MyListings, String>),
     SteamCollections(Result<Vec<model::SteamCollection>, String>),
+    /// A `SaveSteamCollections` finished (the same lists, so the library
+    /// knows what Steam now has).
+    SteamCollectionsSaved { save: Vec<(String, collections::Entry)>, delete: Vec<String>, result: Result<(), String> },
     /// Comments on a profile, or why they can't be shown (private, turned off).
     Comments { steam_id: SteamId, result: Result<model::Comments, String> },
     CommentPosted { steam_id: SteamId, result: Result<(), String> },
@@ -308,6 +320,7 @@ pub enum Event {
     Blocked { steam_id: SteamId, result: Result<bool, String> },
     Badges { steam_id: SteamId, result: Result<model::Badges, String> },
     Reviews { steam_id: SteamId, page: u32, result: Result<model::UserReviews, String> },
+    TradeOfferSent { partner: SteamId, result: Result<model::TradeOfferSent, String> },
     Groups { steam_id: SteamId, result: Result<Vec<model::UserGroup>, String> },
     CardSet { steam_id: SteamId, app_id: AppId, foil: bool, result: Result<model::CardSet, String> },
     /// The full notification list (replaces the old one).

@@ -359,6 +359,8 @@ pub async fn sync(conn: &Connection, t: &Target, mode: Mode, keep_local: &[Strin
         remote.insert(key, RemoteFile { raw: name, sha: hex(f.sha_file()), time: f.time_stamp(), size: f.raw_file_size() as u64 });
     }
     report.cloud_files = remote.len() as u32;
+    report.files = remote.iter().map(|(name, r)| model::CloudFile { raw: r.raw.clone(), name: name.clone(), size: r.size, time: r.time }).collect();
+    report.files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     if let Ok(q) = conn.call::<_, CCloudClientGetAppQuotaUsageResponse>("Cloud.ClientGetAppQuotaUsage#1", &CCloudClientGetAppQuotaUsageRequest { appid: Some(t.app_id) }).await {
         if q.max_num_bytes() > 0 {
             report.quota_bytes = q.max_num_bytes();
@@ -481,6 +483,55 @@ async fn download(conn: &Connection, t: &Target, name: &str, path: &Path, stamp:
         }
     }
     Ok(hex(&sha))
+}
+
+/// Delete files from the game's cloud, by the names Steam stores them
+/// under (`CloudFile::raw`). Copies on this PC stay, and aren't uploaded
+/// again: the last-sync record still knows them, so the next sync treats
+/// them as deleted in the cloud on purpose. Returns the names deleted.
+pub async fn delete(conn: &Connection, t: &Target, names: &[String]) -> Result<Vec<String>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let machine = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Aurora".into());
+    let batch: CCloudBeginAppUploadBatchResponse = conn
+        .call(
+            "Cloud.BeginAppUploadBatch#1",
+            &CCloudBeginAppUploadBatchRequest {
+                appid: Some(t.app_id),
+                machine_name: Some(machine),
+                files_to_upload: Vec::new(),
+                files_to_delete: names.to_vec(),
+                client_id: Some(now()),
+                app_build_id: Some(0),
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut done = Vec::new();
+    let mut failed = None;
+    for name in names {
+        let r = conn
+            .call::<_, CCloudClientDeleteFileResponse>(
+                "Cloud.ClientDeleteFile#1",
+                &CCloudClientDeleteFileRequest { appid: Some(t.app_id), filename: Some(name.clone()), is_explicit_delete: Some(true), upload_batch_id: batch.batch_id },
+            )
+            .await;
+        match r {
+            Ok(_) => done.push(name.clone()),
+            Err(e) => failed = Some(format!("{name}: {e}")),
+        }
+    }
+    let _ = conn
+        .call::<_, CCloudCompleteAppUploadBatchResponse>(
+            "Cloud.CompleteAppUploadBatchBlocking#1",
+            &CCloudCompleteAppUploadBatchRequest { appid: Some(t.app_id), batch_id: batch.batch_id, batch_eresult: Some(if failed.is_none() { 1 } else { 2 }) },
+        )
+        .await;
+    match failed {
+        Some(e) if done.is_empty() => Err(e),
+        _ => Ok(done),
+    }
 }
 
 /// Send changed files up in one batch. Returns (name, sha) of each sent file.
