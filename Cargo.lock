@@ -700,6 +700,7 @@ dependencies = [
  "futures-util",
  "image",
  "keyring",
+ "libc",
  "local",
  "model",
  "net",

@@ -349,7 +349,7 @@ pub fn steamclient_dll(is64: bool) -> Option<PathBuf> {
 
 pub fn spawn(app: &OwnedApp, install_dir: &Path, extra_args: &str) -> Result<Child, String> {
     let opts = UserOptions::parse(extra_args);
-    opts.wrap(command(app, install_dir, &opts)?).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+    finish(app, install_dir, &opts, command(app, install_dir, &opts)?).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
 }
 
 /// Start a game with our steamclient: environment like a Steam launch, plus
@@ -388,7 +388,7 @@ pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, extra_args: &s
             tracing::info!("{}: new Proton prefix, Steam features from our steamclient from the next launch", app.name);
         }
     }
-    opts.wrap(cmd).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+    finish(app, install_dir, &opts, cmd).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
 }
 
 /// Start a non-Steam game the player added (program path, launch options).
@@ -430,6 +430,20 @@ pub fn spawn_non_steam(exe: &str, args: &str) -> Result<Option<Child>, String> {
         }
         win::shell_open(&exe, &opts.args_line(), &dir).map(|()| None)
     }
+}
+
+/// The finished game command: the player's variables and wrapper
+/// (`UserOptions::wrap`), then, for a native game under a path with a colon,
+/// the private mount that lets it start (see `colon`), which must come last:
+/// rebuilding the command for a wrapper would drop it.
+fn finish(app: &OwnedApp, install_dir: &Path, opts: &UserOptions, cmd: Command) -> Command {
+    let cmd = opts.wrap(cmd);
+    #[cfg(target_os = "linux")]
+    if colon::colon_folder(install_dir).is_some() && linux::plan(app, install_dir).is_ok_and(|p| !p.uses_proton()) {
+        return colon::redirect(cmd, install_dir);
+    }
+    let _ = app;
+    cmd
 }
 
 /// The game's own command plus the player's arguments; their variables and
@@ -1185,7 +1199,7 @@ fn spawn_for_host(app: &OwnedApp, install_dir: &Path, args: &str, account: &str)
         .env("SteamEnv", "1")
         .env("SteamAppUser", account)
         .env("SteamUser", account);
-    opts.wrap(cmd).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+    finish(app, install_dir, &opts, cmd).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
 }
 
 /// `~/.steam/steam.pid` naming the headless host while it runs; what was
@@ -1784,6 +1798,10 @@ pub(crate) fn run_quietly(cmd: &mut Command, limit: Duration) -> Result<(), Stri
 pub(crate) fn in_prefix(app: &OwnedApp, install_dir: &Path, program: &str, args: &[String]) -> Option<Command> {
     linux::plan(app, install_dir).ok()?.in_prefix(app, install_dir, program, args)
 }
+
+#[cfg(target_os = "linux")]
+#[path = "launch_colon.rs"]
+mod colon;
 
 #[cfg(not(windows))]
 mod linux {
