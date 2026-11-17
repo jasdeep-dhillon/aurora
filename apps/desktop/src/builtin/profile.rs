@@ -10,6 +10,36 @@ use model::{Relationship, SteamId, Visibility, art};
 use std::collections::HashSet;
 use ui::{Theme, icons, widgets as w};
 
+#[path = "profile_pages.rs"]
+mod pages;
+
+/// What the profile page shows: the profile, or one of its lists.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+enum Section {
+    #[default]
+    Profile,
+    Games,
+    Badges,
+    Reviews,
+    Groups,
+}
+
+impl Section {
+    fn slug(self) -> &'static str {
+        match self {
+            Section::Profile => "",
+            Section::Games => "games",
+            Section::Badges => "badges",
+            Section::Reviews => "reviews",
+            Section::Groups => "groups",
+        }
+    }
+
+    fn from_slug(s: Option<&str>) -> Section {
+        [Section::Games, Section::Badges, Section::Reviews, Section::Groups].into_iter().find(|x| Some(x.slug()) == s).unwrap_or_default()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum GameSort {
     #[default]
@@ -24,14 +54,16 @@ pub struct Profile {
     viewing: Option<SteamId>,
     requested: HashSet<SteamId>,
     games_requested: HashSet<SteamId>,
-    /// Showing the full games list instead of the profile.
-    games_view: bool,
+    /// The profile, or one of its lists (games, badges, reviews, groups).
+    section: Section,
+    /// Reviews page shown (1-based), and the review pages and group lists asked for.
+    review_page: u32,
+    lists_requested: HashSet<(SteamId, Section, u32)>,
     games_search: String,
     games_sort: GameSort,
     showcase_requested: HashSet<SteamId>,
     social_requested: HashSet<SteamId>,
     comment_draft: String,
-    all_badges: Option<SteamId>,
     /// Which page of comments shows (first comment's index), per profile.
     comment_start: std::collections::HashMap<SteamId, u32>,
 }
@@ -60,7 +92,8 @@ impl Extension for Profile {
     fn on_navigate(&mut self, _page: &str, arg: Option<&str>) {
         let mut parts = arg.unwrap_or_default().split('/');
         self.viewing = parts.next().and_then(|a| a.parse().ok());
-        self.games_view = parts.next() == Some("games");
+        self.section = Section::from_slug(parts.next());
+        self.review_page = 1;
         self.games_search.clear();
     }
 
@@ -101,9 +134,10 @@ impl Extension for Profile {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.add_space(40.0);
             w::centered(ui, 1180.0, 32.0, |ui| {
-                if self.games_view {
-                    self.games_page(ui, &t, ctx, id, &display_name, mine);
-                    return;
+                match self.section {
+                    Section::Profile => {}
+                    Section::Games => return self.games_page(ui, &t, ctx, id, &display_name, mine),
+                    other => return self.list_page(ui, &t, ctx, id, &display_name, mine, other),
                 }
                 // Identity header on a translucent panel.
                 egui::Frame::new()
@@ -256,7 +290,8 @@ impl Extension for Profile {
 /// Where a profile link goes.
 enum Link {
     Page(&'static str, Option<String>),
-    Games,
+    /// One of this profile's lists.
+    Section(Section),
     Web(String),
 }
 
@@ -281,16 +316,25 @@ impl Profile {
         let web = |path: &str| Link::Web(format!("https://steamcommunity.com/profiles/{id}/{path}"));
         let friends_link = if mine { Link::Page("community", None) } else { web("friends/") };
         let friends_count = if mine { ctx.state.friend_list().len().to_string() } else { String::new() };
+        // Counts once those lists have loaded.
+        let reviews = match ctx.state.reviews.get(&(id, 1)) {
+            Some(Ok(r)) if r.total > 0 => r.total.to_string(),
+            _ => String::new(),
+        };
+        let groups = match ctx.state.groups.get(&id) {
+            Some(Ok(g)) if !g.is_empty() => g.len().to_string(),
+            _ => String::new(),
+        };
         let links: Vec<(&str, &str, String, Link)> = vec![
-            (icons::BOOKS, t!("Games"), games, Link::Games),
+            (icons::BOOKS, t!("Games"), games, Link::Section(Section::Games)),
             (icons::BACKPACK, t!("Inventory"), if items > 0 { items.to_string() } else { String::new() }, Link::Page("inventory", Some(id.to_string()))),
             (icons::USERS, t!("Friends"), friends_count, friends_link),
-            (icons::MEDAL, t!("Badges"), String::new(), web("badges/")),
+            (icons::MEDAL, t!("Badges"), String::new(), Link::Section(Section::Badges)),
             (icons::CAMERA, t!("Screenshots"), String::new(), Link::Page("user_files", Some(format!("{id}/screenshots")))),
             (icons::CUBE, t!("Workshop items"), String::new(), Link::Page("user_files", Some(format!("{id}/workshop")))),
             (icons::BOOKS, t!("Guides"), String::new(), Link::Page("user_files", Some(format!("{id}/guides")))),
-            (icons::THUMBS_UP, t!("Reviews"), String::new(), web("recommended/")),
-            (icons::USERS_THREE, t!("Groups"), String::new(), web("groups/")),
+            (icons::THUMBS_UP, t!("Reviews"), reviews, Link::Section(Section::Reviews)),
+            (icons::USERS_THREE, t!("Groups"), groups, Link::Section(Section::Groups)),
         ];
         panel(ui, t, |ui| {
             for (icon, label, count, link) in links {
@@ -311,7 +355,7 @@ impl Profile {
                 if resp.clicked() {
                     match link {
                         Link::Page(page, arg) => ctx.navigate(page, arg),
-                        Link::Games => ctx.navigate("profile", Some(format!("{id}/games"))),
+                        Link::Section(s) => ctx.navigate("profile", Some(format!("{id}/{}", s.slug()))),
                         Link::Web(url) => {
                             let _ = open::that_detached(url);
                         }
@@ -358,6 +402,13 @@ impl Profile {
         if self.social_requested.insert(id) {
             ctx.send(Command::LoadBadges { steam_id: id });
             ctx.send(Command::LoadComments { steam_id: id, start: 0 });
+            // For the review and group counts in the sidebar.
+            if self.lists_requested.insert((id, Section::Reviews, 1)) {
+                ctx.send(Command::LoadReviews { steam_id: id, page: 1 });
+            }
+            if self.lists_requested.insert((id, Section::Groups, 0)) {
+                ctx.send(Command::LoadGroups { steam_id: id });
+            }
         }
     }
 
@@ -392,7 +443,7 @@ impl Profile {
                     ui.label(w::text(b.items.len().to_string(), 13.0, t.text_dim));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.link(w::text(t!("See all"), 12.5, t.accent)).clicked() {
-                            self.all_badges = Some(id);
+                            ctx.navigate("profile", Some(format!("{id}/{}", Section::Badges.slug())));
                         }
                     });
                 });
@@ -406,49 +457,6 @@ impl Profile {
             }
         });
         ui.add_space(12.0);
-        if self.all_badges == Some(id) {
-            let mut close = false;
-            ui::widgets::modal(ui.ctx(), egui::Id::unique(("all-badges", id))).show(ui.ctx(), |ui| {
-                ui.set_width(520.0);
-                ui.horizontal(|ui| {
-                    ui.label(w::text_bold(t!("Badges"), 20.0, t.text));
-                    ui.label(w::text(b.items.len().to_string(), 15.0, t.text_dim));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if w::icon_button(ui, t, icons::X, t!("Close"), false, 0).clicked() {
-                            close = true;
-                        }
-                    });
-                });
-                ui.add_space(8.0);
-                egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
-                    for badge in &b.items {
-                        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 70.0), Sense::click());
-                        if resp.hovered() {
-                            ui.painter().rect_filled(r, t.corner_small(), t.surface_hover);
-                        }
-                        let img = Rect::from_min_size(r.min + vec2(6.0, 5.0), vec2(60.0, 60.0));
-                        match &badge.icon {
-                            Some(u) => {
-                                if !w::paint_contain(ui, img, u, Align2::CENTER_CENTER) {
-                                    w::skeleton(ui, t, img, CornerRadius::same(6));
-                                }
-                            }
-                            None => w::placeholder(ui, t, img, "", CornerRadius::same(6)),
-                        }
-                        let x = img.right() + 12.0;
-                        ui.painter().text(pos2(x, r.top() + 18.0), Align2::LEFT_CENTER, &badge.title, w::font_semibold(14.0), t.text);
-                        ui.painter().text(pos2(x, r.top() + 36.0), Align2::LEFT_CENTER, &badge.detail, w::font(12.5), t.accent);
-                        ui.painter().text(pos2(x, r.top() + 53.0), Align2::LEFT_CENTER, &badge.unlocked, w::font(11.5), t.text_faint);
-                        if !badge.url.is_empty() && resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t!("Opens in your browser")).clicked() {
-                            let _ = open::that_detached(&badge.url);
-                        }
-                    }
-                });
-            });
-            if close || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.all_badges = None;
-            }
-        }
     }
 
     /// Profile comments, with posting. Respects profiles that hide or turn

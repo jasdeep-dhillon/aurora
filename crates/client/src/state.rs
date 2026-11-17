@@ -45,6 +45,9 @@ pub struct State {
     pub install_script: HashMap<AppId, String>,
     pub comments: HashMap<SteamId, Result<model::Comments, String>>,
     pub badges: HashMap<SteamId, Result<model::Badges, String>>,
+    /// Profile reviews by (profile, page).
+    pub reviews: HashMap<(SteamId, u32), Result<model::UserReviews, String>>,
+    pub groups: HashMap<SteamId, Result<Vec<model::UserGroup>, String>>,
     pub notifications: Option<model::Notifications>,
     pub support_tickets: Option<Result<Vec<model::SupportTicket>, String>>,
     pub account_security: Option<Result<model::AccountSecurity, String>>,
@@ -163,6 +166,12 @@ impl State {
             }
             Event::Badges { steam_id, result } => {
                 self.badges.insert(*steam_id, result.clone());
+            }
+            Event::Reviews { steam_id, page, result } => {
+                self.reviews.insert((*steam_id, *page), result.clone());
+            }
+            Event::Groups { steam_id, result } => {
+                self.groups.insert(*steam_id, result.clone());
             }
             Event::CommentPosted { .. } => {}
             Event::ServerInfo { addr, result } => {

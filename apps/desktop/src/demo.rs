@@ -246,5 +246,41 @@ fn inventory(me: u64, now: u64) -> Vec<Event> {
             cat("Language", true, &["English", "Spanish", "French", "German", "Russian", "Italian", "Chinese", "Japanese", "Korean", "Polish", "Portuguese", "Vietnamese"]),
         ]),
     });
+    // Your badges, reviews and groups (`--page=profile --arg=<id>/reviews`).
+    let me = 76561197960265729;
+    let badge = |title: &str, detail: &str, unlocked: &str| model::Badge { title: title.into(), detail: detail.into(), unlocked: unlocked.into(), ..Default::default() };
+    out.push(Event::Badges {
+        steam_id: me,
+        result: Ok(model::Badges {
+            level: 18,
+            xp: "1,915 XP".into(),
+            next: "85 XP to reach Level 19".into(),
+            progress: 0.6,
+            items: vec![badge("Years of Service", "300 XP", "Unlocked 3 Feb, 2019"), badge("Community Leader", "100 XP", "Unlocked 14 Jun, 2021"), badge("Game Collector", "250 XP", "Unlocked 2 Jan, 2024")],
+        }),
+    });
+    let review = |app_id, recommended, hours: &str, text: &str| model::UserReview {
+        app_id,
+        recommended,
+        hours: hours.into(),
+        posted: "Posted 12 October, 2025.".into(),
+        text: text.into(),
+        helpful: "12 people found this review helpful".into(),
+        ..Default::default()
+    };
+    out.push(Event::Reviews {
+        steam_id: me,
+        page: 1,
+        result: Ok(model::UserReviews {
+            items: vec![
+                review(413150, true, "212.4 hrs on record", "The coziest farm sim there is. Fishing still beats me."),
+                review(1145360, true, "88.1 hrs on record (40.2 hrs at review time)", "Every run feels different, and the music is incredible."),
+                review(570, false, "1,204.9 hrs on record", "One more game, they said."),
+            ],
+            total: 3,
+        }),
+    });
+    let group = |name: &str, members: &str, online: &str| model::UserGroup { name: name.into(), url: "https://steamcommunity.com/groups/".into(), members: members.into(), online: online.into(), avatar: None };
+    out.push(Event::Groups { steam_id: me, result: Ok(vec![group("Aurora Testers", "1,204 Members", "88 Online"), group("Cozy Farmers", "52,310 Members", "3,021 Online")]) });
     out
 }

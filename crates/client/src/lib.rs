@@ -138,6 +138,10 @@ pub enum Command {
     /// Delete a comment (on your profile, or one you wrote).
     DeleteComment { steam_id: SteamId, comment_id: u64 },
     LoadBadges { steam_id: SteamId },
+    /// A page (1-based) of a profile's reviews.
+    LoadReviews { steam_id: SteamId, page: u32 },
+    /// The groups a profile belongs to.
+    LoadGroups { steam_id: SteamId },
     LoadNotifications,
     /// Mark notifications as read (empty = all).
     MarkNotificationsRead { ids: Vec<u64> },
@@ -301,6 +305,8 @@ pub enum Event {
     ServerInfo { addr: String, result: Result<crate::a2s::ServerInfo, String> },
     Blocked { steam_id: SteamId, result: Result<bool, String> },
     Badges { steam_id: SteamId, result: Result<model::Badges, String> },
+    Reviews { steam_id: SteamId, page: u32, result: Result<model::UserReviews, String> },
+    Groups { steam_id: SteamId, result: Result<Vec<model::UserGroup>, String> },
     /// The full notification list (replaces the old one).
     Notifications(model::Notifications),
     /// New notifications just arrived (for a toast).

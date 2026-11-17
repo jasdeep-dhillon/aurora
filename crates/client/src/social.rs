@@ -205,6 +205,72 @@ pub fn parse_badges(body: &str) -> model::Badges {
     model::Badges { level, xp, next, progress, items }
 }
 
+/// One page (1-based, 10 a page) of a profile's reviews.
+pub async fn reviews(web: Option<&Web>, steam_id: SteamId, page: u32) -> Result<model::UserReviews, String> {
+    let body = http(web)
+        .get(format!("{COMMUNITY}/profiles/{steam_id}/recommended/"))
+        .query(&[("p", page.max(1).to_string())])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !body.contains("review_box") && body.contains("profile_private_info") {
+        return Err("private".into());
+    }
+    Ok(parse_reviews(&body))
+}
+
+pub fn parse_reviews(body: &str) -> model::UserReviews {
+    let items = body
+        .split("class=\"review_box\"")
+        .skip(1)
+        .filter_map(|b| {
+            let content = b.split("class=\"review_box_content\"").nth(1)?;
+            let app_id = between(content, "steamcommunity.com/app/", "\"").and_then(|a| a.trim_end_matches('/').parse().ok())?;
+            let capsule = between(content, "class=\"game_capsule\"src=\"", "\"").or_else(|| between(content, "class=\"game_capsule\" src=\"", "\"")).map(String::from);
+            let vote = between(content, "class=\"vote_header\"", "class=\"content")?;
+            let recommended = vote.contains("icon_thumbsUp");
+            let url = between(vote, "class=\"title\"><a href=\"", "\"").unwrap_or_default().to_string();
+            let hours = between(vote, "class=\"hours\">", "</div>").map(clean).unwrap_or_default();
+            let text = between(content, "class=\"content", "</div>").and_then(|c| c.split_once('>')).map(|(_, t)| clean(&t.replace("<br>", "\n"))).unwrap_or_default();
+            let posted = between(content, "class=\"posted\">", "</div>").map(clean).unwrap_or_default();
+            let helpful = between(b, "class=\"header\">", "<div").map(|h| clean(&h.replace("<br>", " · "))).unwrap_or_default();
+            Some(model::UserReview { app_id, capsule, recommended, hours, posted, text, helpful, url })
+        })
+        .collect();
+    // "Showing 1-10 of 23 entries"
+    let total = between(body, "class=\"workshopBrowsePagingInfo\">", "</div>")
+        .and_then(|s| clean(s).split_whitespace().rev().nth(1).map(|n| n.replace([',', '.'], "")))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    model::UserReviews { items, total }
+}
+
+/// The groups a profile belongs to.
+pub async fn groups(web: Option<&Web>, steam_id: SteamId) -> Result<Vec<model::UserGroup>, String> {
+    let body = http(web).get(format!("{COMMUNITY}/profiles/{steam_id}/groups/")).send().await.map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())?;
+    if !body.contains("group_block") && body.contains("profile_private_info") {
+        return Err("private".into());
+    }
+    Ok(parse_groups(&body))
+}
+
+pub fn parse_groups(body: &str) -> Vec<model::UserGroup> {
+    body.split("class=\"group_block invite_row\"")
+        .skip(1)
+        .filter_map(|b| {
+            let title = between(b, "class=\"linkTitle\" href=\"", "</a>")?;
+            let (url, name) = title.split_once("\">")?;
+            let avatar = between(b, "class=\"avatarMedium\">", "</div>").and_then(|a| between(a, "src=\"", "\"")).map(|u| u.replace("_medium.", "_full."));
+            let members = between(b, "groupMemberStat linkStandard\" href=\"", "</a>").and_then(|m| m.split_once("\">")).map(|(_, m)| clean(m)).unwrap_or_default();
+            let online = between(b, "groupMemberStat membersOnline\">", "</span>").map(clean).unwrap_or_default();
+            Some(model::UserGroup { name: clean(name), url: url.to_string(), avatar, members, online })
+        })
+        .collect()
+}
+
 /// A game's Workshop tag groups, as its Workshop page declares them.
 pub async fn workshop_tags(app: model::AppId, language: &str) -> Result<Vec<model::WorkshopTagCategory>, String> {
     let body = crate::http()
@@ -310,6 +376,32 @@ mod tests {
         assert_eq!(cats.len(), 2);
         assert!(cats[0].single);
         assert_eq!(cats[1].tags, vec![("Weapon".to_string(), "Weapon".to_string())]);
+    }
+
+    #[test]
+    fn reads_reviews_and_groups() {
+        let r = r#"<div class="review_box"><div class="header">63 people found this review helpful<br>14 people found this review funny<div class="review_award_ctn"></div></div><div class="review_box_content"><div class="leftcol"><a href="https://steamcommunity.com/app/365360" class="game_capsule_ctn "><img class="game_capsule"src="https://cdn.example/capsule_184x69.jpg"></a></div><div class="rightcol"><div class="vote_header"><div class="thumb"><a href="u"><img src="https://x/icon_thumbsUp.png"></a></div><div class="title"><a href="https://steamcommunity.com/id/x/recommended/365360/">Recommended</a></div><div class="hours">
+        1,083.3 hrs on record	(223.8 hrs at review time)	</div></div><div class="content ">The best &amp; all.<br>Really.	</div><div class="posted">
+        Posted 24 March, 2017.	</div></div></div><div class="workshopBrowsePagingInfo">
+        Showing 1-1 of 1,203 entries </div>"#;
+        let v = super::parse_reviews(r);
+        assert_eq!(v.total, 1203);
+        assert_eq!(v.items.len(), 1);
+        let i = &v.items[0];
+        assert_eq!((i.app_id, i.recommended), (365360, true));
+        assert_eq!(i.capsule.as_deref(), Some("https://cdn.example/capsule_184x69.jpg"));
+        assert_eq!(i.hours, "1,083.3 hrs on record (223.8 hrs at review time)");
+        assert_eq!(i.text, "The best & all. Really.");
+        assert_eq!(i.posted, "Posted 24 March, 2017.");
+        assert_eq!(i.helpful, "63 people found this review helpful · 14 people found this review funny");
+        assert_eq!(i.url, "https://steamcommunity.com/id/x/recommended/365360/");
+        let g = r#"<div class="group_block invite_row" data-search="dota"><div class="avatarMedium"><a href="https://steamcommunity.com/groups/DotA"><img src="https://avatars.example/ad58_medium.jpg" /></a></div><div class="ellipsis groupTitle"><a class="linkTitle" href="https://steamcommunity.com/groups/DotA">Dota 2 Internal</a></div><div class="memberRow"><a class="groupMemberStat linkStandard" href="https://steamcommunity.com/groups/DotA/members">14 Members</a><span class="groupMemberStat membersOnline">4 Online</span></div></div>"#;
+        let groups = super::parse_groups(g);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "Dota 2 Internal");
+        assert_eq!(groups[0].url, "https://steamcommunity.com/groups/DotA");
+        assert_eq!(groups[0].avatar.as_deref(), Some("https://avatars.example/ad58_full.jpg"));
+        assert_eq!((groups[0].members.as_str(), groups[0].online.as_str()), ("14 Members", "4 Online"));
     }
 
     #[test]

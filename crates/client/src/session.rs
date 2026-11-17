@@ -923,6 +923,14 @@ async fn online(
                     let result = crate::social::badges(web.as_deref().ok(), steam_id).await;
                     sink(Event::Badges { steam_id, result });
                 }),
+                Some(Command::LoadReviews { steam_id, page }) => st.with_web(sink, move |web, sink| async move {
+                    let result = crate::social::reviews(web.as_deref().ok(), steam_id, page).await;
+                    sink(Event::Reviews { steam_id, page, result });
+                }),
+                Some(Command::LoadGroups { steam_id }) => st.with_web(sink, move |web, sink| async move {
+                    let result = crate::social::groups(web.as_deref().ok(), steam_id).await;
+                    sink(Event::Groups { steam_id, result });
+                }),
                 Some(Command::LoadNotifications) => st.load_notifications(sink),
                 Some(Command::MarkNotificationsRead { ids }) => st.mark_read(ids, sink),
                 Some(Command::LoadSupportTickets) => st.support_tickets(sink),

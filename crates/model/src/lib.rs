@@ -674,6 +674,43 @@ pub struct Comments {
     pub total: u32,
 }
 
+/// A review on a profile (its Reviews page).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UserReview {
+    pub app_id: AppId,
+    /// The game's small capsule image.
+    pub capsule: Option<String>,
+    pub recommended: bool,
+    /// e.g. "1,083.3 hrs on record (223.8 hrs at review time)".
+    pub hours: String,
+    /// e.g. "Posted 24 March, 2017."
+    pub posted: String,
+    pub text: String,
+    /// e.g. "63 people found this review helpful".
+    pub helpful: String,
+    pub url: String,
+}
+
+/// One page (10) of a profile's reviews.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UserReviews {
+    pub items: Vec<UserReview>,
+    /// All reviews on the profile.
+    pub total: u32,
+}
+
+/// A Steam group a profile belongs to.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UserGroup {
+    pub name: String,
+    pub url: String,
+    pub avatar: Option<String>,
+    /// e.g. "14 Members".
+    pub members: String,
+    /// e.g. "4 Online".
+    pub online: String,
+}
+
 /// A badge on a profile.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Badge {
