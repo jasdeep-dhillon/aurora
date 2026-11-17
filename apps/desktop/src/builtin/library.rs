@@ -1439,8 +1439,14 @@ impl Library {
                             ui.add_space(20.0);
                             w::stat(ui, t, t!("Size"), &ui::bytes(g.size_on_disk));
                             // Where the game's Steam features come from (see docs/steam-compatibility.md).
-                            if let Some(o) = &owned {
-                                let (mode, why) = match client::launch_mode_cached(o, &g.install_dir) {
+                            // Worked out in the background: reading the install folder
+                            // would hold up the frame (the stat appears a moment later).
+                            let mode = owned.as_ref().and_then(|o| client::launch_mode_peek(o, &g.install_dir));
+                            if owned.is_some() && mode.is_none() {
+                                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                            }
+                            if let Some(mode) = mode {
+                                let (mode, why) = match mode {
                                     client::LaunchMode::SteamInRust => (t!("SteamInRust"), t!("Achievements, cloud saves and friends work through SteamInRust.").to_string()),
                                     client::LaunchMode::OfficialSteam { anti_cheat } => (if anti_cheat == client::STEAM_DRM { t!("Runs through Steam (Steam DRM)") } else if cfg!(windows) { t!("Runs through Steam (anti-cheat)") } else { t!("Runs through Steam") }, t!("Uses {name}: starts through the official Steam client, which opens in the background.", name = anti_cheat)),
                                     client::LaunchMode::HeadlessHost => (t!("Your Steam (no window)"), t!("Starts a limited, windowless instance of your own installed Steam in the background, with no store or friends. It signs in and closes when the game does.").to_string()),
