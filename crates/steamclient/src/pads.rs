@@ -414,6 +414,10 @@ mod tests {
     /// rumble goes back.
     #[test]
     fn shared_pad_reaches_the_game() {
+        if XINPUT.is_none() {
+            eprintln!("no XInput DLL on this system: skipped");
+            return;
+        }
         let name = format!("Local\\sir-pads-test-{}", std::process::id());
         let h = unsafe { CreateFileMappingW(-1, std::ptr::null(), 0x4, 0, std::mem::size_of::<Shared>() as u32, wide(&name).as_ptr()) };
         assert!(!h.is_null());
