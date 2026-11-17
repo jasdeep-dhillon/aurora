@@ -172,6 +172,26 @@ mod tests {
         assert_eq!(text, format!("{0}|{0}/run.sh|{0}", expected.display()), "{text}");
         assert!(!text.contains(':'));
     }
+
+    /// With a launch-options wrapper (`env %command%`) the mount still
+    /// applies: it's added after the wrapper.
+    #[test]
+    fn works_with_a_launch_options_wrapper() {
+        let base = std::env::temp_dir().join(format!("sir-colon-w-{}", std::process::id()));
+        let game = base.join("drive-1:2").join("Game");
+        std::fs::create_dir_all(&game).unwrap();
+        let script = game.join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s|%s' \"$(pwd)\" \"$FLAG\"\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let opts = super::super::UserOptions::parse("FLAG=on env %command%");
+        let mut cmd = Command::new(&script);
+        cmd.current_dir(&game);
+        let mut out = redirect(opts.wrap(cmd), &game);
+        let text = String::from_utf8(out.output().unwrap().stdout).unwrap();
+        let alias = alias_for(&base.join("drive-1:2")).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(text, format!("{}|on", alias.join("Game").display()), "{text}");
+    }
 }
 
 /// The real case: Cities: Skylines (Unity 5 Mono) on the colon-named

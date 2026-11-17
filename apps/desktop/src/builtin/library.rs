@@ -1764,6 +1764,12 @@ impl Library {
     }
 
     fn queue_install(&mut self, ctx: &mut Ctx, id: AppId, library: Option<std::path::PathBuf>) {
+        self.queue_install_as(ctx, id, library, String::new());
+    }
+
+    /// `platform`: the build to download ("windows", "linux"; empty keeps
+    /// the installed one, else Windows).
+    fn queue_install_as(&mut self, ctx: &mut Ctx, id: AppId, library: Option<std::path::PathBuf>, platform: String) {
         let s = self.games.get(&id).cloned().unwrap_or_default();
         let library = library.or_else(|| ctx.local.libraries.first().cloned()).unwrap_or_else(|| ctx.local.steam_root.clone());
         let steam_root = if ctx.local.steam_root.as_os_str().is_empty() { library.clone() } else { ctx.local.steam_root.clone() };
@@ -1776,6 +1782,7 @@ impl Library {
             language,
             skip_dlc: s.disabled_dlc.iter().copied().collect(),
             add_dlc: s.enabled_dlc.iter().copied().collect(),
+            platform,
         }));
         ctx.toast(t!("Added to downloads"));
     }
@@ -1822,10 +1829,20 @@ impl Library {
                     dlg.library = p;
                 }
             }
+            if dlg.choose_platform {
+                ui.add_space(8.0);
+                ui.label(w::text_medium(t!("Version"), 12.5, t.text_dim));
+                w::radio_value(ui, t, &mut dlg.platform, "windows".to_string(), w::text(t!("Windows (runs with Proton)"), 13.5, t.text));
+                w::radio_value(ui, t, &mut dlg.platform, "linux".to_string(), w::text(t!("Linux (native)"), 13.5, t.text));
+                if dlg.platform == "linux" {
+                    ui.label(w::text(t!("Aurora's own Steam features work in the Windows version. The Linux version gets them from your Steam install."), 12.5, t.text_dim));
+                }
+            }
             ui.add_space(8.0);
-            if dlg.size > 0 {
-                ui.label(w::text(t!("Space required: {size}", size = ui::bytes(dlg.size)), 13.5, t.text));
-                if fs4_free(&dlg.library).is_some_and(|f| f < dlg.size) {
+            let size = dlg.size(ctx);
+            if size > 0 {
+                ui.label(w::text(t!("Space required: {size}", size = ui::bytes(size)), 13.5, t.text));
+                if fs4_free(&dlg.library).is_some_and(|f| f < size) {
                     ui.label(w::text(format!("{}  {}", icons::WARNING, t!("Not enough free space on this drive.")), 13.0, t.danger));
                 }
             }
@@ -1846,7 +1863,7 @@ impl Library {
             if d.desktop {
                 self.shortcut_after_install.insert(id, d.library.clone());
             }
-            self.queue_install(ctx, id, Some(d.library));
+            self.queue_install_as(ctx, id, Some(d.library), d.platform);
         } else if close {
             self.install_dialog = None;
         }
@@ -2145,8 +2162,11 @@ pub(crate) struct InstallDialog {
     app: AppId,
     libraries: Vec<std::path::PathBuf>,
     library: std::path::PathBuf,
-    size: u64,
     desktop: bool,
+    /// The build to download, "windows" or "linux".
+    platform: String,
+    /// Offer the choice: a Linux system and a game with both builds.
+    choose_platform: bool,
 }
 
 impl InstallDialog {
@@ -2157,16 +2177,22 @@ impl InstallDialog {
             let _ = std::fs::create_dir_all(default.join("steamapps"));
             libraries.push(default);
         }
-        let size = ctx
-            .state
-            .apps
-            .as_ref()
-            .and_then(|a| a.get(&app))
-            .map(|o| o.depots.iter().filter(|d| d.dlc_app.is_none() && !d.shared_install && (d.os.is_empty() || d.os.contains("windows"))).filter_map(|d| d.manifest("public").map(|m| m.1)).sum())
-            .unwrap_or(0);
+        let owned = ctx.state.apps.as_ref().and_then(|a| a.get(&app));
+        let choose_platform = cfg!(not(windows)) && owned.is_some_and(|o| client::download::has_build(o, "linux") && client::download::has_build(o, "windows"));
         // Pick the library with the most free space.
         let library = libraries.iter().max_by_key(|l| fs4_free(l).unwrap_or(0)).cloned().unwrap_or_default();
-        Self { app, libraries, library, size, desktop: true }
+        Self { app, libraries, library, desktop: true, platform: "windows".into(), choose_platform }
+    }
+
+    /// Download size of the chosen build (base game, no DLC).
+    fn size(&self, ctx: &Ctx) -> u64 {
+        let os = self.platform.as_str();
+        ctx.state
+            .apps
+            .as_ref()
+            .and_then(|a| a.get(&self.app))
+            .map(|o| o.depots.iter().filter(|d| d.dlc_app.is_none() && !d.shared_install && (d.os.is_empty() || d.os.split(',').any(|x| x.trim() == os))).filter_map(|d| d.manifest("public").map(|m| m.1)).sum())
+            .unwrap_or(0)
     }
 }
 
