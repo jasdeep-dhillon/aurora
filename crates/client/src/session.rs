@@ -958,6 +958,13 @@ async fn online(
                     let result = crate::social::groups(web.as_deref().ok(), steam_id).await;
                     sink(Event::Groups { steam_id, result });
                 }),
+                Some(Command::SendTradeOffer { partner, token, message, give, take }) => st.with_web(sink, move |web, sink| async move {
+                    let result = match web {
+                        Ok(w) => crate::market::send_trade_offer(&w, partner, token.as_deref(), &message, &give, &take).await,
+                        Err(e) => Err(e),
+                    };
+                    sink(Event::TradeOfferSent { partner, result });
+                }),
                 Some(Command::LoadCardSet { steam_id, app_id, foil }) => st.with_web(sink, move |web, sink| async move {
                     let result = crate::social::card_set(web.as_deref().ok(), steam_id, app_id, foil).await;
                     sink(Event::CardSet { steam_id, app_id, foil, result });
