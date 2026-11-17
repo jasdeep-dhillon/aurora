@@ -55,3 +55,5 @@ raw-window-handle = "0.6"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# Shift+Tab overlay: which window is in front (X11/XWayland, where games run).
+x11rb = "0.13"

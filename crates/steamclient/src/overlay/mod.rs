@@ -48,9 +48,10 @@ pub fn start() {
                 return;
             }
             let Some((pipe, token)) = crate::ipc::target() else { return };
-            // Proton games (loopback socket): no in-game overlay under Wine yet.
-            if pipe.starts_with("tcp:") {
-                crate::log!("overlay: not under Proton");
+            // Proton games reach the Linux app over loopback; an older app
+            // without an overlay port can't draw it.
+            if pipe.starts_with("tcp:") && !pipe.contains('/') {
+                crate::log!("overlay: the app has no overlay socket");
                 return;
             }
             let _ = std::thread::Builder::new().name("sir-overlay".into()).spawn(move || {
@@ -178,22 +179,98 @@ mod shared {
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
             }
-            match std::fs::OpenOptions::new().read(true).write(true).open(&pipe) {
-                Ok(f) => {
-                    let r = serve(&f, &token);
-                    crate::log!("overlay: app connection ended: {r:?}");
-                    set_open(false, false, false);
-                    with(|s| {
-                        s.connected = false;
-                        s.frame = None;
-                        s.input.clear();
-                        s.out.clear();
-                    });
+            // Under Proton: a loopback socket to the Linux app.
+            if let Some(addr) = pipe.strip_prefix("tcp:") {
+                match std::net::TcpStream::connect(addr) {
+                    Ok(s) => {
+                        let _ = s.set_nodelay(true);
+                        ended(serve_tcp(s, &token));
+                    }
+                    Err(e) => crate::log!("overlay: can't reach the app at {addr}: {e}"),
                 }
-                Err(e) => crate::log!("overlay: can't reach the app at {pipe}: {e}"),
+            } else {
+                match std::fs::OpenOptions::new().read(true).write(true).open(&pipe) {
+                    Ok(f) => ended(serve(&f, &token)),
+                    Err(e) => crate::log!("overlay: can't reach the app at {pipe}: {e}"),
+                }
             }
             std::thread::sleep(Duration::from_secs(2));
         }
+    }
+
+    fn ended(r: std::io::Result<()>) {
+        crate::log!("overlay: app connection ended: {r:?}");
+        set_open(false, false, false);
+        with(|s| {
+            s.connected = false;
+            s.frame = None;
+            s.input.clear();
+            s.out.clear();
+        });
+    }
+
+    /// Apply one message from the app.
+    fn handle(msg: &[u8]) -> std::io::Result<()> {
+        match ToGame::decode(msg)? {
+            ToGame::Frame { pixels_per_point, cursor, set, free, meshes } => with(|s| {
+                s.tex_ops.extend(set.into_iter().map(TexOp::Set));
+                s.tex_ops.extend(free.into_iter().map(TexOp::Free));
+                s.cursor = cursor;
+                s.frame = Some(Arc::new(Frame { pixels_per_point, meshes }));
+            }),
+            ToGame::SetOpen(open) => set_open(open, false, false),
+        }
+        Ok(())
+    }
+
+    /// Send what's queued for the app, then wait a little for more.
+    fn send_queued(w: &mut impl std::io::Write) -> std::io::Result<()> {
+        let (out, input, modifiers) = with(|s| (std::mem::take(&mut s.out), std::mem::take(&mut s.input), s.modifiers));
+        for m in out {
+            wire::write_message(w, &m.encode())?;
+        }
+        if !input.is_empty() {
+            wire::write_message(w, &FromGame::Input { modifiers, events: input }.encode())?;
+        }
+        // Wake right away for input, else check every few ms.
+        let g = lock();
+        let open = g.as_ref().is_some_and(|s| s.open);
+        let pending = g.as_ref().is_some_and(|s| !s.input.is_empty() || !s.out.is_empty());
+        if !pending {
+            let _ = WAKE.wait_timeout(g, Duration::from_millis(if open { 4 } else { 12 }));
+        }
+        Ok(())
+    }
+
+    /// One connection over a socket (Proton). Sockets can read and write
+    /// from two threads at once: one reads the app's frames, this one sends.
+    fn serve_tcp(stream: std::net::TcpStream, token: &str) -> std::io::Result<()> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (width, height) = with(|s| s.size);
+        wire::write_message(&mut &stream, &FromGame::Hello { token: token.into(), pid: std::process::id(), width, height }.encode())?;
+        with(|s| s.connected = true);
+        crate::log!("overlay: connected to the app (loopback)");
+        let mut reader = stream.try_clone()?;
+        let done = Arc::new(AtomicBool::new(false));
+        let flag = done.clone();
+        let read = std::thread::Builder::new().name("sir-overlay-read".into()).spawn(move || {
+            let r: std::io::Result<()> = (|| loop {
+                handle(&wire::read_message(&mut reader)?)?;
+            })();
+            flag.store(true, Ordering::Release);
+            WAKE.notify_one();
+            r
+        })?;
+        let mut sent: std::io::Result<()> = Ok(());
+        while !done.load(Ordering::Acquire) {
+            if let Err(e) = send_queued(&mut &stream) {
+                sent = Err(e);
+                break;
+            }
+        }
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        let received = read.join().unwrap_or_else(|_| Err(std::io::Error::other("reader panicked")));
+        sent.and(received)
     }
 
     fn available(f: &std::fs::File) -> std::io::Result<u32> {
@@ -215,31 +292,9 @@ mod shared {
         crate::log!("overlay: connected to the app");
         loop {
             while available(f)? >= 4 {
-                let msg = wire::read_message(&mut &*f)?;
-                match ToGame::decode(&msg)? {
-                    ToGame::Frame { pixels_per_point, cursor, set, free, meshes } => with(|s| {
-                        s.tex_ops.extend(set.into_iter().map(TexOp::Set));
-                        s.tex_ops.extend(free.into_iter().map(TexOp::Free));
-                        s.cursor = cursor;
-                        s.frame = Some(Arc::new(Frame { pixels_per_point, meshes }));
-                    }),
-                    ToGame::SetOpen(open) => set_open(open, false, false),
-                }
+                handle(&wire::read_message(&mut &*f)?)?;
             }
-            let (out, input, modifiers) = with(|s| (std::mem::take(&mut s.out), std::mem::take(&mut s.input), s.modifiers));
-            for m in out {
-                wire::write_message(&mut &*f, &m.encode())?;
-            }
-            if !input.is_empty() {
-                wire::write_message(&mut &*f, &FromGame::Input { modifiers, events: input }.encode())?;
-            }
-            // Wake right away for input, else check the pipe every few ms.
-            let g = lock();
-            let open = g.as_ref().is_some_and(|s| s.open);
-            let pending = g.as_ref().is_some_and(|s| !s.input.is_empty() || !s.out.is_empty());
-            if !pending {
-                let _ = WAKE.wait_timeout(g, Duration::from_millis(if open { 4 } else { 12 }));
-            }
+            send_queued(&mut &*f)?;
         }
     }
 }

@@ -3,8 +3,10 @@
 //! like `protocol.rs`. Plain std, no egui: the DLL stays small.
 //!
 //! Transport: the named pipe `<ipc pipe>-overlay`, one connection per game
-//! process, kept open. Every message is `u32 length` + `u8 kind` + payload,
-//! little-endian.
+//! process, kept open. Under Proton on Linux (Wine's named pipes don't reach
+//! Linux programs) it's a loopback TCP connection instead: the IPC address is
+//! then `tcp:127.0.0.1:<ipc port>/<overlay port>`. Every message is
+//! `u32 length` + `u8 kind` + payload, little-endian.
 //!
 //! The DLL connects once the game's first frame went through our hook, so a
 //! connection means "this game draws the overlay itself". The app then runs
@@ -13,9 +15,22 @@
 
 use std::io::{self, Read, Write};
 
-/// Pipe name for a game's overlay connection.
+/// Pipe name for a game's overlay connection, or `tcp:<host>:<port>` under
+/// Proton.
 pub fn pipe_name(ipc_pipe: &str) -> String {
+    if let Some(rest) = ipc_pipe.strip_prefix("tcp:") {
+        if let Some((addr, port)) = rest.split_once('/') {
+            let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or("127.0.0.1");
+            return format!("tcp:{host}:{port}");
+        }
+    }
     format!("{ipc_pipe}-overlay")
+}
+
+/// The steamclient IPC socket address in a `tcp:` IPC value (without the
+/// overlay port).
+pub fn ipc_addr(tcp: &str) -> &str {
+    tcp.split_once('/').map_or(tcp, |(a, _)| a)
 }
 
 /// Largest message accepted (a full font atlas fits easily).
@@ -388,6 +403,14 @@ pub fn read_message(r: &mut impl Read) -> io::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overlay_address_under_proton() {
+        assert_eq!(super::pipe_name(r"\\.\pipe\steaminrust-1-ab"), r"\\.\pipe\steaminrust-1-ab-overlay");
+        assert_eq!(super::pipe_name("tcp:127.0.0.1:4000/4001"), "tcp:127.0.0.1:4001");
+        assert_eq!(super::ipc_addr("127.0.0.1:4000/4001"), "127.0.0.1:4000");
+        assert_eq!(super::ipc_addr("127.0.0.1:4000"), "127.0.0.1:4000");
+    }
+
     use super::*;
 
     #[test]

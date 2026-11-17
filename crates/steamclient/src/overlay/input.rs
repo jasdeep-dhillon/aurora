@@ -2,7 +2,9 @@
 //!
 //! We subclass the game's window (the swap chain's output window): Shift+Tab
 //! toggles the overlay, and while it's open the window's mouse, keyboard and
-//! raw-input messages go to the app instead of the game.
+//! raw-input messages go to the app instead of the game. Many games read the
+//! keyboard as raw input only once play starts (`RIDEV_NOLEGACY`: no
+//! WM_KEYDOWN at all), so Shift+Tab is also caught from WM_INPUT.
 //!
 //! Games also lock and hide the cursor (ClipCursor, SetCursorPos, ShowCursor,
 //! SetCursor) and read input outside the window procedure (GetRawInputData,
@@ -29,6 +31,14 @@ static BB_W: AtomicU32 = AtomicU32::new(0);
 static BB_H: AtomicU32 = AtomicU32::new(0);
 /// Swallow the WM_CHAR '\t' that follows our Shift+Tab.
 static EAT_TAB_CHAR: AtomicBool = AtomicBool::new(false);
+/// Tab and Shift as raw input last reported them (raw input has no repeat flag).
+static RAW_TAB_DOWN: AtomicBool = AtomicBool::new(false);
+static RAW_SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
+/// The game's window got legacy keyboard messages (WM_KEYDOWN).
+static LEGACY_KEYS: AtomicBool = AtomicBool::new(false);
+/// When Shift+Tab last toggled (ms since boot): a game that gets the key both
+/// as raw input and as WM_KEYDOWN must toggle once.
+static TOGGLED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// A UTF-16 high surrogate waiting for its pair.
 static HIGH_SURROGATE: AtomicU32 = AtomicU32::new(0);
 /// ShowCursor(TRUE) calls we made to show the cursor, undone on close.
@@ -245,12 +255,34 @@ unsafe fn ours(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> 
         unsafe { apply_capture(hwnd, wp.0 != 0) };
         return Some(LRESULT(0));
     }
+    if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
+        LEGACY_KEYS.store(true, Ordering::Relaxed);
+    }
     // Shift+Tab, on key down only (not repeats).
-    if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp.0 as u16 == VK_TAB.0 && lp.0 & (1 << 30) == 0 && unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0 && unsafe { GetKeyState(VK_CONTROL.0 as i32) } >= 0 {
-        if shared::with(|s| s.connected) {
-            EAT_TAB_CHAR.store(true, Ordering::Relaxed);
-            shared::set_open(!open, true, true);
-            return Some(LRESULT(0));
+    if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp.0 as u16 == VK_TAB.0 && lp.0 & (1 << 30) == 0 && unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0 && unsafe { GetKeyState(VK_CONTROL.0 as i32) } >= 0 && shift_tab(open) {
+        return Some(LRESULT(0));
+    }
+    // The same from raw input, for games that turned legacy messages off.
+    if msg == WM_INPUT {
+        if let Some((vk, down)) = unsafe { raw_key(lp) } {
+            if vk == VK_SHIFT.0 || vk == VK_LSHIFT.0 || vk == VK_RSHIFT.0 {
+                RAW_SHIFT_DOWN.store(down, Ordering::Relaxed);
+            }
+            let shift = RAW_SHIFT_DOWN.load(Ordering::Relaxed) || unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) } < 0;
+            let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } < 0;
+            if vk == VK_TAB.0 {
+                let first = down && !RAW_TAB_DOWN.swap(down, Ordering::Relaxed);
+                if !down {
+                    RAW_TAB_DOWN.store(false, Ordering::Relaxed);
+                }
+                if first && shift && !ctrl && shift_tab(open) {
+                    return Some(unsafe { DefWindowProcW(hwnd, msg, wp, lp) });
+                }
+            }
+            // Raw-only games send no WM_KEYDOWN: the open overlay still gets keys (Esc, arrows…).
+            if open && !LEGACY_KEYS.load(Ordering::Relaxed) && vk != 0 {
+                shared::push_input(modifiers(), Input::Key { vk: vk as u32, down, repeat: false });
+            }
         }
     }
     if msg == WM_CHAR && wp.0 == 9 && EAT_TAB_CHAR.swap(false, Ordering::Relaxed) {
@@ -335,6 +367,46 @@ unsafe fn ours(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> 
         }
         _ => None,
     }
+}
+
+/// Toggle the overlay for Shift+Tab; false when there's no app to show it.
+fn shift_tab(open: bool) -> bool {
+    if !shared::with(|s| s.connected) {
+        return false;
+    }
+    let now = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+    // The same key press seen again (raw input, then WM_KEYDOWN): done already.
+    if now.saturating_sub(TOGGLED_AT.swap(now, Ordering::Relaxed)) < 200 {
+        return true;
+    }
+    EAT_TAB_CHAR.store(true, Ordering::Relaxed);
+    shared::set_open(!open, true, true);
+    true
+}
+
+/// A raw keyboard event in a WM_INPUT: (virtual key, pressed). Reading it
+/// leaves it for the game (raw input stays readable until the message is done).
+unsafe fn raw_key(lp: LPARAM) -> Option<(u16, bool)> {
+    use windows::Win32::UI::Input::{GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTHEADER, RID_INPUT, RIM_TYPEKEYBOARD};
+    let header = size_of::<RAWINPUTHEADER>() as u32;
+    let mut size = 0u32;
+    unsafe { GetRawInputData(HRAWINPUT(lp.0 as *mut c_void), RID_INPUT, None, &mut size, header) };
+    if size == 0 || size as usize > 1024 {
+        return None;
+    }
+    // u64s: RAWINPUT needs pointer alignment.
+    let mut buf = vec![0u64; (size as usize).div_ceil(8)];
+    let got = unsafe { GetRawInputData(HRAWINPUT(lp.0 as *mut c_void), RID_INPUT, Some(buf.as_mut_ptr().cast()), &mut size, header) };
+    if got == u32::MAX || (got as usize) < size_of::<RAWINPUTHEADER>() {
+        return None;
+    }
+    let ri = unsafe { &*(buf.as_ptr() as *const RAWINPUT) };
+    if ri.header.dwType != RIM_TYPEKEYBOARD.0 {
+        return None;
+    }
+    let kb = unsafe { ri.data.keyboard };
+    // RI_KEY_BREAK = 1: released.
+    Some((kb.VKey, kb.Flags & 1 == 0))
 }
 
 // ---- Import table hooks -------------------------------------------------

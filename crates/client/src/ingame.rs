@@ -2,7 +2,8 @@
 //! `crates/steamclient/src/overlay`).
 //!
 //! A game whose frames go through our steamclient DLL's D3D11 hook connects
-//! to `<ipc pipe>-overlay` with its launch token. Each accepted connection
+//! to `<ipc pipe>-overlay` with its launch token (on Linux, where Proton
+//! games can't reach a Linux named pipe, to a loopback TCP port instead). Each accepted connection
 //! becomes a [`Conn`] the UI picks up with [`take_new`]: it runs the overlay
 //! UI for that game and sends frames back with [`Conn::send`].
 
@@ -60,7 +61,7 @@ pub fn take_new() -> Vec<Conn> {
 pub async fn accept(pipe: String, app_for: impl Fn(&str) -> Option<AppId> + Send + Sync + 'static) {
     use tokio::net::windows::named_pipe::ServerOptions;
     let name = wire::pipe_name(&pipe);
-    let app_for = Arc::new(app_for);
+    let app_for: Arc<dyn Fn(&str) -> Option<AppId> + Send + Sync> = Arc::new(app_for);
     let mut first = true;
     loop {
         let server = match ServerOptions::new().first_pipe_instance(first).reject_remote_clients(true).create(&name) {
@@ -79,7 +80,24 @@ pub async fn accept(pipe: String, app_for: impl Fn(&str) -> Option<AppId> + Send
     }
 }
 
-#[cfg(windows)]
+/// Accept overlay connections from Proton games on a loopback socket.
+#[cfg(not(windows))]
+pub async fn accept_tcp(listener: tokio::net::TcpListener, app_for: impl Fn(&str) -> Option<AppId> + Send + Sync + 'static) {
+    let app_for: Arc<dyn Fn(&str) -> Option<AppId> + Send + Sync> = Arc::new(app_for);
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let _ = stream.set_nodelay(true);
+                tokio::spawn(serve(stream, app_for.clone()));
+            }
+            Err(e) => {
+                tracing::warn!("overlay socket: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
 async fn read_message(r: &mut (impl tokio::io::AsyncRead + Unpin)) -> std::io::Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
     let n = r.read_u32_le().await? as usize;
@@ -91,8 +109,10 @@ async fn read_message(r: &mut (impl tokio::io::AsyncRead + Unpin)) -> std::io::R
     Ok(body)
 }
 
-#[cfg(windows)]
-async fn serve(pipe: tokio::net::windows::named_pipe::NamedPipeServer, app_for: Arc<dyn Fn(&str) -> Option<AppId> + Send + Sync>) {
+async fn serve<S>(pipe: S, app_for: Arc<dyn Fn(&str) -> Option<AppId> + Send + Sync>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+{
     use tokio::io::AsyncWriteExt;
     let (mut r, mut w) = tokio::io::split(pipe);
     let hello = tokio::time::timeout(std::time::Duration::from_secs(10), read_message(&mut r)).await;
