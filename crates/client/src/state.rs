@@ -172,6 +172,7 @@ impl State {
             Event::Reviews { steam_id, page, result } => {
                 self.reviews.insert((*steam_id, *page), result.clone());
             }
+            Event::TradeOfferSent { .. } => {}
             Event::Groups { steam_id, result } => {
                 self.groups.insert(*steam_id, result.clone());
             }

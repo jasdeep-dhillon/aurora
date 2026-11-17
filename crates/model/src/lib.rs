@@ -1113,6 +1113,41 @@ pub struct Inventory {
     pub error: Option<String>,
 }
 
+/// An item in a trade offer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeAsset {
+    pub app_id: AppId,
+    pub context_id: u64,
+    pub asset_id: u64,
+    pub amount: u64,
+}
+
+/// A trade offer Steam accepted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeOfferSent {
+    pub id: u64,
+    /// Steam waits for you to confirm it in the Steam Mobile app (or email).
+    pub needs_confirmation: bool,
+}
+
+/// A trade URL (`…/tradeoffer/new/?partner=<account>&token=<token>`):
+/// the partner's SteamID and the token that lets non-friends send offers.
+pub fn parse_trade_url(url: &str) -> Option<(SteamId, Option<String>)> {
+    let query = url.trim().split_once('?')?.1;
+    let mut partner = None;
+    let mut token = None;
+    for pair in query.split('&') {
+        match pair.split_once('=') {
+            Some(("partner", v)) => partner = v.parse::<u64>().ok(),
+            Some(("token", v)) if !v.is_empty() => token = Some(v.to_string()),
+            _ => {}
+        }
+    }
+    let account = partner?;
+    let steam_id = if account > u32::MAX as u64 { account } else { 76561197960265728 + account };
+    Some((steam_id, token))
+}
+
 /// One of a game's achievements, with whether you have it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Achievement {
@@ -1579,5 +1614,17 @@ pub mod art {
             .filter(|h| !h.is_empty() && !h.chars().all(|c| c == '0'))
             .unwrap_or(DEFAULT_AVATAR);
         format!("https://avatars.steamstatic.com/{h}_medium.jpg")
+    }
+}
+
+#[cfg(test)]
+mod trade_url_tests {
+    #[test]
+    fn reads_trade_urls() {
+        let (id, token) = super::parse_trade_url("https://steamcommunity.com/tradeoffer/new/?partner=12345&token=AbC-12").unwrap();
+        assert_eq!(id, 76561197960265728 + 12345);
+        assert_eq!(token.as_deref(), Some("AbC-12"));
+        assert_eq!(super::parse_trade_url("https://steamcommunity.com/tradeoffer/new/?partner=76561197960278073"), Some((76561197960278073, None)));
+        assert_eq!(super::parse_trade_url("https://steamcommunity.com/id/someone"), None);
     }
 }

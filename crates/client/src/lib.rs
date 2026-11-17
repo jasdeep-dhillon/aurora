@@ -124,6 +124,8 @@ pub enum Command {
     /// Fetch one game's inventory for an account (753/6 is the Steam
     /// inventory: cards, backgrounds, emoticons). `language` is Steam's name.
     LoadInventory { steam_id: SteamId, app_id: AppId, context_id: u64, language: String },
+    /// Send a trade offer (`token` from the partner's trade URL, for non-friends).
+    SendTradeOffer { partner: SteamId, token: Option<String>, message: String, give: Vec<model::TradeAsset>, take: Vec<model::TradeAsset> },
     /// Find every game that has items in an account's inventory.
     LoadInventoryApps { steam_id: SteamId },
     /// Community Market price of an item in your wallet currency. `full` also
@@ -318,6 +320,7 @@ pub enum Event {
     Blocked { steam_id: SteamId, result: Result<bool, String> },
     Badges { steam_id: SteamId, result: Result<model::Badges, String> },
     Reviews { steam_id: SteamId, page: u32, result: Result<model::UserReviews, String> },
+    TradeOfferSent { partner: SteamId, result: Result<model::TradeOfferSent, String> },
     Groups { steam_id: SteamId, result: Result<Vec<model::UserGroup>, String> },
     CardSet { steam_id: SteamId, app_id: AppId, foil: bool, result: Result<model::CardSet, String> },
     /// The full notification list (replaces the old one).
