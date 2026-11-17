@@ -982,6 +982,44 @@ async fn online(
                     let result = crate::social::groups(web.as_deref().ok(), steam_id).await;
                     sink(Event::Groups { steam_id, result });
                 }),
+                Some(Command::LoadAppReviews { app_id, language, cursor }) => {
+                    let sink = sink.clone();
+                    tokio::spawn(async move {
+                        let more = cursor.is_some();
+                        let result = crate::reviews::load(app_id, &language, cursor.as_deref().unwrap_or("*")).await;
+                        sink(Event::AppReviews { app_id, more, result });
+                    });
+                }
+                Some(Command::LoadMyReview { app_id }) => st.with_web(sink, move |web, sink| async move {
+                    let result = match web {
+                        Ok(w) => crate::reviews::mine(&w, app_id).await,
+                        Err(e) => Err(e),
+                    };
+                    sink(Event::MyReview { app_id, result });
+                }),
+                Some(Command::PostReview { app_id, text, recommended, public, allow_comments, language }) => st.with_web(sink, move |web, sink| async move {
+                    let draft = crate::reviews::Draft { text, recommended, public, allow_comments, language };
+                    let result = match &web {
+                        Ok(w) => crate::reviews::post(w, app_id, &draft).await,
+                        Err(e) => Err(e.clone()),
+                    };
+                    let ok = result.is_ok();
+                    sink(Event::ReviewSaved { app_id, deleted: false, result });
+                    if let (true, Ok(w)) = (ok, web) {
+                        sink(Event::MyReview { app_id, result: crate::reviews::mine(&w, app_id).await });
+                    }
+                }),
+                Some(Command::DeleteReview { app_id }) => st.with_web(sink, move |web, sink| async move {
+                    let result = match &web {
+                        Ok(w) => crate::reviews::delete(w, app_id).await,
+                        Err(e) => Err(e.clone()),
+                    };
+                    let ok = result.is_ok();
+                    sink(Event::ReviewSaved { app_id, deleted: true, result });
+                    if ok {
+                        sink(Event::MyReview { app_id, result: Ok(None) });
+                    }
+                }),
                 Some(Command::LoadStoreRecommendations { language }) => {
                     let (conn, sink) = (conn.clone(), sink.clone());
                     tokio::spawn(async move {

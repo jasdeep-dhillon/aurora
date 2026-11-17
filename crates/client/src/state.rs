@@ -47,6 +47,10 @@ pub struct State {
     pub badges: HashMap<SteamId, Result<model::Badges, String>>,
     /// Profile reviews by (profile, page).
     pub reviews: HashMap<(SteamId, u32), Result<model::UserReviews, String>>,
+    /// Reviews of games (summary and the pages loaded so far).
+    pub app_reviews: HashMap<AppId, Result<model::AppReviews, String>>,
+    /// Your own review of each game looked up (`None`: none written).
+    pub my_reviews: HashMap<AppId, Result<Option<model::UserReview>, String>>,
     /// The store's personal picks for this account (after sign-in).
     pub store_recs: Option<model::StoreRecommendations>,
     pub groups: HashMap<SteamId, Result<Vec<model::UserGroup>, String>>,
@@ -174,6 +178,19 @@ impl State {
             Event::Reviews { steam_id, page, result } => {
                 self.reviews.insert((*steam_id, *page), result.clone());
             }
+            Event::AppReviews { app_id, more, result } => match (result, self.app_reviews.get_mut(app_id)) {
+                (Ok(page), Some(Ok(have))) if *more => {
+                    have.items.extend(page.items.iter().cloned());
+                    have.cursor = page.cursor.clone();
+                }
+                _ => {
+                    self.app_reviews.insert(*app_id, result.clone());
+                }
+            },
+            Event::MyReview { app_id, result } => {
+                self.my_reviews.insert(*app_id, result.clone());
+            }
+            Event::ReviewSaved { .. } => {}
             Event::StoreRecommendations(r) => self.store_recs = Some(r.clone()),
             Event::TradeOfferSent { .. } => {}
             Event::Groups { steam_id, result } => {

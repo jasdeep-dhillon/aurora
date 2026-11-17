@@ -11,6 +11,7 @@ mod library;
 mod plugins;
 mod support;
 mod profile;
+mod reviews;
 pub mod settings;
 mod settings_account;
 pub mod store;

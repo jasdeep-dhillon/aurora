@@ -44,6 +44,8 @@ enum View {
 }
 
 pub struct Store {
+    /// A game's reviews (read, or write your own).
+    reviews: Option<super::reviews::ReviewWindow>,
     /// The personal picks were asked for (once per sign-in).
     recs_asked: bool,
     /// Personal shelves built from the picks: (picks they came from, shelves).
@@ -116,6 +118,7 @@ struct Saved {
 impl Store {
     pub fn new(rt: tokio::runtime::Handle, egui: egui::Context) -> Self {
         Self {
+            reviews: None,
             recs_asked: false,
             recs: None,
             rt,
@@ -374,6 +377,9 @@ impl Extension for Store {
     }
 
     fn on_event(&mut self, event: &client::Event, ctx: &mut Ctx) {
+        if let Some(r) = &mut self.reviews {
+            r.on_event(event, ctx);
+        }
         if let client::Event::LoggedIn { .. } = event {
             // A new account: its own picks.
             self.recs_asked = false;
@@ -479,6 +485,11 @@ impl Extension for Store {
                 }
             }
         });
+        if let Some(r) = &mut self.reviews {
+            if !r.show(ui, &t, ctx) {
+                self.reviews = None;
+            }
+        }
         self.flush_ratings();
         self.gift_dialog(ui, &t, ctx);
         self.cart_popup_ui(ui, &t, ctx);
@@ -1164,6 +1175,8 @@ impl Store {
                     });
                 });
             });
+            ui.add_space(12.0);
+            self.reviews_card(ui, t, id, &d.name, owned);
             ui.add_space(28.0);
 
             ui.horizontal_top(|ui| {
@@ -1532,6 +1545,49 @@ impl Store {
                 row(ui, icons::CALENDAR, t.accent, t!("Not released yet").to_string());
             }
         });
+    }
+}
+
+impl Store {
+    /// Reviews, right under the purchase box like on Steam: the score, and
+    /// big buttons to read what players say or write your own.
+    fn reviews_card(&mut self, ui: &mut Ui, t: &Theme, id: AppId, name: &str, owned: bool) {
+        let info = self.browse_info(id);
+        let tint = info.as_ref().and_then(|i| i.reviews.as_ref()).map(|r| review_color(t, r.score)).unwrap_or(t.accent);
+        egui::Frame::new()
+            .fill(w::mix(t.surface, tint, 0.10))
+            .stroke(egui::Stroke::new(1.0, w::mix(t.border, tint, 0.45)))
+            .corner_radius(t.corner())
+            .inner_margin(Margin::symmetric(20, 16))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(w::text(icons::CHATS, 26.0, tint));
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        ui.label(w::text_bold(t!("Player reviews"), 17.0, t.text));
+                        match info.as_ref().and_then(|i| i.reviews.clone()) {
+                            Some(r) => {
+                                ui.horizontal(|ui| {
+                                    ui.label(w::text_semibold(i18n::tr_dyn(&r.label), 14.5, tint));
+                                    ui.label(w::text(t!("({percent}% of {count})", percent = r.percent_positive, count = thousands(r.count)), 13.0, t.text_dim));
+                                });
+                            }
+                            None => {
+                                ui.label(w::text(t!("See what players think of {name}.", name = name), 13.0, t.text_dim));
+                            }
+                        }
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if owned && w::button(ui, t, Some(icons::NOTE), t!("Write a review"), w::Kind::Play, w::Size::Lg).clicked() {
+                            self.reviews = Some(super::reviews::ReviewWindow::new(id, name, owned, true));
+                        }
+                        if w::button(ui, t, Some(icons::THUMBS_UP), t!("Read reviews"), w::Kind::Primary, w::Size::Lg).clicked() {
+                            self.reviews = Some(super::reviews::ReviewWindow::new(id, name, owned, false));
+                        }
+                    });
+                });
+            });
     }
 }
 
