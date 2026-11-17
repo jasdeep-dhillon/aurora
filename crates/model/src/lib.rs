@@ -160,6 +160,21 @@ pub struct CloudReport {
     pub quota_bytes: u64,
     /// Unix seconds.
     pub finished: u64,
+    /// Every file in the cloud, for the file list in Properties.
+    #[serde(default)]
+    pub files: Vec<CloudFile>,
+}
+
+/// One file in a game's Steam Cloud.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CloudFile {
+    /// The name Steam stores it under (what a delete needs).
+    pub raw: String,
+    /// The same name, cleaned up for showing.
+    pub name: String,
+    pub size: u64,
+    /// Unix seconds.
+    pub time: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
