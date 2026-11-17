@@ -295,6 +295,60 @@ pub async fn price(web: Option<&Web>, app: AppId, hash_name: &str, currency: i32
 }
 
 /// List an item. Returns whether Steam wants a mobile/email confirmation.
+/// Send a trade offer: `give` from your inventory, `take` from theirs.
+/// `token` is the partner's trade URL token (needed when you aren't friends).
+pub async fn send_trade_offer(web: &Web, partner: SteamId, token: Option<&str>, message: &str, give: &[model::TradeAsset], take: &[model::TradeAsset]) -> Result<model::TradeOfferSent, String> {
+    let account = partner & 0xFFFF_FFFF;
+    let assets = |list: &[model::TradeAsset]| -> Vec<Value> {
+        list.iter()
+            .map(|a| serde_json::json!({ "appid": a.app_id, "contextid": a.context_id.to_string(), "amount": a.amount.max(1), "assetid": a.asset_id.to_string() }))
+            .collect()
+    };
+    let offer = serde_json::json!({
+        "newversion": true,
+        "version": give.len() + take.len() + 1,
+        "me": { "assets": assets(give), "currency": [], "ready": false },
+        "them": { "assets": assets(take), "currency": [], "ready": false },
+    });
+    let params = match token {
+        Some(t) => serde_json::json!({ "trade_offer_access_token": t }),
+        None => serde_json::json!({}),
+    };
+    let referer = match token {
+        Some(t) => format!("{COMMUNITY}/tradeoffer/new/?partner={account}&token={t}"),
+        None => format!("{COMMUNITY}/tradeoffer/new/?partner={account}"),
+    };
+    let resp = web
+        .http
+        .post(format!("{COMMUNITY}/tradeoffer/new/send"))
+        .header("Referer", referer)
+        .form(&[
+            ("sessionid", web.session_id.clone()),
+            ("serverid", "1".to_string()),
+            ("partner", partner.to_string()),
+            ("tradeoffermessage", message.to_string()),
+            ("json_tradeoffer", offer.to_string()),
+            ("captcha", String::new()),
+            ("trade_offer_create_params", params.to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    trade_result(&v)
+}
+
+/// Steam's answer to a trade offer: its id, or `strError`.
+fn trade_result(v: &Value) -> Result<model::TradeOfferSent, String> {
+    match v.get("tradeofferid").and_then(num) {
+        Some(id) if id > 0 => Ok(model::TradeOfferSent {
+            id,
+            needs_confirmation: v.get("needs_mobile_confirmation").and_then(|b| b.as_bool()).unwrap_or(false) || v.get("needs_email_confirmation").and_then(|b| b.as_bool()).unwrap_or(false),
+        }),
+        _ => Err(Some(str_of(v, "strError")).filter(|m| !m.is_empty()).unwrap_or_else(|| "Steam didn't accept the trade offer".into())),
+    }
+}
+
 pub async fn sell(web: &Web, app: AppId, context: u64, asset: u64, amount: u64, receive: u64) -> Result<bool, String> {
     let v: Value = web
         .http
@@ -428,6 +482,13 @@ fn buy_order(x: &Value) -> Option<model::BuyOrder> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_trade_offer_results() {
+        let ok = super::trade_result(&serde_json::json!({"tradeofferid": "123456", "needs_mobile_confirmation": true})).unwrap();
+        assert_eq!((ok.id, ok.needs_confirmation), (123456, true));
+        assert_eq!(super::trade_result(&serde_json::json!({"strError": "You cannot trade with this user (15)"})), Err("You cannot trade with this user (15)".to_string()));
+    }
+
     #[test]
     fn reads_embedded_order_book() {
         let page = r#"<script>x = JSON.parse("{\"queries\":[{\"state\":{\"data\":{\"amtMaxBuyOrder\":null,\"amtMinSellOrder\":3,\"eCurrency\":1,\"cBuyOrders\":0,\"cSellOrders\":51830,\"rgCompactBuyOrders\":[],\"rgCompactSellOrders\":[3,11059,4,25755]},\"x\":1}]}");</script>"#;

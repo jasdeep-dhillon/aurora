@@ -87,3 +87,4 @@ opt-level = 3
 [patch.crates-io]
 epaint = { path = "vendor/epaint" }
 egui_glow = { path = "vendor/egui_glow" }
+eframe = { path = "vendor/eframe" }

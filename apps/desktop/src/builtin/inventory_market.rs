@@ -98,13 +98,22 @@ impl Inventory {
                 ui.label(w::text(why, 12.5, t.text_faint));
             }
 
-            if mine && item.tradable {
+            if item.tradable {
                 ui.add_space(12.0);
-                w::caption(ui, t, t!("Trade or gift"));
-                ui.add(egui::Label::new(w::text(t!("Send it to a friend as a gift or part of a trade. Trade offers open on Steam's website for now."), 12.5, t.text_dim)).wrap());
-                ui.add_space(4.0);
-                if w::button(ui, t, Some(icons::GIFT), t!("Gift to a friend…"), w::Kind::Secondary, w::Size::Sm).clicked() {
-                    self.gift = Some(item.asset_id);
+                w::caption(ui, t, t!("Trade"));
+                if mine {
+                    ui.add(egui::Label::new(w::text(t!("Offer it to a friend, or to anyone with their trade URL, alone or for some of their items."), 12.5, t.text_dim)).wrap());
+                    ui.add_space(4.0);
+                    if w::button(ui, t, Some(icons::SWAP), t!("Trade…"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                        self.trade = Some(super::trade::TradeDialog::give(item, app));
+                    }
+                } else if let Some(owner) = self.owner {
+                    ui.add(egui::Label::new(w::text(t!("Ask for it in a trade, for some of your items or as a gift."), 12.5, t.text_dim)).wrap());
+                    ui.add_space(4.0);
+                    if w::button(ui, t, Some(icons::SWAP), t!("Ask for it in a trade…"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                        let name = ctx.state.personas.get(&owner).map(|p| p.name.clone()).unwrap_or_else(|| owner.to_string());
+                        self.trade = Some(super::trade::TradeDialog::take(item, app, owner, name));
+                    }
                 }
             }
 
@@ -333,46 +342,6 @@ impl Inventory {
         }
         if close || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.sell = None;
-        }
-    }
-
-    pub(super) fn gift_picker(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
-        if self.gift.is_none() {
-            return;
-        }
-        let mut close = false;
-        let friends = ctx.state.friend_list();
-        ui::widgets::modal(ui.ctx(), egui::Id::unique("gift-item")).show(ui.ctx(), |ui| {
-            ui.set_width(380.0);
-            ui.label(w::text_bold(t!("Gift to a friend"), 18.0, t.text));
-            ui.add(egui::Label::new(w::text(t!("Pick a friend. A trade offer to them opens on Steam's website; add this item and send it."), 12.5, t.text_dim)).wrap());
-            ui.add_space(8.0);
-            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                if friends.is_empty() {
-                    ui.label(w::text(t!("Your friends list is empty."), 13.0, t.text_faint));
-                }
-                for f in &friends {
-                    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
-                    if resp.hovered() {
-                        ui.painter().rect_filled(r, t.corner_small(), t.surface_hover);
-                    }
-                    let av = Rect::from_min_size(r.min + vec2(6.0, 6.0), vec2(28.0, 28.0));
-                    w::image_or_skeleton(ui, t, av, &art::avatar(f.avatar_hash.as_deref()), CornerRadius::same(4));
-                    ui.painter().text(pos2(av.right() + 10.0, r.center().y), Align2::LEFT_CENTER, &f.name, w::font_medium(13.5), t.text);
-                    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        let account = f.steam_id & 0xFFFF_FFFF;
-                        let _ = open::that_detached(format!("https://steamcommunity.com/tradeoffer/new/?partner={account}"));
-                        close = true;
-                    }
-                }
-            });
-            ui.add_space(8.0);
-            if w::button(ui, t, None, t!("Cancel"), w::Kind::Ghost, w::Size::Sm).clicked() {
-                close = true;
-            }
-        });
-        if close || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.gift = None;
         }
     }
 

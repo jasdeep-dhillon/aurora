@@ -635,6 +635,13 @@ impl SteamApp {
 }
 
 impl eframe::App for SteamApp {
+    /// Runs before every frame, and also while the window gets no frames
+    /// (minimized or behind a fullscreen game on Wayland): the overlay drawn
+    /// inside the game runs here so it stays quick then.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::overlay::logic(self, ctx);
+    }
+
     /// Scroll faster than egui's default (Settings → Accessibility → Scroll
     /// speed). Ctrl/Cmd + wheel zooms, so those events stay as they are.
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {

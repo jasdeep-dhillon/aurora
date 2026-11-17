@@ -104,6 +104,7 @@ impl Overlay {
             if e.state == HotKeyState::Pressed {
                 flag.store(true, Ordering::Relaxed);
                 repaint.request_repaint();
+                repaint.request_repaint_of(overlay_viewport());
             }
         }));
         // A game's in-game overlay sent something: run the UI.
@@ -224,7 +225,11 @@ impl Overlay {
 fn foreground_window() -> isize {
     unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() as isize }
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn foreground_window() -> isize {
+    x11::active_window().map(|w| w as isize).unwrap_or(0)
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 fn foreground_window() -> isize {
     0
 }
@@ -261,9 +266,52 @@ fn foreground_is_in(dir: &std::path::Path) -> bool {
         exe.starts_with(dir.trim_end_matches('\\'))
     }
 }
-#[cfg(not(windows))]
+/// Linux: the focused X window (games run on X11 or XWayland) belongs to a
+/// process whose program, folder or command line is inside the game's
+/// folder. Proton games are Wine processes, so their command line holds the
+/// game's Windows path (`Z:\home\…\Game.exe`).
+#[cfg(target_os = "linux")]
+fn foreground_is_in(dir: &std::path::Path) -> bool {
+    let Some(pid) = x11::active_window().and_then(x11::window_pid) else { return false };
+    if pid == std::process::id() {
+        return false;
+    }
+    process_in(pid, dir)
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 fn foreground_is_in(_: &std::path::Path) -> bool {
     false
+}
+
+/// A process runs from `dir`: its executable, working directory or any
+/// command-line argument (Wine paths too) is inside it.
+#[cfg(target_os = "linux")]
+fn process_in(pid: u32, dir: &std::path::Path) -> bool {
+    let dir = dir.to_string_lossy().trim_end_matches('/').to_lowercase();
+    if dir.is_empty() {
+        return false;
+    }
+    let inside = |p: &str| {
+        let p = wine_to_unix(p).to_lowercase();
+        p == dir || p.starts_with(&format!("{dir}/"))
+    };
+    let proc_ = std::path::PathBuf::from(format!("/proc/{pid}"));
+    for link in ["exe", "cwd"] {
+        if std::fs::read_link(proc_.join(link)).is_ok_and(|p| inside(&p.to_string_lossy())) {
+            return true;
+        }
+    }
+    std::fs::read(proc_.join("cmdline")).is_ok_and(|c| c.split(|b| *b == 0).any(|a| !a.is_empty() && inside(&String::from_utf8_lossy(a))))
+}
+
+/// `Z:\home\me\Game.exe` (Wine's drive for `/`) → `/home/me/Game.exe`;
+/// other paths unchanged.
+#[cfg(target_os = "linux")]
+fn wine_to_unix(p: &str) -> String {
+    match p.get(..2) {
+        Some(d) if d.eq_ignore_ascii_case("z:") => p[2..].replace('\\', "/"),
+        _ => p.to_string(),
+    }
 }
 
 #[cfg(windows)]
@@ -272,8 +320,85 @@ fn give_focus(window: isize) {
         unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(window as _) };
     }
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn give_focus(window: isize) {
+    if window != 0 {
+        x11::activate(window as u32);
+    }
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 fn give_focus(_: isize) {}
+
+/// The few X11 calls the overlay needs, on one shared connection.
+#[cfg(target_os = "linux")]
+mod x11 {
+    use std::sync::{Mutex, OnceLock};
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt, EventMask};
+    use x11rb::rust_connection::RustConnection;
+
+    struct X {
+        conn: RustConnection,
+        root: u32,
+        active: u32,
+        pid: u32,
+    }
+
+    fn x() -> Option<&'static Mutex<X>> {
+        static X11: OnceLock<Option<Mutex<X>>> = OnceLock::new();
+        X11.get_or_init(|| {
+            let (conn, screen) = x11rb::connect(None).map_err(|e| tracing::info!("overlay: no X11 display ({e})")).ok()?;
+            let root = conn.setup().roots.get(screen)?.root;
+            let atom = |name: &str| conn.intern_atom(false, name.as_bytes()).ok()?.reply().ok().map(|r| r.atom);
+            let (active, pid) = (atom("_NET_ACTIVE_WINDOW")?, atom("_NET_WM_PID")?);
+            Some(Mutex::new(X { conn, root, active, pid }))
+        })
+        .as_ref()
+    }
+
+    fn property_u32(x: &X, window: u32, prop: u32, kind: AtomEnum) -> Option<u32> {
+        let r = x.conn.get_property(false, window, prop, kind, 0, 1).ok()?.reply().ok()?;
+        r.value32()?.next()
+    }
+
+    /// The window the window manager says is in front.
+    pub fn active_window() -> Option<u32> {
+        let x = x()?.lock().ok()?;
+        property_u32(&x, x.root, x.active, AtomEnum::WINDOW).filter(|w| *w != 0)
+    }
+
+    /// The process that owns a window (`_NET_WM_PID`).
+    pub fn window_pid(window: u32) -> Option<u32> {
+        let x = x()?.lock().ok()?;
+        property_u32(&x, window, x.pid, AtomEnum::CARDINAL).filter(|p| *p != 0)
+    }
+
+    /// Ask the window manager to bring a window to the front and focus it.
+    pub fn activate(window: u32) {
+        let Some(Ok(x)) = x().map(|m| m.lock()) else { return };
+        // Source 2: a pager-like request, which window managers honour.
+        let ev = ClientMessageEvent::new(32, window, x.active, [2u32, x11rb::CURRENT_TIME, 0, 0, 0]);
+        let mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
+        let _ = x.conn.send_event(false, x.root, mask, ev);
+        let _ = x.conn.flush();
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    #[test]
+    fn wine_paths_become_unix_paths() {
+        assert_eq!(super::wine_to_unix(r"Z:\home\me\Games\Celeste\Celeste.exe"), "/home/me/Games/Celeste/Celeste.exe");
+        assert_eq!(super::wine_to_unix("/usr/bin/foo"), "/usr/bin/foo");
+    }
+
+    #[test]
+    fn finds_this_process_in_its_own_folder() {
+        let exe = std::env::current_exe().unwrap();
+        assert!(super::process_in(std::process::id(), exe.parent().unwrap()));
+        assert!(!super::process_in(std::process::id(), std::path::Path::new("/nonexistent-aurora-dir")));
+    }
+}
 
 /// Pick up games that draw the overlay themselves and read what they sent.
 fn poll_ingame(app: &mut SteamApp, ctx: &egui::Context) {
@@ -351,20 +476,36 @@ fn ingame_frame(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Actio
 /// in-game overlay would run at 10 fps. So a 1×1 helper window that never
 /// takes focus or shows in the taskbar gets the frames instead, and runs the
 /// in-game overlay at full speed.
+/// The app for a deferred viewport's callback.
+struct AppPtr(*mut SteamApp);
+// SAFETY: only used on the UI thread: eframe calls deferred viewport
+// callbacks there, in their own frames, never inside `App::ui` (callers
+// check that viewports aren't embedded), and the app outlives its viewports.
+unsafe impl Send for AppPtr {}
+unsafe impl Sync for AppPtr {}
+impl AppPtr {
+    fn get(&self) -> *mut SteamApp {
+        self.0
+    }
+}
+
+/// The window overlay's own viewport.
+fn overlay_viewport() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("aurora-overlay")
+}
+
 fn keep_ticking(app: &mut SteamApp, ctx: &egui::Context) {
     // Without real windows the callback would run inside this frame, while
     // `app` is borrowed: the main window's frames have to do then.
     if ctx.embed_viewports() {
         return;
     }
-    struct AppPtr(*mut SteamApp);
-    // SAFETY: only used on the UI thread (see below).
-    unsafe impl Send for AppPtr {}
-    unsafe impl Sync for AppPtr {}
-    impl AppPtr {
-        fn get(&self) -> *mut SteamApp {
-            self.0
-        }
+    // Linux: the main window keeps getting frames while minimized or behind
+    // the game (GNOME on Wayland still sends them), so it drives the overlay.
+    // A 1x1 fixed-size helper window is also a Wayland protocol error
+    // ("Invalid min/max size") that closes the app.
+    if cfg!(target_os = "linux") {
+        return;
     }
     let app = AppPtr(app);
     let builder = egui::ViewportBuilder::default()
@@ -395,9 +536,24 @@ fn keep_ticking(app: &mut SteamApp, ctx: &egui::Context) {
     });
 }
 
+/// The overlay drawn inside a game (from `App::logic`, which also runs when
+/// the app's window gets no frames): read the game's input, run the UI, send
+/// the frame. Window commands it asks for wait for the next real frame.
+pub fn logic(app: &mut SteamApp, ctx: &egui::Context) {
+    poll_ingame(app, ctx);
+    if app.overlay.ingame.is_none() {
+        return;
+    }
+    let mut actions = std::mem::take(&mut app.overlay.pending);
+    ingame_frame(app, ctx, &mut actions);
+    app.overlay.pending = actions;
+    if !app.overlay.pending.is_empty() {
+        ctx.request_repaint();
+    }
+}
+
 pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) {
     actions.append(&mut app.overlay.pending);
-    poll_ingame(app, ctx);
     // Shift+Tab belongs to the game only while the game is in front.
     if let Some((id, _)) = app.overlay.game {
         let dir = app.local.games.iter().find(|g| g.app_id == id).map(|g| g.install_dir.clone());
@@ -426,13 +582,13 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
         }
     }
     let t = app.prefs.theme.clone();
-    // Drawn inside the game: run the overlay's UI on the game's input.
+    // Drawn inside the game: `logic` runs its UI (before this frame, and
+    // while the window gets no frames).
     if app.overlay.ingame.is_some() {
-        ingame_frame(app, ctx, actions);
         keep_ticking(app, ctx);
         return;
     }
-    let viewport = egui::ViewportId::from_hash_of("aurora-overlay");
+    let viewport = overlay_viewport();
     // Not true fullscreen: Windows turns a window that exactly covers the
     // screen into exclusive fullscreen, which drops transparency (the game
     // went black). One pixel short keeps it a normal see-through window.
@@ -446,6 +602,45 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
         .with_inner_size(monitor - egui::vec2(0.0, 1.0))
         .with_mouse_passthrough(!active)
         .with_taskbar(false);
+    // Linux: the overlay window draws in its own frames. The main window is
+    // behind the game or minimized then, and the compositor (GNOME on
+    // Wayland) hardly gives it frames, so an overlay drawn from them
+    // opened late and crawled.
+    #[cfg(target_os = "linux")]
+    if !ctx.embed_viewports() {
+        let ptr = AppPtr(app);
+        ctx.show_viewport_deferred(viewport, builder, move |ui, _class| {
+            let app = unsafe { &mut *ptr.get() };
+            // Shift+Tab while the overlay is in front closes it right here.
+            if app.overlay.pressed.swap(false, Ordering::Relaxed) {
+                app.overlay.toggle();
+            }
+            let active = app.overlay.open;
+            let opened_now = active && !app.overlay.focused;
+            if app.overlay.passthrough != Some(!active) {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::MousePassthrough(!active));
+                app.overlay.passthrough = Some(!active);
+            }
+            if opened_now {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+                app.overlay.focused = true;
+            }
+            let t = app.prefs.theme.clone();
+            let mut actions = std::mem::take(&mut app.overlay.pending);
+            if content(app, ui, &t, &mut actions, active) {
+                app.overlay.close();
+            }
+            app.overlay.pending = actions;
+            // Window commands (and closing) are the main window's job.
+            if !app.overlay.pending.is_empty() || !app.overlay.open {
+                ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+            }
+            if app.overlay.open {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        });
+        return;
+    }
     let opened_now = active && !app.overlay.focused;
     ctx.show_viewport_immediate(viewport, builder, |ui, _class| {
         // Pinned windows over the game let clicks through; the open overlay takes them.
@@ -496,7 +691,15 @@ fn clock() -> String {
         unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
         format!("{:02}:{:02}", st.wHour, st.wMinute)
     }
-    #[cfg(not(windows))]
+    // Local time, not UTC.
+    #[cfg(target_os = "linux")]
+    {
+        let now = unsafe { libc::time(std::ptr::null_mut()) };
+        let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+        unsafe { libc::localtime_r(&now, &mut tm) };
+        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) % 86_400;
         format!("{:02}:{:02}", s / 3600, (s / 60) % 60)

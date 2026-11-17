@@ -23,6 +23,7 @@ pub fn request(req: Request) -> Option<Reply> {
     let what = &what[..what.len().min(60)];
     let started = Instant::now();
     if let Some(addr) = pipe.strip_prefix("tcp:") {
+        let addr = crate::overlay::wire::ipc_addr(addr);
         let stream = match std::net::TcpStream::connect(addr) {
             Ok(s) => s,
             Err(e) => {

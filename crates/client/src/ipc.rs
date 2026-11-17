@@ -81,16 +81,42 @@ impl Server {
             Some(tokio::spawn(async move { tokio::join!(games, overlay) }).abort_handle())
         };
         // Loopback only; the launch token keeps other local programs out.
+        // A second port takes the in-game overlay's connections; games get
+        // both as `tcp:127.0.0.1:<ipc port>/<overlay port>`.
         #[cfg(not(windows))]
-        let (name, task) = match std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|l| {
-            l.set_nonblocking(true)?;
-            let addr = l.local_addr()?;
-            Ok((tokio::net::TcpListener::from_std(l)?, addr))
-        }) {
-            Ok((listener, addr)) => (format!("tcp:{addr}"), Some(tokio::spawn(accept_tcp(listener, tokens.clone(), tx)).abort_handle())),
-            Err(e) => {
-                tracing::warn!("steamclient socket: {e}");
-                (String::new(), None)
+        let (name, task) = {
+            let bind = || {
+                std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|l| {
+                    l.set_nonblocking(true)?;
+                    let addr = l.local_addr()?;
+                    Ok((tokio::net::TcpListener::from_std(l)?, addr))
+                })
+            };
+            match (bind(), bind()) {
+                (Ok((listener, addr)), overlay) => {
+                    let t = tokens.clone();
+                    let (suffix, overlay) = match overlay {
+                        Ok((l, a)) => (format!("/{}", a.port()), Some(crate::ingame::accept_tcp(l, move |token| t.lock().unwrap().get(token).map(|s| s.app_id)))),
+                        Err(e) => {
+                            tracing::warn!("overlay socket: {e}");
+                            (String::new(), None)
+                        }
+                    };
+                    let games = accept_tcp(listener, tokens.clone(), tx);
+                    let task = tokio::spawn(async move {
+                        match overlay {
+                            Some(o) => {
+                                tokio::join!(games, o);
+                            }
+                            None => games.await,
+                        }
+                    });
+                    (format!("tcp:{addr}{suffix}"), Some(task.abort_handle()))
+                }
+                (Err(e), _) => {
+                    tracing::warn!("steamclient socket: {e}");
+                    (String::new(), None)
+                }
             }
         };
         (Server { name, tokens, task }, rx)

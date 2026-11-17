@@ -47,6 +47,12 @@ pub struct State {
     pub badges: HashMap<SteamId, Result<model::Badges, String>>,
     /// Profile reviews by (profile, page).
     pub reviews: HashMap<(SteamId, u32), Result<model::UserReviews, String>>,
+    /// Reviews of games (summary and the pages loaded so far).
+    pub app_reviews: HashMap<AppId, Result<model::AppReviews, String>>,
+    /// Your own review of each game looked up (`None`: none written).
+    pub my_reviews: HashMap<AppId, Result<Option<model::UserReview>, String>>,
+    /// The store's personal picks for this account (after sign-in).
+    pub store_recs: Option<model::StoreRecommendations>,
     pub groups: HashMap<SteamId, Result<Vec<model::UserGroup>, String>>,
     /// Card collections by (profile, game, foil).
     pub card_sets: HashMap<(SteamId, AppId, bool), Result<model::CardSet, String>>,
@@ -172,6 +178,21 @@ impl State {
             Event::Reviews { steam_id, page, result } => {
                 self.reviews.insert((*steam_id, *page), result.clone());
             }
+            Event::AppReviews { app_id, more, result } => match (result, self.app_reviews.get_mut(app_id)) {
+                (Ok(page), Some(Ok(have))) if *more => {
+                    have.items.extend(page.items.iter().cloned());
+                    have.cursor = page.cursor.clone();
+                }
+                _ => {
+                    self.app_reviews.insert(*app_id, result.clone());
+                }
+            },
+            Event::MyReview { app_id, result } => {
+                self.my_reviews.insert(*app_id, result.clone());
+            }
+            Event::ReviewSaved { .. } => {}
+            Event::StoreRecommendations(r) => self.store_recs = Some(r.clone()),
+            Event::TradeOfferSent { .. } => {}
             Event::Groups { steam_id, result } => {
                 self.groups.insert(*steam_id, result.clone());
             }
@@ -191,7 +212,7 @@ impl State {
             Event::AppNames(list) => self.app_names.extend(list.iter().cloned()),
             Event::Email { address, validated } => self.email = Some((address.clone(), *validated)),
             Event::Regions(_) => {}
-            Event::SteamCollections(_) => {}
+            Event::SteamCollections(_) | Event::SteamCollectionsSaved { .. } => {}
             Event::ShaderCompile { app_id, done, total } => {
                 self.shader_compiling.insert(*app_id, (*done, *total));
             }

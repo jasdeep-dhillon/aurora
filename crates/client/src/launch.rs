@@ -376,11 +376,12 @@ pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, extra_args: &s
     // the game loads for its own bridge to the Steam client (lsteamclient)
     // unless PROTON_DISABLE_LSTEAMCLIENT is set. That bridge is also what
     // writes the registry entry naming the DLL, so a prefix without it yet
-    // keeps the bridge for this one launch. No in-game overlay under Wine yet.
+    // keeps the bridge for this one launch. The DLL draws the Shift+Tab
+    // overlay inside D3D11 games and reaches the app over loopback.
     #[cfg(not(windows))]
     {
         let root = local::find_steam_root().ok_or("Steam Play needs a Steam install for Proton")?;
-        cmd.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", linux::client_shim(&root)?).env("STEAMINRUST_NO_INGAME_OVERLAY", "1");
+        cmd.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", linux::client_shim(&root)?);
         if prefix_knows_client(app, install_dir) {
             cmd.env("PROTON_DISABLE_LSTEAMCLIENT", "1");
         } else {
