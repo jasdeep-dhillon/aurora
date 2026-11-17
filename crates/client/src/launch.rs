@@ -1020,6 +1020,11 @@ pub fn run_through_host(
     // the host (and Valve's own DLLs) while the game runs.
     #[cfg(windows)]
     let _active = HostRegistry::point_at(host.id(), &root, model::account_id(steam_id));
+    // Linux: newer steam_api checks that ~/.steam/steam.pid names a live
+    // process before it connects ("did not locate a running instance of
+    // Steam": the Paradox Launcher of Cities: Skylines); name the host.
+    #[cfg(not(windows))]
+    let _pid_file = HostPidFile::point_at(host.id());
     tracing::info!("headless Steam host ready; launching {}", app.name);
 
     // Launch the game through Proton with lsteamclient ON (the default), so the
@@ -1059,6 +1064,50 @@ fn spawn_for_host(app: &OwnedApp, install_dir: &Path, args: &str, account: &str)
         .env("SteamAppUser", account)
         .env("SteamUser", account);
     cmd.spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+}
+
+/// `~/.steam/steam.pid` naming the headless host while it runs; what was
+/// there goes back when this drops (unless Steam itself wrote it since).
+#[cfg(not(windows))]
+struct HostPidFile {
+    path: PathBuf,
+    saved: Option<String>,
+    ours: String,
+}
+
+#[cfg(not(windows))]
+impl HostPidFile {
+    fn point_at(pid: u32) -> Option<HostPidFile> {
+        // A running official client keeps its own (the host doesn't start then anyway).
+        if win::steam_pid_file().is_some_and(win::is_steam_process) {
+            return None;
+        }
+        HostPidFile::write(win::dot_steam()?.join("steam.pid"), pid)
+    }
+
+    fn write(path: PathBuf, pid: u32) -> Option<HostPidFile> {
+        let saved = std::fs::read_to_string(&path).ok();
+        let _ = std::fs::create_dir_all(path.parent()?);
+        let ours = format!("{pid}\n");
+        if let Err(e) = std::fs::write(&path, &ours) {
+            tracing::warn!("couldn't write {}: {e}", path.display());
+            return None;
+        }
+        Some(HostPidFile { path, saved, ours })
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for HostPidFile {
+    fn drop(&mut self) {
+        if std::fs::read_to_string(&self.path).ok().as_deref() != Some(self.ours.as_str()) {
+            return;
+        }
+        let _ = match &self.saved {
+            Some(text) => std::fs::write(&self.path, text),
+            None => std::fs::remove_file(&self.path),
+        };
+    }
 }
 
 /// Steam's `ActiveProcess` registry entry pointed at the headless host for
@@ -2054,7 +2103,7 @@ mod win {
     use model::AppId;
     use std::path::{Path, PathBuf};
 
-    fn dot_steam() -> Option<PathBuf> {
+    pub fn dot_steam() -> Option<PathBuf> {
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".steam"))
     }
 
@@ -2205,6 +2254,29 @@ mod tests {
         assert!(!has_steam_drm(&plain));
         assert!(!has_steam_drm(&dir.join("missing.exe")));
         assert_eq!(pe_is_64bit(&wrapped), Some(true));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_pid_file_is_put_back() {
+        let dir = std::env::temp_dir().join(format!("sir-pid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(".steam").join("steam.pid");
+        // No file before: written, then removed.
+        let f = super::HostPidFile::write(path.clone(), 4242).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "4242\n");
+        drop(f);
+        assert!(!path.exists());
+        // A stale pid before: it comes back.
+        std::fs::write(&path, "629628").unwrap();
+        drop(super::HostPidFile::write(path.clone(), 4242).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "629628");
+        // Steam wrote its own meanwhile: left alone.
+        let f = super::HostPidFile::write(path.clone(), 4242).unwrap();
+        std::fs::write(&path, "777\n").unwrap();
+        drop(f);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "777\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 
