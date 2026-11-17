@@ -1669,7 +1669,6 @@ mod linux {
 
     /// The command for a non-Steam game (see `super::spawn_non_steam`).
     pub fn non_steam(exe: &Path, args: &str) -> Result<Command, String> {
-        use std::os::unix::fs::PermissionsExt;
         use std::os::unix::process::CommandExt;
         let mut cmd = if is_windows_program(exe) {
             let root = local::find_steam_root().ok_or("Windows games need a Steam install for Proton")?;
@@ -1691,12 +1690,7 @@ mod linux {
             c
         } else {
             // A game unpacked from an archive or an AppImage often isn't executable yet.
-            if let Ok(meta) = std::fs::metadata(exe) {
-                let mode = meta.permissions().mode();
-                if mode & 0o100 == 0 {
-                    let _ = std::fs::set_permissions(exe, std::fs::Permissions::from_mode(mode | ((mode & 0o444) >> 2)));
-                }
-            }
+            make_executable(exe);
             tracing::info!("launching non-Steam game {}", exe.display());
             let mut c = Command::new(exe);
             c.args(split_args(args));
@@ -1704,6 +1698,18 @@ mod linux {
         };
         cmd.process_group(0);
         Ok(cmd)
+    }
+
+    /// Give a program its x bits (where it has r bits) if it has none.
+    fn make_executable(exe: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(exe) {
+            let mode = meta.permissions().mode();
+            if mode & 0o100 == 0 {
+                tracing::info!("{} wasn't executable; fixing that", exe.display());
+                let _ = std::fs::set_permissions(exe, std::fs::Permissions::from_mode(mode | ((mode & 0o444) >> 2)));
+            }
+        }
     }
 
     /// `proton`, inside the Steam Linux Runtime container when the tool
@@ -1831,6 +1837,9 @@ mod linux {
             let id = app.app_id.to_string();
             let mut cmd = match &self.tool {
                 None => {
+                    // Installed before Aurora kept the files' executable flag
+                    // ("Permission denied"): fix it, like Steam would have set it.
+                    make_executable(&exe);
                     let mut c = Command::new(&exe);
                     c.args(split_args(&o.arguments));
                     c
