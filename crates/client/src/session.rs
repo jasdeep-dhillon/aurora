@@ -1287,9 +1287,9 @@ impl Online {
                     .map(|l| (l.package_id(), l.access_token()))
                     .collect();
                 sink(Event::Licenses { count: licenses.len() });
-                let (conn, tx, sink) = (self.conn.clone(), apps_tx.clone(), sink.clone());
+                let (conn, tx, sink, me) = (self.conn.clone(), apps_tx.clone(), sink.clone(), self.me);
                 tokio::spawn(async move {
-                    match pics::resolve(&conn, &licenses).await {
+                    match pics::resolve(&conn, &licenses, me).await {
                         Ok(apps) => {
                             let _ = tx.send(apps);
                         }

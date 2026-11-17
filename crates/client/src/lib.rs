@@ -28,6 +28,13 @@ pub mod game_servers;
 mod input_config;
 pub mod account;
 mod notify;
+
+/// One HTTP client for plain requests (one connection pool and TLS setup,
+/// instead of a new client per request).
+pub(crate) fn http() -> reqwest::Client {
+    static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(reqwest::Client::new);
+    HTTP.clone()
+}
 pub mod offline;
 pub mod support;
 mod pics;
@@ -36,7 +43,7 @@ pub mod state;
 pub mod store;
 
 pub use auth::Guard;
-pub use launch::{LaunchMode, STEAM_DRM, anti_cheat_headless, mode as launch_mode, mode_cached as launch_mode_cached, proton_builds, proton_override, app_proton, app_protons, default_proton, native_build, NATIVE, DEFAULT_PROTON, set_app_proton, set_app_protons, set_anti_cheat_headless, set_prefer_official as launch_through_steam, set_proton_override, set_steam_setting, steam_setting, steam_settings_locked, SteamSetting, apply_steam_prefs, gameplay_downloads, set_gameplay_downloads, spawn_non_steam};
+pub use launch::{LaunchMode, STEAM_DRM, anti_cheat_headless, mode as launch_mode, mode_cached as launch_mode_cached, mode_peek as launch_mode_peek, proton_builds, proton_override, app_proton, app_protons, default_proton, native_build, NATIVE, DEFAULT_PROTON, set_app_proton, set_app_protons, set_anti_cheat_headless, set_prefer_official as launch_through_steam, set_proton_override, set_steam_setting, steam_setting, steam_settings_locked, SteamSetting, apply_steam_prefs, gameplay_downloads, set_gameplay_downloads, spawn_non_steam};
 pub use state::State;
 pub use store::SavedAccount;
 

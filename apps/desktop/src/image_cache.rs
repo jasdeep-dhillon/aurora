@@ -86,6 +86,8 @@ impl ImageCache {
         // (the disk cache has it), and unload textures that are off screen.
         ctx.options_mut(|o| o.reduce_texture_memory = true);
         ctx.add_texture_loader(Arc::new(UnloadUnused::default()));
+        // Still pictures decoded at the size they're drawn at (sized_images.rs).
+        crate::sized_images::SizedLoader::install(ctx);
     }
 
     fn key(uri: &str) -> String {
