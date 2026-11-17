@@ -186,6 +186,9 @@ pub enum Command {
     PauseDownload { app_id: AppId },
     ResumeDownload { app_id: AppId },
     CancelDownload { app_id: AppId },
+    /// Put the queued downloads in this order (games left out keep their
+    /// place after the ones listed). The running download isn't touched.
+    ReorderDownloads(Vec<AppId>),
     /// Whether downloads may resume by themselves on startup ("Automatic
     /// updates"). Sent at launch and whenever the setting changes.
     SetAutoDownloads(bool),

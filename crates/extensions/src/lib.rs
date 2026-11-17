@@ -144,6 +144,11 @@ pub trait Extension: 'static {
     fn game_actions(&mut self, _app_id: AppId, _ui: &mut egui::Ui, _ctx: &mut Ctx) {}
     /// Extra items in a friend's context menu.
     fn friend_menu(&mut self, _friend: &Persona, _ui: &mut egui::Ui, _ctx: &mut Ctx) {}
+    /// Another extension asks for something without opening a page, e.g.
+    /// `"update:<app id>"`. Return true when handled.
+    fn request(&mut self, _what: &str, _ctx: &mut Ctx) -> bool {
+        false
+    }
     /// A section on the Settings page. Return false to show nothing.
     fn settings(&mut self, _ui: &mut egui::Ui, _ctx: &mut Ctx) -> bool {
         false
@@ -199,6 +204,17 @@ impl<'a> Ctx<'a> {
     /// Let every other enabled extension add buttons for this game.
     pub fn game_actions(&mut self, app_id: AppId, ui: &mut egui::Ui) {
         self.each(|ext, ctx| ext.game_actions(app_id, ui, ctx));
+    }
+    /// Ask the other extensions for something (see [`Extension::request`]);
+    /// true once one of them handled it.
+    pub fn request(&mut self, what: &str) -> bool {
+        let mut done = false;
+        self.each(|ext, ctx| {
+            if !done {
+                done = ext.request(what, ctx);
+            }
+        });
+        done
     }
     pub fn friend_menu(&mut self, friend: &Persona, ui: &mut egui::Ui) {
         self.each(|ext, ctx| ext.friend_menu(friend, ui, ctx));
