@@ -519,7 +519,7 @@ fn patch_imports() {
 }
 
 /// Rewrite matching import slots of one loaded module. Returns how many.
-unsafe fn patch_module(base: *mut u8, table: &[(usize, usize)]) -> usize {
+pub(crate) unsafe fn patch_module(base: *mut u8, table: &[(usize, usize)]) -> usize {
     use windows::Win32::System::Memory::{PAGE_PROTECTION_FLAGS, PAGE_READWRITE, VirtualProtect};
     unsafe {
         let rd32 = |off: usize| (base.add(off) as *const u32).read_unaligned() as usize;

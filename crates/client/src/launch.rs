@@ -307,7 +307,8 @@ pub fn spawn(app: &OwnedApp, install_dir: &Path, extra_args: &str) -> Result<Chi
 
 /// Start a game with our steamclient: environment like a Steam launch, plus
 /// the pipe and token for the DLL. The registry swap must be in place.
-pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, extra_args: &str, ipc_env: &str, account: &str) -> Result<Child, String> {
+/// `pads` names the shared memory with the controllers XInput can't see.
+pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, extra_args: &str, ipc_env: &str, account: &str, pads: Option<&str>) -> Result<Child, String> {
     let mut cmd = command(app, install_dir, extra_args)?;
     let id = app.app_id.to_string();
     cmd.env(crate::ipc::protocol::ENV_IPC, ipc_env)
@@ -316,6 +317,9 @@ pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, extra_args: &s
         .env("SteamEnv", "1")
         .env("SteamAppUser", account)
         .env("SteamUser", account);
+    if let Some(name) = pads {
+        cmd.env(crate::pads::ENV_PADS, name);
+    }
     if let Some(log) = std::env::var_os("STEAMINRUST_STEAMCLIENT_LOG") {
         cmd.env(crate::ipc::protocol::ENV_LOG, log);
     }

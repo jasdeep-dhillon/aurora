@@ -27,6 +27,7 @@ pub mod game_servers;
 mod input_config;
 pub mod account;
 mod notify;
+mod pads;
 pub mod offline;
 pub mod support;
 mod pics;

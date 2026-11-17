@@ -1,6 +1,7 @@
 //! ISteamInput (and the older ISteamController): game actions from Xbox-style
-//! pads. The pads are read through XInput; which button does which action
-//! comes from the game's Steam Input bindings (a controller_mappings VDF:
+//! pads. The pads are read through XInput (plus, on Windows, the pads
+//! XInput can't see, which the app reads with SDL3: see pads.rs); which
+//! button does which action comes from the game's Steam Input bindings (a controller_mappings VDF:
 //! the player's configuration, the one the game ships, or the game's
 //! official one), which SteamInRust finds like Steam's client does.
 //!
@@ -12,11 +13,12 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use crate::ifaces::{This, text};
+use crate::pads::Pad;
 use crate::protocol::{Reply, Request};
 use crate::state::{Bytes, lock};
 use crate::vt::Fp;
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void};
+use std::ffi::c_char;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -62,43 +64,6 @@ extern "C" fn yes() -> bool {
 }
 
 // ------------------------------------------------------------------ XInput
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct Pad {
-    packet: u32,
-    buttons: u16,
-    lt: u8,
-    rt: u8,
-    lx: i16,
-    ly: i16,
-    rx: i16,
-    ry: i16,
-}
-
-type GetState = unsafe extern "system" fn(u32, *mut Pad) -> u32;
-type SetState = unsafe extern "system" fn(u32, *mut [u16; 2]) -> u32;
-
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn LoadLibraryW(name: *const u16) -> *mut c_void;
-    fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
-}
-
-static XINPUT: LazyLock<Option<(GetState, SetState)>> = LazyLock::new(|| {
-    for dll in ["xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"] {
-        let w: Vec<u16> = dll.encode_utf16().chain([0]).collect();
-        let m = unsafe { LoadLibraryW(w.as_ptr()) };
-        if m.is_null() {
-            continue;
-        }
-        let (g, s) = unsafe { (GetProcAddress(m, c"XInputGetState".as_ptr().cast()), GetProcAddress(m, c"XInputSetState".as_ptr().cast())) };
-        if !g.is_null() && !s.is_null() {
-            return Some(unsafe { (std::mem::transmute::<*mut c_void, GetState>(g), std::mem::transmute::<*mut c_void, SetState>(s)) });
-        }
-    }
-    None
-});
 
 const A: u16 = 0x1000;
 const B: u16 = 0x2000;
@@ -354,7 +319,6 @@ struct Input {
     active: HashMap<u64, (u64, Vec<u64>)>,
     pads: [Option<Pad>; 4],
     polled: Option<Instant>,
-    scanned: Option<Instant>,
 }
 
 static I: LazyLock<Mutex<Input>> = LazyLock::new(|| Mutex::new(Input::default()));
@@ -392,25 +356,13 @@ fn has_bindings(s: &Input) -> bool {
     s.bindings.as_ref().is_some_and(|b| !b.presets.is_empty())
 }
 
-/// Read the pads (connected ones every call, empty slots once a second:
-/// asking an empty slot is slow).
+/// Read the pads (pads.rs asks empty XInput slots only once a second).
 fn poll(s: &mut Input) {
     if s.polled.is_some_and(|t| t.elapsed() < Duration::from_millis(2)) {
         return;
     }
     s.polled = Some(Instant::now());
-    let Some((get, _)) = *XINPUT else { return };
-    let rescan = s.scanned.is_none_or(|t| t.elapsed() > Duration::from_secs(1));
-    if rescan {
-        s.scanned = Some(Instant::now());
-    }
-    for i in 0..4 {
-        if s.pads[i].is_none() && !rescan {
-            continue;
-        }
-        let mut p = Pad::default();
-        s.pads[i] = (unsafe { get(i as u32, &mut p) } == 0).then_some(p);
-    }
+    s.pads = crate::pads::all();
 }
 
 fn intern(list: &mut Vec<String>, name: &str) -> u64 {
@@ -610,11 +562,9 @@ extern "C" fn origin_name(_t: This, o: i32) -> *const c_char {
 }
 
 extern "C" fn vibrate(_t: This, handle: u64, left: u16, right: u16) {
-    let Some((_, set)) = *XINPUT else { return };
-    let mut v = [left, right];
-    let slots: Vec<u32> = if handle == ALL { (0..4).collect() } else { vec![handle.saturating_sub(1) as u32] };
+    let slots: Vec<usize> = if handle == ALL { (0..4).collect() } else { vec![handle.saturating_sub(1) as usize] };
     for i in slots {
-        unsafe { set(i, &mut v) };
+        crate::pads::rumble(i, left, right);
     }
 }
 

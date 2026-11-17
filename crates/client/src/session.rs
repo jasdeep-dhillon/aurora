@@ -5,7 +5,7 @@ use auth::{Device, Guard, PendingAuth};
 use model::{AppId, OwnedApp, Persona, PersonaState, Relationship, SteamId};
 use net::{Connection, Packet, emsg, eresult};
 use proto::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -347,6 +347,8 @@ struct Online {
     ipc: crate::ipc::Server,
     /// Each running game's token on that pipe.
     launch_tokens: HashMap<AppId, String>,
+    /// Games we read non-Xbox controllers for (see pads.rs).
+    pad_users: HashSet<AppId>,
     /// Games the official Steam client runs (anti-cheat), by install folder.
     official: HashMap<AppId, std::path::PathBuf>,
     /// Games stopped because their Steam DRM refused our steamclient: Play
@@ -474,6 +476,7 @@ async fn online(
         web: Default::default(),
         ipc: ipc_server,
         launch_tokens: HashMap::new(),
+        pad_users: HashSet::new(),
         official: HashMap::new(),
         drm_relaunch: Default::default(),
         country: String::new(),
@@ -1084,6 +1087,9 @@ async fn online(
             Some(app_id) = exit_rx.recv() => {
                 st.running.remove(&app_id);
                 st.official.remove(&app_id);
+                if st.pad_users.remove(&app_id) {
+                    crate::pads::stop();
+                }
                 if let Some(token) = st.launch_tokens.remove(&app_id) {
                     launch::swap_exited(&token);
                     st.ipc.forget(&token);
@@ -2291,9 +2297,16 @@ impl Online {
                 let dll = launch::steamclient_dll(is64);
                 let account_id = model::account_id(self.me);
                 let swapped = dll.as_deref().ok_or_else(|| "steamclient DLL missing".to_string()).and_then(|d| launch::swap_begin(&token, d, is64, account_id));
-                let started = swapped.and_then(|_| launch::spawn_with_steamclient(app, dir, args, &self.ipc.env_value(&token), &self.account));
+                let pads = swapped.is_ok().then(crate::pads::start).flatten();
+                let started = swapped.and_then(|_| launch::spawn_with_steamclient(app, dir, args, &self.ipc.env_value(&token), &self.account, pads.as_deref()));
+                if started.is_err() && pads.is_some() {
+                    crate::pads::stop();
+                }
                 match started {
                     Ok(child) => {
+                        if pads.is_some() {
+                            self.pad_users.insert(app_id);
+                        }
                         self.launch_tokens.insert(app_id, token.clone());
                         // A game that never loads the DLL mustn't keep it in the registry.
                         tokio::spawn(async move {
