@@ -976,6 +976,7 @@
 "Delete collection" = "Удалить коллекцию"
 "Collection" = "Коллекция"
 "Make a new collection" = "Создать коллекцию"
+"Couldn't save collections to Steam: {error}" = "Не удалось сохранить коллекции в Steam: {error}"
 "Syncing Steam Cloud…" = "Синхронизация Steam Cloud…"
 "{name} was uninstalled and its desktop shortcut removed" = "{name} удалена, ярлык с рабочего стола тоже"
 "Cloud saves" = "Облачные сохранения"

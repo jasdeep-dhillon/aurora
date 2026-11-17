@@ -877,6 +877,16 @@ async fn online(
                         sink(Event::SteamCollections(result));
                     });
                 }
+                Some(Command::SaveSteamCollections { save, delete }) => {
+                    let (conn, sink) = (conn.clone(), sink.clone());
+                    tokio::spawn(async move {
+                        let result = crate::collections::save(&conn, &save, &delete).await;
+                        if let Err(e) = &result {
+                            tracing::warn!("saving collections to Steam failed: {e}");
+                        }
+                        sink(Event::SteamCollectionsSaved { save, delete, result });
+                    });
+                }
                 Some(Command::LoadComments { steam_id, start }) => st.with_web(sink, move |web, sink| async move {
                     let result = crate::social::comments(web.as_deref().ok(), steam_id, start).await;
                     sink(Event::Comments { steam_id, result });

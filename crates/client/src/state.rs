@@ -191,7 +191,7 @@ impl State {
             Event::AppNames(list) => self.app_names.extend(list.iter().cloned()),
             Event::Email { address, validated } => self.email = Some((address.clone(), *validated)),
             Event::Regions(_) => {}
-            Event::SteamCollections(_) => {}
+            Event::SteamCollections(_) | Event::SteamCollectionsSaved { .. } => {}
             Event::ShaderCompile { app_id, done, total } => {
                 self.shader_compiling.insert(*app_id, (*done, *total));
             }
