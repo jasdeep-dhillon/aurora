@@ -982,6 +982,12 @@ async fn online(
                     let result = crate::social::groups(web.as_deref().ok(), steam_id).await;
                     sink(Event::Groups { steam_id, result });
                 }),
+                Some(Command::LoadStoreRecommendations { language }) => {
+                    let (conn, sink) = (conn.clone(), sink.clone());
+                    tokio::spawn(async move {
+                        sink(Event::StoreRecommendations(crate::store_recs::load(&conn, &language).await));
+                    });
+                }
                 Some(Command::SendTradeOffer { partner, token, message, give, take }) => st.with_web(sink, move |web, sink| async move {
                     let result = match web {
                         Ok(w) => crate::market::send_trade_offer(&w, partner, token.as_deref(), &message, &give, &take).await,

@@ -1796,6 +1796,13 @@
 "Linux (native)" = "Linux (нативная)"
 "Aurora's own Steam features work in the Windows version. The Linux version gets them from your Steam install." = "Собственные функции Steam в Aurora работают в версии для Windows. Версия для Linux получает их от установленного Steam."
 
+# --- Store: your picks ---
+"Recommended for you" = "Рекомендуем вам"
+"Popular with your friends" = "Популярно у ваших друзей"
+"Recommended specials" = "Скидки, которые вам понравятся"
+"Free games you might like" = "Бесплатные игры для вас"
+"Upcoming games you might like" = "Скоро выйдут: игры для вас"
+"Top picks in {tag}" = "Лучшее в жанре «{tag}»"
 # --- Trade offers ---
 "Trade" = "Обмен"
 "Offer it to a friend, or to anyone with their trade URL, alone or for some of their items." = "Предложите его другу или любому игроку по ссылке для обмена — просто так или в обмен на его предметы."

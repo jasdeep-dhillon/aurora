@@ -20,6 +20,7 @@ mod installscript;
 pub mod market;
 pub mod social;
 pub mod cloud;
+pub mod store_recs;
 pub mod collections;
 pub mod regions;
 pub mod a2s;
@@ -149,6 +150,8 @@ pub enum Command {
     LoadBadges { steam_id: SteamId },
     /// A page (1-based) of a profile's reviews.
     LoadReviews { steam_id: SteamId, page: u32 },
+    /// The store's personal picks (discovery queues, friends, tags).
+    LoadStoreRecommendations { language: String },
     /// The groups a profile belongs to.
     LoadGroups { steam_id: SteamId },
     /// A game's trading-card collection on a profile (`foil`: the foil set).
@@ -320,6 +323,7 @@ pub enum Event {
     Blocked { steam_id: SteamId, result: Result<bool, String> },
     Badges { steam_id: SteamId, result: Result<model::Badges, String> },
     Reviews { steam_id: SteamId, page: u32, result: Result<model::UserReviews, String> },
+    StoreRecommendations(model::StoreRecommendations),
     TradeOfferSent { partner: SteamId, result: Result<model::TradeOfferSent, String> },
     Groups { steam_id: SteamId, result: Result<Vec<model::UserGroup>, String> },
     CardSet { steam_id: SteamId, app_id: AppId, foil: bool, result: Result<model::CardSet, String> },
