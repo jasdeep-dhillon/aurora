@@ -3,6 +3,7 @@
 //! We never modify Steam's files. Actions such as launching or installing are
 //! handed to the official client through `steam://` URLs.
 
+pub mod shortcuts;
 pub mod manage;
 
 pub mod compat;

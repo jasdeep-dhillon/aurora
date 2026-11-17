@@ -160,6 +160,21 @@ pub struct CloudReport {
     pub quota_bytes: u64,
     /// Unix seconds.
     pub finished: u64,
+    /// Every file in the cloud, for the file list in Properties.
+    #[serde(default)]
+    pub files: Vec<CloudFile>,
+}
+
+/// One file in a game's Steam Cloud.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CloudFile {
+    /// The name Steam stores it under (what a delete needs).
+    pub raw: String,
+    /// The same name, cleaned up for showing.
+    pub name: String,
+    pub size: u64,
+    /// Unix seconds.
+    pub time: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -725,6 +740,17 @@ pub struct AppReviews {
     pub cursor: Option<String>,
 }
 
+/// The store's picks for you, from Steam's personal sources.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StoreRecommendations {
+    /// Discovery queues by shelf id ("ml", "on_sale", "free", "coming_soon").
+    pub queues: Vec<(String, Vec<AppId>)>,
+    /// Games your friends play a lot lately: (game, how many friends).
+    pub friends: Vec<(AppId, u32)>,
+    /// Your favourite tags, best first: (tag id, name).
+    pub tags: Vec<(u32, String)>,
+}
+
 /// One page (10) of a profile's reviews.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UserReviews {
@@ -1127,6 +1153,41 @@ pub struct Inventory {
     pub total: u32,
     /// Set when the inventory couldn't be read ("private" for hidden ones).
     pub error: Option<String>,
+}
+
+/// An item in a trade offer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeAsset {
+    pub app_id: AppId,
+    pub context_id: u64,
+    pub asset_id: u64,
+    pub amount: u64,
+}
+
+/// A trade offer Steam accepted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeOfferSent {
+    pub id: u64,
+    /// Steam waits for you to confirm it in the Steam Mobile app (or email).
+    pub needs_confirmation: bool,
+}
+
+/// A trade URL (`…/tradeoffer/new/?partner=<account>&token=<token>`):
+/// the partner's SteamID and the token that lets non-friends send offers.
+pub fn parse_trade_url(url: &str) -> Option<(SteamId, Option<String>)> {
+    let query = url.trim().split_once('?')?.1;
+    let mut partner = None;
+    let mut token = None;
+    for pair in query.split('&') {
+        match pair.split_once('=') {
+            Some(("partner", v)) => partner = v.parse::<u64>().ok(),
+            Some(("token", v)) if !v.is_empty() => token = Some(v.to_string()),
+            _ => {}
+        }
+    }
+    let account = partner?;
+    let steam_id = if account > u32::MAX as u64 { account } else { 76561197960265728 + account };
+    Some((steam_id, token))
 }
 
 /// One of a game's achievements, with whether you have it.
@@ -1595,5 +1656,17 @@ pub mod art {
             .filter(|h| !h.is_empty() && !h.chars().all(|c| c == '0'))
             .unwrap_or(DEFAULT_AVATAR);
         format!("https://avatars.steamstatic.com/{h}_medium.jpg")
+    }
+}
+
+#[cfg(test)]
+mod trade_url_tests {
+    #[test]
+    fn reads_trade_urls() {
+        let (id, token) = super::parse_trade_url("https://steamcommunity.com/tradeoffer/new/?partner=12345&token=AbC-12").unwrap();
+        assert_eq!(id, 76561197960265728 + 12345);
+        assert_eq!(token.as_deref(), Some("AbC-12"));
+        assert_eq!(super::parse_trade_url("https://steamcommunity.com/tradeoffer/new/?partner=76561197960278073"), Some((76561197960278073, None)));
+        assert_eq!(super::parse_trade_url("https://steamcommunity.com/id/someone"), None);
     }
 }

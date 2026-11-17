@@ -135,9 +135,12 @@ struct Saved {
     hidden: BTreeSet<AppId>,
     custom: Vec<CustomGame>,
     collections: Vec<Collection>,
-    /// Collection chips, the "+ Collection" button and "Add to collection"
-    /// (off by default; Settings → Library turns them back on).
-    show_collections: bool,
+    /// Hides the collection buttons, "+ Collection" and "Add to collection"
+    /// (shown by default; Settings → Library).
+    hide_collections: bool,
+    /// Collections as Steam last had them, for the account they belong to:
+    /// the base of the three-way merge at sign-in.
+    collections_base: Option<(u64, client::collections::Collections)>,
     /// Linux: start every game through the official Steam client.
     through_steam: bool,
     /// Kept across restarts so a shortcut still appears if the app was
@@ -221,6 +224,8 @@ pub struct Library {
     /// Index into `custom` when a non-Steam game is open.
     custom_selected: Option<usize>,
     adding: Option<CustomGame>,
+    /// Steam's non-Steam games being picked for import (shortcut, ticked).
+    importing: Option<Vec<(local::shortcuts::Shortcut, bool)>>,
     selected: Option<AppId>,
     search: String,
     filter: Filter,
@@ -246,7 +251,16 @@ pub struct Library {
     install_dialog: Option<InstallDialog>,
     /// Games to put on the desktop once their install finishes.
     collections: Vec<Collection>,
-    show_collections: bool,
+    hide_collections: bool,
+    /// See `Saved::collections_base`.
+    collections_base: Option<(u64, client::collections::Collections)>,
+    /// Signed-in account (collections belong to it).
+    account: Option<u64>,
+    /// Steam's collections were read this session, so changes can go up.
+    collections_loaded: bool,
+    collections_saving: bool,
+    /// After a failed save, when to try again.
+    collections_retry: Option<std::time::Instant>,
     through_steam: bool,
     adv: AdvFilters,
     /// Naming a new collection (with a game to put in it), or renaming one.
@@ -258,6 +272,10 @@ pub struct Library {
     auto_queued: BTreeSet<AppId>,
     /// Games whose cloud usage was looked up this session.
     cloud_checked: BTreeSet<AppId>,
+    /// Steam Cloud file list shown in Properties for this game.
+    cloud_files_open: BTreeSet<AppId>,
+    /// Cloud files waiting for "Delete" to be confirmed: (game, raw names, what to call them).
+    cloud_delete: Option<(AppId, Vec<String>, String)>,
     /// A right-click menu choice, applied after the frame's drawing.
     menu_request: Option<(AppId, MenuAct)>,
     /// Games to put on the desktop once installed, with their library folder.
@@ -297,6 +315,8 @@ impl Extension for Library {
         match event {
             client::Event::VerifyFinished { app_id, result } => self.verify_finished(ctx, *app_id, result),
             client::Event::LoggedIn { steam_id, .. } => {
+                self.account = Some(*steam_id);
+                self.collections_loaded = false;
                 self.send_cloud_settings(ctx);
                 ctx.send(Command::LoadSteamCollections);
                 // Account-wide play history, for "Recent games".
@@ -314,6 +334,28 @@ impl Extension for Library {
                 self.launch_or_notice(ctx, *app_id, g.install_dir, args);
             }
             client::Event::SteamCollections(Ok(list)) => self.merge_steam_collections(list),
+            client::Event::SteamCollectionsSaved { save, delete, result } => {
+                self.collections_saving = false;
+                match result {
+                    Ok(()) => {
+                        self.collections_retry = None;
+                        if let Some((_, base)) = &mut self.collections_base {
+                            for (id, e) in save {
+                                base.insert(id.clone(), e.clone());
+                            }
+                            for id in delete {
+                                base.remove(id);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if self.collections_retry.is_none() {
+                            ctx.toast(t!("Couldn't save collections to Steam: {error}", error = e));
+                        }
+                        self.collections_retry = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+                    }
+                }
+            }
             client::Event::CloudReport { report, held_launch } => {
                 let name = ctx.state.app_name(report.app_id).unwrap_or_default().to_string();
                 if let Some(args) = held_launch {
@@ -366,6 +408,7 @@ impl Extension for Library {
             (None, None) => self.home(ui, &t, ctx),
         });
         self.add_dialog(ui, &t, ctx);
+        self.import_dialog(ui, &t, ctx);
         self.drm_notice(ui, &t, ctx);
         self.reader(ui, &t, ctx);
         self.install_window(ui, &t, ctx);
@@ -381,11 +424,42 @@ impl Extension for Library {
         if let Some((id, act)) = self.menu_request.take() {
             self.apply_menu(ctx, id, act);
         }
+        self.sync_collections(ctx);
+    }
+
+    /// `update:<id>` from the Downloads page: queue the update right away,
+    /// with this game's own settings (branch, language, DLC), without
+    /// opening its page.
+    fn request(&mut self, what: &str, ctx: &mut Ctx) -> bool {
+        let Some(id) = what.strip_prefix("update:").and_then(|i| i.parse::<AppId>().ok()) else { return false };
+        let library = ctx.local.games.iter().find(|g| g.app_id == id).map(|g| g.library.clone());
+        self.queue_install(ctx, id, library);
+        true
     }
 
     fn settings(&mut self, ui: &mut Ui, ctx: &mut Ctx) -> bool {
         let t = ctx.theme.clone();
-        super::settings::switch(ui, &t, t!("Show collections"), t!("Collection filters and the new collection button in the library sidebar, and the Add to collection menu on games."), &mut self.show_collections);
+        let mut show = !self.hide_collections;
+        super::settings::switch(ui, &t, t!("Show collections"), t!("Collection filters and the new collection button in the library sidebar, and the Add to collection menu on games."), &mut show);
+        self.hide_collections = !show;
+        // Non-Steam games added in the official client.
+        egui::Frame::new().fill(t.surface).corner_radius(t.corner_small()).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(w::text_medium(t!("Non-Steam games from Steam"), 14.0, t.text));
+                    ui.add(egui::Label::new(w::text(t!("Adds the non-Steam games you added in the official Steam client (shortcuts.vdf) to Aurora's library."), 12.5, t.text_dim)).wrap());
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if w::button(ui, &t, Some(icons::DOWNLOAD), t!("Import"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                        let picks: Vec<_> = self.steam_shortcuts(ctx).into_iter().filter(|(s, new)| *new && !s.hidden).map(|(s, _)| s).collect();
+                        let n = picks.len();
+                        self.import_shortcuts(picks);
+                        ctx.toast(if n == 0 { t!("No new non-Steam games in Steam").to_string() } else { t!("Imported {n} non-Steam games from Steam", n = n).to_string() });
+                    }
+                });
+            });
+        });
         if !cfg!(windows) {
             let before = self.through_steam;
             super::settings::switch(ui, &t, t!("Start games through the official Steam client"), t!("Off: games start here, natively or with Proton, and only anti-cheat games use Steam. Turn on for games that won't run without Steam."), &mut self.through_steam);
@@ -404,7 +478,8 @@ impl Extension for Library {
             hidden: self.hidden.clone(),
             custom: self.custom.clone(),
             collections: self.collections.clone(),
-            show_collections: self.show_collections,
+            hide_collections: self.hide_collections,
+            collections_base: self.collections_base.clone(),
             through_steam: self.through_steam,
             pending_shortcuts: self.shortcut_after_install.clone(),
         })
@@ -419,7 +494,8 @@ impl Extension for Library {
         self.hidden = saved.hidden;
         self.custom = saved.custom;
         self.collections = saved.collections;
-        self.show_collections = saved.show_collections;
+        self.hide_collections = saved.hide_collections;
+        self.collections_base = saved.collections_base;
         self.through_steam = saved.through_steam;
         client::launch_through_steam(self.through_steam);
         self.shortcut_after_install = saved.pending_shortcuts;
@@ -470,23 +546,89 @@ impl Library {
         ctx.send(Command::CloudSettings { steam_root: root, disabled });
     }
 
-    /// Bring in the collections made in the official Steam client: Favorites
-    /// and Hidden fill ours, the rest show up as collections here.
+    /// Favorites, Hidden and the collections as Steam ids → contents. Gives
+    /// collections made here a Steam id first.
+    fn collections_local(&mut self) -> client::collections::Collections {
+        use client::collections::{Entry, new_id};
+        let mut m = client::collections::Collections::new();
+        m.insert("favorite".into(), Entry { name: String::new(), games: self.favorites.clone() });
+        m.insert("hidden".into(), Entry { name: String::new(), games: self.hidden.clone() });
+        for c in &mut self.collections {
+            let id = c.steam_id.get_or_insert_with(new_id).clone();
+            m.insert(id, Entry { name: c.name.clone(), games: c.games.clone() });
+        }
+        m
+    }
+
+    /// Bring the collections in step with Steam's at sign-in: a three-way
+    /// merge with what both sides last agreed on, so changes made here
+    /// (even offline) and in the official client both stay.
     fn merge_steam_collections(&mut self, list: &[model::SteamCollection]) {
-        for c in list {
-            match c.id.as_str() {
-                "favorite" => self.favorites.extend(c.games.iter().copied()),
-                "hidden" => self.hidden.extend(c.games.iter().copied()),
-                _ if c.dynamic => {}
-                _ => match self.collections.iter_mut().find(|x| x.steam_id.as_deref() == Some(c.id.as_str())) {
-                    Some(mine) => {
-                        mine.name = c.name.clone();
-                        mine.games = c.games.iter().copied().collect();
-                    }
-                    None => self.collections.push(Collection { name: c.name.clone(), games: c.games.iter().copied().collect(), steam_id: Some(c.id.clone()) }),
-                },
+        use client::collections::{Collections, Entry, merge};
+        let Some(account) = self.account else { return };
+        // Dynamic collections are built from filters in Steam: not ours to change.
+        let remote: Collections = list
+            .iter()
+            .filter(|c| !c.dynamic)
+            .map(|c| {
+                let name = if matches!(c.id.as_str(), "favorite" | "hidden") { String::new() } else { c.name.clone() };
+                (c.id.clone(), Entry { name, games: c.games.iter().copied().collect() })
+            })
+            .collect();
+        let local = self.collections_local();
+        let base = match &self.collections_base {
+            Some((who, base)) if *who == account => base.clone(),
+            // First sync for this account: collections already here that
+            // came from Steam start from Steam's copy; Favorites and Hidden
+            // are joined with Steam's.
+            _ => remote.iter().filter(|(id, _)| local.contains_key(*id) && !matches!(id.as_str(), "favorite" | "hidden")).map(|(k, v)| (k.clone(), v.clone())).collect(),
+        };
+        let merged = merge(&base, &local, &remote);
+        self.favorites = merged.get("favorite").map(|e| e.games.clone()).unwrap_or_default();
+        self.hidden = merged.get("hidden").map(|e| e.games.clone()).unwrap_or_default();
+        // Keep the order on this PC; new ones from Steam go after, by name.
+        let mut kept: Vec<Collection> = Vec::new();
+        for c in std::mem::take(&mut self.collections) {
+            let Some(id) = c.steam_id.clone() else { continue };
+            if let Some(e) = merged.get(&id) {
+                kept.push(Collection { name: e.name.clone(), games: e.games.clone(), steam_id: Some(id) });
             }
         }
+        let mut new: Vec<Collection> = merged
+            .iter()
+            .filter(|(id, _)| !matches!(id.as_str(), "favorite" | "hidden") && !kept.iter().any(|c| c.steam_id.as_deref() == Some(id.as_str())))
+            .map(|(id, e)| Collection { name: e.name.clone(), games: e.games.clone(), steam_id: Some(id.clone()) })
+            .collect();
+        new.sort_by_key(|c| c.name.to_lowercase());
+        kept.extend(new);
+        self.collections = kept;
+        if let Filter::Collection(i) = self.filter {
+            if i >= self.collections.len() {
+                self.filter = Filter::All;
+            }
+        }
+        self.collections_base = Some((account, remote));
+        self.collections_loaded = true;
+        self.collections_retry = None;
+    }
+
+    /// Send what changed here since Steam's copy (after the sign-in merge,
+    /// while online, one save at a time).
+    fn sync_collections(&mut self, ctx: &mut Ctx) {
+        if !self.collections_loaded || self.collections_saving || !ctx.state.online() {
+            return;
+        }
+        if self.collections_retry.is_some_and(|at| std::time::Instant::now() < at) {
+            return;
+        }
+        let local = self.collections_local();
+        let Some((_, base)) = &self.collections_base else { return };
+        let (save, delete) = client::collections::diff(base, &local);
+        if save.is_empty() && delete.is_empty() {
+            return;
+        }
+        self.collections_saving = true;
+        ctx.send(Command::SaveSteamCollections { save, delete });
     }
 
     /// Name a new collection, or rename one.
@@ -523,7 +665,7 @@ impl Library {
                         }
                     }
                     None => {
-                        self.collections.push(Collection { name, games: game.into_iter().collect(), steam_id: None });
+                        self.collections.push(Collection { name, games: game.into_iter().collect(), steam_id: Some(client::collections::new_id()) });
                         self.filter = Filter::Collection(self.collections.len() - 1);
                     }
                 }
@@ -716,7 +858,7 @@ impl Library {
                     }
                 });
             }
-            if self.show_collections {
+            if !self.hide_collections {
                 let add = w::submenu_item(ui, t, icons::STACK, t!("Add to collection"));
                 SubMenu::new().show(ui, &add, |ui| {
                     ui.set_min_width(200.0);
@@ -1016,16 +1158,19 @@ impl Library {
             .width(720.0)
             .show(|ui| self.adv_panel(ui, t, ctx));
         // Collections (only when turned on in Settings → Library).
-        if !self.show_collections && matches!(self.filter, Filter::Collection(_)) {
+        if self.hide_collections && matches!(self.filter, Filter::Collection(_)) {
             self.filter = Filter::All;
         }
-        if self.show_collections {
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+        if !self.hide_collections {
+        ui.add_space(gap);
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing = vec2(gap, gap);
+            let mut labels: Vec<(String, bool)> = self.collections.iter().enumerate().map(|(i, c)| (format!("{}  {}  {}", icons::STACK, short(&c.name, 24), c.games.len()), self.filter == Filter::Collection(i))).collect();
+            labels.push((format!("{}  {}", icons::PLUS, t!("Collection")), false));
+            let chips = chip_rows(ui, t, &labels, width, gap);
             let mut remove = None;
             for (i, c) in self.collections.iter().enumerate() {
-                let r = w::chip(ui, t, &format!("{}  {}  {}", icons::STACK, c.name, c.games.len()), self.filter == Filter::Collection(i));
+                let r = &chips[i];
                 if r.clicked() {
                     self.filter = if self.filter == Filter::Collection(i) { Filter::All } else { Filter::Collection(i) };
                 }
@@ -1040,7 +1185,7 @@ impl Library {
                     }
                 });
             }
-            if w::chip(ui, t, &format!("{}  {}", icons::PLUS, t!("Collection")), false).on_hover_text(t!("Make a new collection")).clicked() {
+            if chips[self.collections.len()].clone().on_hover_text(t!("Make a new collection")).clicked() {
                 self.naming = Some((None, String::new(), None));
             }
             if let Some(i) = remove {
@@ -1158,9 +1303,17 @@ impl Library {
         let Some(g) = &mut self.adding else { return };
         let mut close = false;
         let mut add = false;
+        let mut import = false;
         ui::widgets::modal(ui.ctx(), egui::Id::unique("add-game")).show(ui.ctx(), |ui| {
             ui.set_width(500.0);
-            ui.label(w::text_bold(t!("Add a non-Steam game"), 20.0, t.text));
+            ui.horizontal(|ui| {
+                ui.label(w::text_bold(t!("Add a non-Steam game"), 20.0, t.text));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if w::button(ui, t, Some(icons::DOWNLOAD), t!("Import from Steam…"), w::Kind::Ghost, w::Size::Sm).on_hover_text(t!("The non-Steam games you added in the official Steam client")).clicked() {
+                        import = true;
+                    }
+                });
+            });
             ui.add_space(8.0);
             ui.label(w::text_medium(t!("Program"), 12.5, t.text_dim));
             ui.horizontal(|ui| {
@@ -1202,6 +1355,85 @@ impl Library {
             self.selected = None;
         } else if close {
             self.adding = None;
+        } else if import {
+            self.adding = None;
+            self.importing = Some(self.steam_shortcuts(ctx).into_iter().map(|(s, new)| {
+                let tick = new && !s.hidden;
+                ((s, new), tick)
+            }).map(|((s, _), tick)| (s, tick)).collect());
+        }
+    }
+
+    /// Steam's non-Steam games for this account, each with whether it's
+    /// new here (not in Aurora's list yet).
+    fn steam_shortcuts(&self, ctx: &Ctx) -> Vec<(local::shortcuts::Shortcut, bool)> {
+        let root = &ctx.local.steam_root;
+        if root.as_os_str().is_empty() {
+            return Vec::new();
+        }
+        let account = Some((ctx.state.steam_id & 0xFFFF_FFFF) as u32).filter(|a| *a != 0);
+        local::shortcuts::load(root, account).into_iter().map(|s| {
+            let new = !self.custom.iter().any(|c| c.exe.trim().trim_matches('"') == s.exe && c.args.trim() == s.launch_options);
+            (s, new)
+        }).collect()
+    }
+
+    fn import_shortcuts(&mut self, picks: Vec<local::shortcuts::Shortcut>) {
+        for s in picks {
+            self.custom.push(CustomGame { name: s.display_name(), exe: s.exe, args: s.launch_options });
+        }
+    }
+
+    /// Pick which of Steam's non-Steam games to bring in.
+    fn import_dialog(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+        let Some(list) = &mut self.importing else { return };
+        let mut close = false;
+        let mut go = false;
+        ui::widgets::modal(ui.ctx(), egui::Id::unique("import-shortcuts")).show(ui.ctx(), |ui| {
+            ui.set_width(520.0);
+            ui.label(w::text_bold(t!("Import from Steam"), 20.0, t.text));
+            ui.add(egui::Label::new(w::text(t!("Non-Steam games you added in the official Steam client. Ones already in Aurora are left out."), 12.5, t.text_dim)).wrap());
+            ui.add_space(8.0);
+            if list.is_empty() {
+                ui.label(w::text(t!("Steam has no non-Steam games for this account."), 13.0, t.text_faint));
+            }
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for (s, tick) in list.iter_mut() {
+                    let new = !self.custom.iter().any(|c| c.exe.trim().trim_matches('"') == s.exe && c.args.trim() == s.launch_options);
+                    ui.add_enabled_ui(new, |ui| {
+                        ui.horizontal(|ui| {
+                            let mut on = *tick && new;
+                            let label = if new { s.display_name() } else { t!("{name} (already added)", name = s.display_name()).to_string() };
+                            if w::check(ui, t, &mut on, label).changed() {
+                                *tick = on;
+                            }
+                            if s.hidden {
+                                ui.label(w::text(t!("hidden in Steam"), 11.5, t.text_faint));
+                            }
+                        });
+                        ui.add(egui::Label::new(w::text(&s.exe, 11.5, t.text_faint).monospace()).truncate());
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+            ui.add_space(10.0);
+            let n = list.iter().filter(|(_, tick)| *tick).count();
+            ui.horizontal(|ui| {
+                if ui.add_enabled_ui(n > 0, |ui| w::button(ui, t, Some(icons::DOWNLOAD), &t!("Import {n}", n = n), w::Kind::Primary, w::Size::Md)).inner.clicked() {
+                    go = true;
+                }
+                if w::button(ui, t, None, t!("Cancel"), w::Kind::Secondary, w::Size::Md).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if go {
+            let picks: Vec<_> = self.importing.take().unwrap_or_default().into_iter().filter(|(_, tick)| *tick).map(|(s, _)| s).collect();
+            let n = picks.len();
+            self.import_shortcuts(picks);
+            ctx.toast(t!("Imported {n} non-Steam games from Steam", n = n));
+        } else if close || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.importing = None;
         }
     }
 
@@ -2306,4 +2538,40 @@ fn proton_submenu(ui: &mut Ui, t: &Theme, ctx: &Ctx, id: AppId) {
             }
         }
     });
+}
+
+/// Chips in rows that fill `width`, like the library's filter chips: each
+/// row shares its spare room between its chips.
+fn chip_rows(ui: &mut Ui, t: &Theme, labels: &[(String, bool)], width: f32, gap: f32) -> Vec<egui::Response> {
+    let widths: Vec<f32> = labels.iter().map(|(l, _)| w::chip_width(ui, l)).collect();
+    let mut rows: Vec<std::ops::Range<usize>> = Vec::new();
+    let (mut start, mut used) = (0, 0.0);
+    for (i, cw) in widths.iter().enumerate() {
+        if i > start && used + gap + cw > width {
+            rows.push(start..i);
+            start = i;
+            used = *cw;
+        } else {
+            used += if i > start { gap + cw } else { *cw };
+        }
+    }
+    if start < labels.len() {
+        rows.push(start..labels.len());
+    }
+    let mut out = Vec::with_capacity(labels.len());
+    for row in rows {
+        let natural: f32 = widths[row.clone()].iter().sum::<f32>() + gap * (row.len() - 1) as f32;
+        let extra = ((width - natural) / row.len() as f32).max(0.0);
+        ui.horizontal(|ui| {
+            for i in row {
+                out.push(w::wide_chip(ui, t, &labels[i].0, labels[i].1, widths[i] + extra));
+            }
+        });
+    }
+    out
+}
+
+/// `s` cut to `max` characters, with an ellipsis.
+fn short(s: &str, max: usize) -> String {
+    if s.chars().count() <= max { s.to_string() } else { format!("{}…", s.chars().take(max - 1).collect::<String>()) }
 }

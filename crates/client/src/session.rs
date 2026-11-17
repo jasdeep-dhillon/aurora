@@ -837,6 +837,20 @@ async fn online(
                         });
                     }
                 }
+                Some(Command::CloudDelete { app_id, install_dir, names }) => {
+                    if let Some(target) = st.cloud_target_any(app_id, &install_dir) {
+                        sink(Event::CloudSyncing { app_id });
+                        let (conn, sink) = (conn.clone(), sink.clone());
+                        tokio::spawn(async move {
+                            let deleted = crate::cloud::delete(&conn, &target, &names).await;
+                            let mut report = crate::cloud::sync(&conn, &target, crate::cloud::Mode::Check, &[], &[]).await;
+                            if let Err(e) = deleted {
+                                report.errors.push((String::new(), format!("Couldn't delete from Steam Cloud: {e}")));
+                            }
+                            sink(Event::CloudReport { report, held_launch: None });
+                        });
+                    }
+                }
                 Some(Command::StopGame { app_id }) => {
                     if let Some(dir) = st.official.get(&app_id).cloned() {
                         tokio::task::spawn_blocking(move || launch::kill_in_folder(&dir));
@@ -875,6 +889,16 @@ async fn online(
                             .map_err(|e| e.to_string())
                             .map(|r| crate::social::collections(r.data.iter().flat_map(|d| d.entries.iter()).map(|e| (e.key(), e.is_deleted(), e.value()))));
                         sink(Event::SteamCollections(result));
+                    });
+                }
+                Some(Command::SaveSteamCollections { save, delete }) => {
+                    let (conn, sink) = (conn.clone(), sink.clone());
+                    tokio::spawn(async move {
+                        let result = crate::collections::save(&conn, &save, &delete).await;
+                        if let Err(e) = &result {
+                            tracing::warn!("saving collections to Steam failed: {e}");
+                        }
+                        sink(Event::SteamCollectionsSaved { save, delete, result });
                     });
                 }
                 Some(Command::LoadComments { steam_id, start }) => st.with_web(sink, move |web, sink| async move {
@@ -996,6 +1020,19 @@ async fn online(
                         sink(Event::MyReview { app_id, result: Ok(None) });
                     }
                 }),
+                Some(Command::LoadStoreRecommendations { language }) => {
+                    let (conn, sink) = (conn.clone(), sink.clone());
+                    tokio::spawn(async move {
+                        sink(Event::StoreRecommendations(crate::store_recs::load(&conn, &language).await));
+                    });
+                }
+                Some(Command::SendTradeOffer { partner, token, message, give, take }) => st.with_web(sink, move |web, sink| async move {
+                    let result = match web {
+                        Ok(w) => crate::market::send_trade_offer(&w, partner, token.as_deref(), &message, &give, &take).await,
+                        Err(e) => Err(e),
+                    };
+                    sink(Event::TradeOfferSent { partner, result });
+                }),
                 Some(Command::LoadCardSet { steam_id, app_id, foil }) => st.with_web(sink, move |web, sink| async move {
                     let result = crate::social::card_set(web.as_deref().ok(), steam_id, app_id, foil).await;
                     sink(Event::CardSet { steam_id, app_id, foil, result });
@@ -1075,6 +1112,11 @@ async fn online(
                     if st.active_req.as_ref().is_some_and(|r| r.app_id == app_id) {
                         st.active_req = None;
                     }
+                    st.save_downloads();
+                    sink(Event::DownloadQueue(st.queue.iter().map(|q| q.app_id).collect()));
+                }
+                Some(Command::ReorderDownloads(order)) => {
+                    st.queue = reorder(std::mem::take(&mut st.queue), &order);
                     st.save_downloads();
                     sink(Event::DownloadQueue(st.queue.iter().map(|q| q.app_id).collect()));
                 }
@@ -3267,5 +3309,39 @@ mod tests {
         let emoticon = [("Game", "app_365360"), ("item_class", "item_class_4")];
         assert_eq!(super::card_set(emoticon.iter().copied(), "365360-:goblin:"), None);
         assert_eq!(super::card_set([("Rarity", "Rare")].iter().copied(), "AK-47 | Redline"), None);
+    }
+}
+
+/// The queue in the order asked for; games not in `order` follow, in the
+/// order they were, so nothing is ever dropped.
+fn reorder(queue: std::collections::VecDeque<crate::download::InstallRequest>, order: &[AppId]) -> std::collections::VecDeque<crate::download::InstallRequest> {
+    let mut rest: Vec<_> = queue.into_iter().collect();
+    let mut out = std::collections::VecDeque::with_capacity(rest.len());
+    for id in order {
+        if let Some(i) = rest.iter().position(|r| r.app_id == *id) {
+            out.push_back(rest.remove(i));
+        }
+    }
+    out.extend(rest);
+    out
+}
+
+#[cfg(test)]
+mod reorder_tests {
+    use super::reorder;
+
+    fn q(ids: &[u32]) -> std::collections::VecDeque<crate::download::InstallRequest> {
+        ids.iter().map(|&app_id| crate::download::InstallRequest { app_id, library: Default::default(), steam_root: Default::default(), branch: String::new(), language: String::new(), skip_dlc: Vec::new(), add_dlc: Vec::new(), platform: String::new() }).collect()
+    }
+    fn ids(q: &std::collections::VecDeque<crate::download::InstallRequest>) -> Vec<u32> {
+        q.iter().map(|r| r.app_id).collect()
+    }
+
+    #[test]
+    fn moves_and_keeps_the_rest() {
+        assert_eq!(ids(&reorder(q(&[1, 2, 3, 4]), &[3, 1])), vec![3, 1, 2, 4]);
+        // Unknown ids are ignored; nothing is dropped or duplicated.
+        assert_eq!(ids(&reorder(q(&[1, 2]), &[9, 2, 2])), vec![2, 1]);
+        assert_eq!(ids(&reorder(q(&[]), &[1])), Vec::<u32>::new());
     }
 }
