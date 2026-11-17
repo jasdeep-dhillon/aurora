@@ -221,6 +221,8 @@ pub struct Library {
     /// Index into `custom` when a non-Steam game is open.
     custom_selected: Option<usize>,
     adding: Option<CustomGame>,
+    /// Steam's non-Steam games being picked for import (shortcut, ticked).
+    importing: Option<Vec<(local::shortcuts::Shortcut, bool)>>,
     selected: Option<AppId>,
     search: String,
     filter: Filter,
@@ -361,6 +363,7 @@ impl Extension for Library {
             (None, None) => self.home(ui, &t, ctx),
         });
         self.add_dialog(ui, &t, ctx);
+        self.import_dialog(ui, &t, ctx);
         self.drm_notice(ui, &t, ctx);
         self.reader(ui, &t, ctx);
         self.install_window(ui, &t, ctx);
@@ -376,6 +379,24 @@ impl Extension for Library {
     fn settings(&mut self, ui: &mut Ui, ctx: &mut Ctx) -> bool {
         let t = ctx.theme.clone();
         super::settings::switch(ui, &t, t!("Show collections"), t!("Collection filters and the new collection button in the library sidebar, and the Add to collection menu on games."), &mut self.show_collections);
+        // Non-Steam games added in the official client.
+        egui::Frame::new().fill(t.surface).corner_radius(t.corner_small()).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(w::text_medium(t!("Non-Steam games from Steam"), 14.0, t.text));
+                    ui.add(egui::Label::new(w::text(t!("Adds the non-Steam games you added in the official Steam client (shortcuts.vdf) to Aurora's library."), 12.5, t.text_dim)).wrap());
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if w::button(ui, &t, Some(icons::DOWNLOAD), t!("Import"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                        let picks: Vec<_> = self.steam_shortcuts(ctx).into_iter().filter(|(s, new)| *new && !s.hidden).map(|(s, _)| s).collect();
+                        let n = picks.len();
+                        self.import_shortcuts(picks);
+                        ctx.toast(if n == 0 { t!("No new non-Steam games in Steam").to_string() } else { t!("Imported {n} non-Steam games from Steam", n = n).to_string() });
+                    }
+                });
+            });
+        });
         if !cfg!(windows) {
             let before = self.through_steam;
             super::settings::switch(ui, &t, t!("Start games through the official Steam client"), t!("Off: games start here, natively or with Proton, and only anti-cheat games use Steam. Turn on for games that won't run without Steam."), &mut self.through_steam);
@@ -1144,9 +1165,17 @@ impl Library {
         let Some(g) = &mut self.adding else { return };
         let mut close = false;
         let mut add = false;
+        let mut import = false;
         ui::widgets::modal(ui.ctx(), egui::Id::unique("add-game")).show(ui.ctx(), |ui| {
             ui.set_width(500.0);
-            ui.label(w::text_bold(t!("Add a non-Steam game"), 20.0, t.text));
+            ui.horizontal(|ui| {
+                ui.label(w::text_bold(t!("Add a non-Steam game"), 20.0, t.text));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if w::button(ui, t, Some(icons::DOWNLOAD), t!("Import from Steam…"), w::Kind::Ghost, w::Size::Sm).on_hover_text(t!("The non-Steam games you added in the official Steam client")).clicked() {
+                        import = true;
+                    }
+                });
+            });
             ui.add_space(8.0);
             ui.label(w::text_medium(t!("Program"), 12.5, t.text_dim));
             ui.horizontal(|ui| {
@@ -1188,6 +1217,85 @@ impl Library {
             self.selected = None;
         } else if close {
             self.adding = None;
+        } else if import {
+            self.adding = None;
+            self.importing = Some(self.steam_shortcuts(ctx).into_iter().map(|(s, new)| {
+                let tick = new && !s.hidden;
+                ((s, new), tick)
+            }).map(|((s, _), tick)| (s, tick)).collect());
+        }
+    }
+
+    /// Steam's non-Steam games for this account, each with whether it's
+    /// new here (not in Aurora's list yet).
+    fn steam_shortcuts(&self, ctx: &Ctx) -> Vec<(local::shortcuts::Shortcut, bool)> {
+        let root = &ctx.local.steam_root;
+        if root.as_os_str().is_empty() {
+            return Vec::new();
+        }
+        let account = Some((ctx.state.steam_id & 0xFFFF_FFFF) as u32).filter(|a| *a != 0);
+        local::shortcuts::load(root, account).into_iter().map(|s| {
+            let new = !self.custom.iter().any(|c| c.exe.trim().trim_matches('"') == s.exe && c.args.trim() == s.launch_options);
+            (s, new)
+        }).collect()
+    }
+
+    fn import_shortcuts(&mut self, picks: Vec<local::shortcuts::Shortcut>) {
+        for s in picks {
+            self.custom.push(CustomGame { name: s.display_name(), exe: s.exe, args: s.launch_options });
+        }
+    }
+
+    /// Pick which of Steam's non-Steam games to bring in.
+    fn import_dialog(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+        let Some(list) = &mut self.importing else { return };
+        let mut close = false;
+        let mut go = false;
+        ui::widgets::modal(ui.ctx(), egui::Id::unique("import-shortcuts")).show(ui.ctx(), |ui| {
+            ui.set_width(520.0);
+            ui.label(w::text_bold(t!("Import from Steam"), 20.0, t.text));
+            ui.add(egui::Label::new(w::text(t!("Non-Steam games you added in the official Steam client. Ones already in Aurora are left out."), 12.5, t.text_dim)).wrap());
+            ui.add_space(8.0);
+            if list.is_empty() {
+                ui.label(w::text(t!("Steam has no non-Steam games for this account."), 13.0, t.text_faint));
+            }
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for (s, tick) in list.iter_mut() {
+                    let new = !self.custom.iter().any(|c| c.exe.trim().trim_matches('"') == s.exe && c.args.trim() == s.launch_options);
+                    ui.add_enabled_ui(new, |ui| {
+                        ui.horizontal(|ui| {
+                            let mut on = *tick && new;
+                            let label = if new { s.display_name() } else { t!("{name} (already added)", name = s.display_name()).to_string() };
+                            if w::check(ui, t, &mut on, label).changed() {
+                                *tick = on;
+                            }
+                            if s.hidden {
+                                ui.label(w::text(t!("hidden in Steam"), 11.5, t.text_faint));
+                            }
+                        });
+                        ui.add(egui::Label::new(w::text(&s.exe, 11.5, t.text_faint).monospace()).truncate());
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+            ui.add_space(10.0);
+            let n = list.iter().filter(|(_, tick)| *tick).count();
+            ui.horizontal(|ui| {
+                if ui.add_enabled_ui(n > 0, |ui| w::button(ui, t, Some(icons::DOWNLOAD), &t!("Import {n}", n = n), w::Kind::Primary, w::Size::Md)).inner.clicked() {
+                    go = true;
+                }
+                if w::button(ui, t, None, t!("Cancel"), w::Kind::Secondary, w::Size::Md).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if go {
+            let picks: Vec<_> = self.importing.take().unwrap_or_default().into_iter().filter(|(_, tick)| *tick).map(|(s, _)| s).collect();
+            let n = picks.len();
+            self.import_shortcuts(picks);
+            ctx.toast(t!("Imported {n} non-Steam games from Steam", n = n));
+        } else if close || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.importing = None;
         }
     }
 
