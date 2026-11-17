@@ -1709,7 +1709,12 @@ mod linux {
     /// tool in Steam and the Windows build is what's installed. A forced
     /// Proton with only the Linux files on disk (downloaded as a native game,
     /// or before the choice) runs the Linux build: the Windows one isn't there.
+    /// Likewise, nothing forced but only the Windows files on disk (Crab
+    /// Game, downloaded for Windows) runs those with Proton.
     pub(super) fn use_native(forced: bool, native_installed: bool, windows_installed: bool) -> bool {
+        if !native_installed && windows_installed {
+            return false;
+        }
         !forced || (native_installed && !windows_installed)
     }
 
@@ -2266,6 +2271,29 @@ mod tests {
         assert!(use_native(true, true, false));
         // Proton forced, nothing installed: Proton's error, as before.
         assert!(!use_native(true, false, false));
+        // Nothing forced, only the Windows build on disk (Crab Game): Proton.
+        assert!(!use_native(false, false, true));
+        // Nothing forced, nothing installed: the Linux build's error, as before.
+        assert!(use_native(false, false, false));
+    }
+
+    /// Crab Game's case end to end: Linux and Windows launch options, only
+    /// the Windows files downloaded, no choice made. Needs a Steam install
+    /// with a Proton (skipped otherwise).
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_files_only_run_with_proton() {
+        if local::find_steam_root().is_none_or(|r| local::compat::tool_for(&r, 0).is_none()) {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sir-crab-{}", std::process::id())).join("steamapps").join("common").join("Crab Game");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Crab Game.exe"), b"MZ").unwrap();
+        let opt = |exe: &str, os: &str| model::LaunchOption { executable: exe.into(), arguments: String::new(), working_dir: String::new(), description: String::new(), os_list: os.into() };
+        let app = OwnedApp { app_id: 4_000_000_001, name: "Crab".into(), launch: vec![opt("Crab Game.exe", "windows"), opt("Crab Game.x86_64", "linux")], ..Default::default() };
+        let plan = super::linux::plan(&app, &dir).expect("a plan");
+        assert!(plan.uses_proton(), "{}", plan.describe());
+        let _ = std::fs::remove_dir_all(dir.ancestors().nth(3).unwrap());
     }
 
     /// A game with both builds on disk (like BeamNG.drive): native unless
