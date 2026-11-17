@@ -1796,6 +1796,20 @@
 "Linux (native)" = "Linux (нативная)"
 "Aurora's own Steam features work in the Windows version. The Linux version gets them from your Steam install." = "Собственные функции Steam в Aurora работают в версии для Windows. Версия для Linux получает их от установленного Steam."
 
+# --- Import non-Steam games from Steam ---
+"Non-Steam games from Steam" = "Сторонние игры из Steam"
+"Adds the non-Steam games you added in the official Steam client (shortcuts.vdf) to Aurora's library." = "Добавляет в библиотеку Aurora сторонние игры, которые вы добавили в официальном клиенте Steam (shortcuts.vdf)."
+"Import" = "Импортировать"
+"No new non-Steam games in Steam" = "В Steam нет новых сторонних игр"
+"Imported {n} non-Steam games from Steam" = "Импортировано сторонних игр из Steam: {n}"
+"Import from Steam…" = "Импорт из Steam…"
+"The non-Steam games you added in the official Steam client" = "Сторонние игры, добавленные в официальном клиенте Steam"
+"Import from Steam" = "Импорт из Steam"
+"Non-Steam games you added in the official Steam client. Ones already in Aurora are left out." = "Сторонние игры, добавленные в официальном клиенте Steam. Те, что уже есть в Aurora, пропускаются."
+"Steam has no non-Steam games for this account." = "В Steam нет сторонних игр для этого аккаунта."
+"{name} (already added)" = "{name} (уже добавлена)"
+"hidden in Steam" = "скрыта в Steam"
+"Import {n}" = "Импортировать ({n})"
 # --- Store: your picks ---
 "Recommended for you" = "Рекомендуем вам"
 "Popular with your friends" = "Популярно у ваших друзей"
