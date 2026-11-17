@@ -216,9 +216,92 @@ impl Library {
                 });
             }
         }
+        if let (Some(r), Some(g)) = (&report, installed) {
+            self.cloud_file_list(ui, t, ctx, app, r, &g.install_dir, syncing);
+        }
         ui.add_space(14.0);
         if changed {
             self.send_cloud_settings(ctx);
+        }
+    }
+
+    /// The game's files in Steam Cloud, each with a delete button, like
+    /// Steam's "View Steam Cloud" page but inside Aurora.
+    #[allow(clippy::too_many_arguments)]
+    fn cloud_file_list(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, app: AppId, r: &model::CloudReport, install_dir: &std::path::Path, syncing: bool) {
+        if r.files.is_empty() {
+            return;
+        }
+        ui.add_space(8.0);
+        let open = self.cloud_files_open.contains(&app);
+        ui.horizontal(|ui| {
+            let label = t!("Files in the cloud ({n})", n = r.files.len());
+            if w::button(ui, t, Some(if open { icons::CARET_DOWN } else { icons::CARET_RIGHT }), &label, w::Kind::Ghost, w::Size::Sm).clicked() {
+                if open {
+                    self.cloud_files_open.remove(&app);
+                } else {
+                    self.cloud_files_open.insert(app);
+                }
+            }
+            if open {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_enabled_ui(!syncing, |ui| {
+                        if w::button(ui, t, Some(icons::TRASH), t!("Delete all"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                            let names = r.files.iter().map(|f| f.raw.clone()).collect();
+                            self.cloud_delete = Some((app, names, t!("all {n} files", n = r.files.len()).to_string()));
+                        }
+                    });
+                });
+            }
+        });
+        if open {
+            w::panel(t).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                egui::ScrollArea::vertical().id_salt(("cloud_files", app)).max_height(260.0).show(ui, |ui| {
+                    for f in &r.files {
+                        ui.horizontal(|ui| {
+                            ui.label(w::text(icons::NOTE, 13.0, t.text_faint));
+                            let when = if f.time > 0 { ui::ago(f.time) } else { String::new() };
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_enabled_ui(!syncing, |ui| {
+                                    if w::icon_button_sized(ui, t, icons::TRASH, &t!("Delete from Steam Cloud"), false, 0, 22.0).clicked() {
+                                        self.cloud_delete = Some((app, vec![f.raw.clone()], f.name.clone()));
+                                    }
+                                });
+                                ui.label(w::text(when, 12.0, t.text_faint));
+                                ui.label(w::text(ui::bytes(f.size), 12.0, t.text_dim));
+                                ui.add(egui::Label::new(w::text(&f.name, 12.5, t.text)).truncate()).on_hover_text(&f.name);
+                            });
+                        });
+                    }
+                });
+            });
+        }
+        // Confirm before anything leaves the cloud: other PCs lose it too.
+        let Some((who, names, what)) = self.cloud_delete.clone() else { return };
+        if who != app {
+            return;
+        }
+        let mut close = false;
+        w::modal(ui.ctx(), egui::Id::unique(("cloud_delete", app))).show(ui.ctx(), |ui| {
+            ui.set_width(440.0);
+            ui.label(w::text(icons::TRASH, 28.0, t.danger));
+            ui.label(w::text_bold(t!("Delete {what} from Steam Cloud?", what = what), 18.0, t.text));
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(w::text(t!("Your other PCs won't get it any more. The copy on this PC stays, and Aurora won't upload it again."), 13.0, t.text_dim)).wrap());
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if w::button(ui, t, Some(icons::TRASH), t!("Delete"), w::Kind::Danger, w::Size::Md).clicked() {
+                    ctx.send(Command::CloudDelete { app_id: app, install_dir: install_dir.to_path_buf(), names: names.clone() });
+                    close = true;
+                }
+                if w::button(ui, t, None, t!("Cancel"), w::Kind::Secondary, w::Size::Md).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close {
+            self.cloud_delete = None;
         }
     }
 

@@ -837,6 +837,20 @@ async fn online(
                         });
                     }
                 }
+                Some(Command::CloudDelete { app_id, install_dir, names }) => {
+                    if let Some(target) = st.cloud_target_any(app_id, &install_dir) {
+                        sink(Event::CloudSyncing { app_id });
+                        let (conn, sink) = (conn.clone(), sink.clone());
+                        tokio::spawn(async move {
+                            let deleted = crate::cloud::delete(&conn, &target, &names).await;
+                            let mut report = crate::cloud::sync(&conn, &target, crate::cloud::Mode::Check, &[], &[]).await;
+                            if let Err(e) = deleted {
+                                report.errors.push((String::new(), format!("Couldn't delete from Steam Cloud: {e}")));
+                            }
+                            sink(Event::CloudReport { report, held_launch: None });
+                        });
+                    }
+                }
                 Some(Command::StopGame { app_id }) => {
                     if let Some(dir) = st.official.get(&app_id).cloned() {
                         tokio::task::spawn_blocking(move || launch::kill_in_folder(&dir));

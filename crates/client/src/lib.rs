@@ -86,6 +86,9 @@ pub enum Command {
     /// Sync a game's saves now. Conflicts listed in `keep_local` are uploaded,
     /// in `keep_cloud` downloaded. `then_launch` starts the game afterwards.
     CloudSync { app_id: AppId, install_dir: PathBuf, mode: cloud::Mode, keep_local: Vec<String>, keep_cloud: Vec<String>, then_launch: Option<String> },
+    /// Delete files from a game's Steam Cloud (`CloudFile::raw` names),
+    /// then report the cloud again.
+    CloudDelete { app_id: AppId, install_dir: PathBuf, names: Vec<String> },
     /// Close a running game (and the processes it started).
     StopGame { app_id: AppId },
     /// For developers: let a game started by hand (a debugger, a test probe)

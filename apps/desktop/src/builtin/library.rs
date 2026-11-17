@@ -256,6 +256,10 @@ pub struct Library {
     auto_queued: BTreeSet<AppId>,
     /// Games whose cloud usage was looked up this session.
     cloud_checked: BTreeSet<AppId>,
+    /// Steam Cloud file list shown in Properties for this game.
+    cloud_files_open: BTreeSet<AppId>,
+    /// Cloud files waiting for "Delete" to be confirmed: (game, raw names, what to call them).
+    cloud_delete: Option<(AppId, Vec<String>, String)>,
     /// A right-click menu choice, applied after the frame's drawing.
     menu_request: Option<(AppId, MenuAct)>,
     /// Games to put on the desktop once installed, with their library folder.
