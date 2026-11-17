@@ -12,6 +12,8 @@ const SIGNATURE: u32 = 0x1B81_B817;
 const END: u32 = 0x32C4_15AB;
 
 const FLAG_DIRECTORY: u32 = 64;
+/// EDepotFileFlag::Executable: a Linux or macOS program (needs the x bit).
+const FLAG_EXECUTABLE: u32 = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
@@ -29,6 +31,8 @@ pub struct FileEntry {
     pub sha: Vec<u8>,
     pub chunks: Vec<Chunk>,
     pub directory: bool,
+    /// A program to mark executable (Linux builds).
+    pub executable: bool,
     pub link: Option<String>,
 }
 
@@ -91,6 +95,7 @@ impl Manifest {
                     sha: f.sha_content().to_vec(),
                     chunks,
                     directory: f.flags() & FLAG_DIRECTORY != 0,
+                    executable: f.flags() & FLAG_EXECUTABLE != 0,
                     link: Some(f.linktarget().to_string()).filter(|l| !l.is_empty()),
                 }
             })
@@ -124,7 +129,7 @@ impl Manifest {
                 .map(|f| FileMapping {
                     filename: Some(f.name.replace('/', "\\")),
                     size: Some(f.size),
-                    flags: Some(if f.directory { FLAG_DIRECTORY } else { 0 }),
+                    flags: Some(if f.directory { FLAG_DIRECTORY } else { 0 } | if f.executable { FLAG_EXECUTABLE } else { 0 }),
                     sha_content: Some(f.sha.clone()),
                     linktarget: f.link.clone(),
                     chunks: f
@@ -167,5 +172,20 @@ impl Manifest {
         }
         self.encrypted_names = false;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Our cached copy keeps which files are programs.
+    #[test]
+    fn keeps_the_executable_flag() {
+        let file = |name: &str, executable| FileEntry { name: name.into(), size: 0, sha: vec![0; 20], chunks: vec![], directory: false, executable, link: None };
+        let m = Manifest { depot: 1, gid: 2, encrypted_names: false, files: vec![file("Crab Game.x86_64", true), file("UnityPlayer.so", false)], ..Default::default() };
+        let back = Manifest::parse(&m.to_bytes()).unwrap();
+        let flags: Vec<(&str, bool)> = back.files.iter().map(|f| (f.name.as_str(), f.executable)).collect();
+        assert_eq!(flags, vec![("Crab Game.x86_64", true), ("UnityPlayer.so", false)]);
     }
 }
