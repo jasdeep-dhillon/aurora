@@ -5843,6 +5843,7 @@ dependencies = [
  "i18n",
  "image",
  "log",
+ "memmap2",
  "resvg",
  "serde",
  "wgpu",
