@@ -1,5 +1,6 @@
 //! Library: sidebar game list, library home with shelves, and game pages.
 
+use ui::widgets::EditMenu;
 use i18n::t;
 use super::{Entry, entries};
 
@@ -482,7 +483,7 @@ impl Library {
             ui.set_width(360.0);
             ui.label(w::text_bold(if index.is_some() { t!("Rename collection") } else { t!("New collection") }, 18.0, t.text));
             ui.add_space(8.0);
-            let r = ui.add(egui::TextEdit::singleline(name).hint_text(t!("Name, e.g. Co-op with friends")).desired_width(f32::INFINITY).margin(vec2(10.0, 8.0)));
+            let r = ui.add(egui::TextEdit::singleline(name).hint_text(t!("Name, e.g. Co-op with friends")).desired_width(f32::INFINITY).margin(vec2(10.0, 8.0))).with_edit_menu();
             w::autofocus(&r, name.is_empty());
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.add_space(10.0);
@@ -1150,7 +1151,7 @@ impl Library {
             ui.label(w::text_medium(t!("Program"), 12.5, t.text_dim));
             ui.horizontal(|ui| {
                 let hint = if cfg!(windows) { t!("Path to the game's .exe") } else { t!("Path to the game's program (Linux or Windows .exe)") };
-                ui.add(egui::TextEdit::singleline(&mut g.exe).hint_text(hint).desired_width(360.0).margin(vec2(10.0, 8.0)));
+                ui.add(egui::TextEdit::singleline(&mut g.exe).hint_text(hint).desired_width(360.0).margin(vec2(10.0, 8.0))).with_edit_menu();
                 if w::button(ui, t, Some(icons::FOLDER), t!("Choose…"), w::Kind::Secondary, w::Size::Sm).clicked() {
                     // Linux programs often have no extension (or are AppImages): show everything there.
                     let dialog = if cfg!(windows) { rfd::FileDialog::new().add_filter("Programs", &["exe", "bat", "cmd", "lnk"]) } else { rfd::FileDialog::new() };
@@ -1164,10 +1165,10 @@ impl Library {
             });
             ui.add_space(6.0);
             ui.label(w::text_medium(t!("Display name"), 12.5, t.text_dim));
-            ui.add(egui::TextEdit::singleline(&mut g.name).desired_width(f32::INFINITY).margin(vec2(10.0, 8.0)));
+            ui.add(egui::TextEdit::singleline(&mut g.name).desired_width(f32::INFINITY).margin(vec2(10.0, 8.0))).with_edit_menu();
             ui.add_space(6.0);
             ui.label(w::text_medium(t!("Launch options"), 12.5, t.text_dim));
-            ui.add(egui::TextEdit::singleline(&mut g.args).desired_width(f32::INFINITY).margin(vec2(10.0, 8.0)));
+            ui.add(egui::TextEdit::singleline(&mut g.args).desired_width(f32::INFINITY).margin(vec2(10.0, 8.0))).with_edit_menu();
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 let ok = !g.exe.trim().is_empty() && !g.name.trim().is_empty();
@@ -1677,7 +1678,7 @@ impl Library {
             ui.label(w::caption_text(&t, t!("NOTES")));
             ui.add_space(4.0);
             let s = self.games.entry(id).or_default();
-            ui.add(egui::TextEdit::multiline(&mut s.notes).hint_text(t!("Write a note for yourself…")).desired_rows(3).desired_width(f32::INFINITY));
+            ui.add(egui::TextEdit::multiline(&mut s.notes).hint_text(t!("Write a note for yourself…")).desired_rows(3).desired_width(f32::INFINITY)).with_edit_menu();
         });
         ui.add_space(12.0);
 
