@@ -500,6 +500,13 @@ fn keep_ticking(app: &mut SteamApp, ctx: &egui::Context) {
     if ctx.embed_viewports() {
         return;
     }
+    // Linux: the main window keeps getting frames while minimized or behind
+    // the game (GNOME on Wayland still sends them), so it drives the overlay.
+    // A 1x1 fixed-size helper window is also a Wayland protocol error
+    // ("Invalid min/max size") that closes the app.
+    if cfg!(target_os = "linux") {
+        return;
+    }
     let app = AppPtr(app);
     let builder = egui::ViewportBuilder::default()
         .with_title(format!("{} overlay timer", i18n::BRAND))
