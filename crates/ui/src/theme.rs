@@ -316,6 +316,17 @@ fn text_tweak() -> egui::epaint::text::FontTweak {
     }
 }
 
+/// A system font file, mapped into memory instead of copied: only the parts
+/// actually drawn get loaded, and they count as shared file cache rather than
+/// the app's own memory (the CJK fonts are 70+ MB together).
+fn map_font(path: &std::path::Path) -> Option<&'static [u8]> {
+    let file = std::fs::File::open(path).ok()?;
+    // SAFETY: system font files don't change while the app runs; the mapping
+    // lives for the whole program, like the font itself.
+    let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+    Some(&Box::leak(Box::new(map))[..])
+}
+
 /// Install Geist (Bold and ExtraBold, Inter Bold behind it for scripts Geist lacks) plus
 /// the icon font, with grayscale anti-aliasing. Call once at startup.
 pub fn install_fonts(ctx: &egui::Context) {
@@ -347,9 +358,9 @@ pub fn install_fonts_with(ctx: &egui::Context, lcd: bool) {
     let mut system: Vec<String> = Vec::new();
     if let Some(dir) = std::env::var_os("WINDIR").map(|w| std::path::PathBuf::from(w).join("Fonts")) {
         for file in ["msyh.ttc", "YuGothM.ttc", "malgun.ttf", "Nirmala.ttc", "tahoma.ttf", "seguisym.ttf"] {
-            if let Ok(bytes) = std::fs::read(dir.join(file)) {
+            if let Some(bytes) = map_font(&dir.join(file)) {
                 let name = format!("system-{file}");
-                fonts.font_data.insert(name.clone(), Arc::new(egui::FontData::from_owned(bytes)));
+                fonts.font_data.insert(name.clone(), Arc::new(egui::FontData::from_static(bytes)));
                 system.push(name);
             }
         }
