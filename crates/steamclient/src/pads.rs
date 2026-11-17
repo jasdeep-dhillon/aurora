@@ -338,9 +338,18 @@ fn import_table() -> Vec<(usize, usize)> {
 
 /// Modules whose XInput stays real: Windows' own, any XInput DLL, and SDL
 /// (which reads PlayStation/Switch pads itself).
+///
+/// .NET is the exception among Windows' modules: XNA/FNA games (Celeste)
+/// read XInput through `[DllImport("xinput1_3.dll")]`, which the runtime
+/// (`clr.dll`, `coreclr.dll`) resolves, and XNA itself lives in the GAC under
+/// `%SystemRoot%\Microsoft.NET\assembly\`. Skipping them left those games
+/// on the real XInput, which doesn't see PlayStation pads. `path` is
+/// lowercase (see `module_path`).
 fn leave_alone(path: &str, windir: &str) -> bool {
     let name = file_name(path);
-    (!windir.is_empty() && path.starts_with(windir)) || name.starts_with("xinput") || name.starts_with("sdl")
+    let managed = path.contains("\\microsoft.net\\assembly\\") || name == "clr.dll" || name == "coreclr.dll";
+    let system = !windir.is_empty() && path.starts_with(windir) && !managed;
+    system || name.starts_with("xinput") || name.starts_with("sdl")
 }
 
 #[cfg(not(windows))]
@@ -404,6 +413,21 @@ pub fn install() {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn hooks_dotnet_but_not_windows() {
+        let win = "c:\\windows\\";
+        // Windows' own modules and XInput itself stay real.
+        assert!(leave_alone("c:\\windows\\system32\\user32.dll", win));
+        assert!(leave_alone("c:\\windows\\system32\\xinput1_4.dll", win));
+        assert!(leave_alone("c:\\games\\foo\\sdl3.dll", win));
+        // The .NET runtime and the GAC's XNA are hooked (Celeste).
+        assert!(!leave_alone("c:\\windows\\microsoft.net\\framework\\v4.0.30319\\clr.dll", win));
+        assert!(!leave_alone("c:\\windows\\microsoft.net\\assembly\\gac_32\\microsoft.xna.framework\\v4.0_4.0.0.0__842cf8be1de50553\\microsoft.xna.framework.dll", win));
+        assert!(!leave_alone("c:\\program files\\dotnet\\shared\\microsoft.netcore.app\\8.0.0\\coreclr.dll", win));
+        // The game's own modules are hooked.
+        assert!(!leave_alone("c:\\games\\celeste\\celeste.exe", win));
+    }
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
