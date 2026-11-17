@@ -348,14 +348,16 @@ pub fn steamclient_dll(is64: bool) -> Option<PathBuf> {
 }
 
 pub fn spawn(app: &OwnedApp, install_dir: &Path, extra_args: &str) -> Result<Child, String> {
-    command(app, install_dir, extra_args)?.spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+    let opts = UserOptions::parse(extra_args);
+    opts.wrap(command(app, install_dir, &opts)?).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
 }
 
 /// Start a game with our steamclient: environment like a Steam launch, plus
 /// the pipe and token for the DLL. The registry swap must be in place.
 /// `pads` names the shared memory with the controllers XInput can't see.
 pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, extra_args: &str, ipc_env: &str, account: &str, pads: Option<&str>) -> Result<Child, String> {
-    let mut cmd = command(app, install_dir, extra_args)?;
+    let opts = UserOptions::parse(extra_args);
+    let mut cmd = command(app, install_dir, &opts)?;
     let id = app.app_id.to_string();
     cmd.env(crate::ipc::protocol::ENV_IPC, ipc_env)
         .env("SteamOverlayGameId", &id)
@@ -386,7 +388,7 @@ pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, extra_args: &s
             tracing::info!("{}: new Proton prefix, Steam features from our steamclient from the next launch", app.name);
         }
     }
-    cmd.spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+    opts.wrap(cmd).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
 }
 
 /// Start a non-Steam game the player added (program path, launch options).
@@ -403,32 +405,40 @@ pub fn spawn_non_steam(exe: &str, args: &str) -> Result<Option<Child>, String> {
         return Err(format!("{} doesn't exist", exe.display()));
     }
     let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+    let opts = UserOptions::parse(args);
     #[cfg(not(windows))]
     {
-        let mut cmd = linux::non_steam(&exe, args)?;
+        let mut cmd = linux::non_steam(&exe, &opts.args)?;
         cmd.current_dir(&dir);
-        return cmd.spawn().map(Some).map_err(|e| format!("couldn't start {}: {e}", exe.display()));
+        return opts.wrap(cmd).spawn().map(Some).map_err(|e| format!("couldn't start {}: {e}", exe.display()));
     }
     #[cfg(windows)]
     {
         let ext = exe.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         if ext == "exe" {
-            match Command::new(&exe).args(split_args(args)).current_dir(&dir).spawn() {
+            let mut cmd = Command::new(&exe);
+            cmd.args(&opts.args).current_dir(&dir);
+            match opts.wrap(cmd).spawn() {
                 Ok(child) => return Ok(Some(child)),
                 // ERROR_ELEVATION_REQUIRED: the shell asks for admin rights.
                 Err(e) if e.raw_os_error() == Some(740) => {}
                 Err(e) => return Err(format!("couldn't start {}: {e}", exe.display())),
             }
         }
-        win::shell_open(&exe, args, &dir).map(|()| None)
+        if !opts.args_only() {
+            tracing::warn!("launch options: variables and wrappers don't apply to {} (opened through the Windows shell)", exe.display());
+        }
+        win::shell_open(&exe, &opts.args_line(), &dir).map(|()| None)
     }
 }
 
-fn command(app: &OwnedApp, install_dir: &Path, extra_args: &str) -> Result<Command, String> {
+/// The game's own command plus the player's arguments; their variables and
+/// wrapper come last, with `UserOptions::wrap`.
+fn command(app: &OwnedApp, install_dir: &Path, opts: &UserOptions) -> Result<Command, String> {
     #[cfg(not(windows))]
     {
         let mut cmd = linux::plan(app, install_dir)?.command(app, install_dir);
-        cmd.args(split_args(extra_args));
+        cmd.args(&opts.args);
         return Ok(cmd);
     }
     #[allow(unreachable_code)]
@@ -448,7 +458,7 @@ fn command(app: &OwnedApp, install_dir: &Path, extra_args: &str) -> Result<Comma
 
     let mut cmd = Command::new(&exe);
     cmd.args(split_args(&opt.arguments))
-        .args(split_args(extra_args))
+        .args(&opts.args)
         .current_dir(cwd)
         .env("SteamAppId", app.app_id.to_string())
         .env("SteamGameId", app.app_id.to_string());
@@ -476,6 +486,111 @@ fn split_args(s: &str) -> Vec<String> {
         }
     }
     if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// The launch options the player typed, read like Steam's: with
+/// `%command%`, the words before it are `NAME=value` variables and then a
+/// wrapper program (`MANGOHUD=1 gamemoderun %command% -novid`), and the
+/// words after it are game arguments. Without it, every word is a game
+/// argument. Single and double quotes group words, as in a shell.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct UserOptions {
+    env: Vec<(String, String)>,
+    wrapper: Vec<String>,
+    args: Vec<String>,
+}
+
+impl UserOptions {
+    pub(crate) fn parse(s: &str) -> UserOptions {
+        let words = shell_words(s);
+        let Some(at) = words.iter().position(|w| w == "%command%") else {
+            return UserOptions { args: words, ..Default::default() };
+        };
+        let mut before = words[..at].iter().peekable();
+        let mut env = Vec::new();
+        while let Some((name, value)) = before.peek().and_then(|w| w.split_once('=')).filter(|(n, _)| is_env_name(n)) {
+            env.push((name.to_string(), value.to_string()));
+            before.next();
+        }
+        let wrapper = before.cloned().collect();
+        // A second %command% means nothing here; drop it rather than pass it on.
+        let args = words[at + 1..].iter().filter(|w| *w != "%command%").cloned().collect();
+        UserOptions { env, wrapper, args }
+    }
+
+    /// Only game arguments (no variables or wrapper).
+    fn args_only(&self) -> bool {
+        self.env.is_empty() && self.wrapper.is_empty()
+    }
+
+    /// The game arguments as one command line (for the Windows shell).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn args_line(&self) -> String {
+        self.args.iter().map(|a| if a.is_empty() || a.contains(char::is_whitespace) { format!("\"{a}\"") } else { a.clone() }).collect::<Vec<_>>().join(" ")
+    }
+
+    /// The finished game command with the player's variables on top
+    /// (they win over ours, as in Steam) and their wrapper in front of it.
+    fn wrap(&self, mut cmd: Command) -> Command {
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
+        let Some((program, rest)) = self.wrapper.split_first() else { return cmd };
+        tracing::info!("launch options: running the game through {}", self.wrapper.join(" "));
+        let mut w = Command::new(program);
+        w.args(rest).arg(cmd.get_program()).args(cmd.get_args());
+        for (k, v) in cmd.get_envs() {
+            match v {
+                Some(v) => w.env(k, v),
+                None => w.env_remove(k),
+            };
+        }
+        if let Some(dir) = cmd.get_current_dir() {
+            w.current_dir(dir);
+        }
+        // Every game command here gets its own process group (see `kill_tree`).
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut w, 0);
+        w
+    }
+}
+
+fn is_env_name(n: &str) -> bool {
+    n.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Shell-style split for text the player typed: single quotes keep
+/// everything literally, double quotes group words (both can sit inside a
+/// word: `WINEDLLOVERRIDES="dinput8=n,b"`).
+fn shell_words(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut word = false;
+    let mut quote = None;
+    for c in s.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => cur.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                word = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if word {
+                    out.push(std::mem::take(&mut cur));
+                    word = false;
+                }
+            }
+            (None, c) => {
+                cur.push(c);
+                word = true;
+            }
+        }
+    }
+    if word {
         out.push(cur);
     }
     out
@@ -774,8 +889,14 @@ pub fn run_through_steam(app_id: AppId, args: &str, steam_id: u64, offline: bool
         return Err("Steam is running but not signed in. Sign in to the Steam window, then press Play again.".into());
     }
     restore_login_user();
+    // Steam starts the game itself: it only takes arguments, its own launch
+    // options (Properties in Steam) do the rest.
+    let opts = UserOptions::parse(args);
+    if !opts.args_only() {
+        tracing::warn!("launch options: variables and wrappers don't apply when the official Steam client starts the game; set them in Steam's launch options");
+    }
     let mut cmd = Command::new(&exe);
-    cmd.arg("-applaunch").arg(app_id.to_string()).args(split_args(args));
+    cmd.arg("-applaunch").arg(app_id.to_string()).args(&opts.args);
     quiet(&mut cmd).spawn().map_err(|e| format!("Couldn't ask Steam to start the game: {e}"))?;
     // Steam may update the game first; give it a while.
     if !wait_until(Duration::from_secs(600), || app_running(app_id)) {
@@ -1020,6 +1141,11 @@ pub fn run_through_host(
     // the host (and Valve's own DLLs) while the game runs.
     #[cfg(windows)]
     let _active = HostRegistry::point_at(host.id(), &root, model::account_id(steam_id));
+    // Linux: newer steam_api checks that ~/.steam/steam.pid names a live
+    // process before it connects ("did not locate a running instance of
+    // Steam": the Paradox Launcher of Cities: Skylines); name the host.
+    #[cfg(not(windows))]
+    let _pid_file = HostPidFile::point_at(host.id());
     tracing::info!("headless Steam host ready; launching {}", app.name);
 
     // Launch the game through Proton with lsteamclient ON (the default), so the
@@ -1051,14 +1177,59 @@ pub fn run_through_host(
 /// Linux, with lsteamclient left enabled) plus the `Steam*` environment a
 /// game expects.
 fn spawn_for_host(app: &OwnedApp, install_dir: &Path, args: &str, account: &str) -> Result<Child, String> {
-    let mut cmd = command(app, install_dir, args)?;
+    let opts = UserOptions::parse(args);
+    let mut cmd = command(app, install_dir, &opts)?;
     let id = app.app_id.to_string();
     cmd.env("SteamOverlayGameId", &id)
         .env("SteamClientLaunch", "1")
         .env("SteamEnv", "1")
         .env("SteamAppUser", account)
         .env("SteamUser", account);
-    cmd.spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+    opts.wrap(cmd).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+}
+
+/// `~/.steam/steam.pid` naming the headless host while it runs; what was
+/// there goes back when this drops (unless Steam itself wrote it since).
+#[cfg(not(windows))]
+struct HostPidFile {
+    path: PathBuf,
+    saved: Option<String>,
+    ours: String,
+}
+
+#[cfg(not(windows))]
+impl HostPidFile {
+    fn point_at(pid: u32) -> Option<HostPidFile> {
+        // A running official client keeps its own (the host doesn't start then anyway).
+        if win::steam_pid_file().is_some_and(win::is_steam_process) {
+            return None;
+        }
+        HostPidFile::write(win::dot_steam()?.join("steam.pid"), pid)
+    }
+
+    fn write(path: PathBuf, pid: u32) -> Option<HostPidFile> {
+        let saved = std::fs::read_to_string(&path).ok();
+        let _ = std::fs::create_dir_all(path.parent()?);
+        let ours = format!("{pid}\n");
+        if let Err(e) = std::fs::write(&path, &ours) {
+            tracing::warn!("couldn't write {}: {e}", path.display());
+            return None;
+        }
+        Some(HostPidFile { path, saved, ours })
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for HostPidFile {
+    fn drop(&mut self) {
+        if std::fs::read_to_string(&self.path).ok().as_deref() != Some(self.ours.as_str()) {
+            return;
+        }
+        let _ = match &self.saved {
+            Some(text) => std::fs::write(&self.path, text),
+            None => std::fs::remove_file(&self.path),
+        };
+    }
 }
 
 /// Steam's `ActiveProcess` registry entry pointed at the headless host for
@@ -1634,7 +1805,12 @@ mod linux {
     /// tool in Steam and the Windows build is what's installed. A forced
     /// Proton with only the Linux files on disk (downloaded as a native game,
     /// or before the choice) runs the Linux build: the Windows one isn't there.
+    /// Likewise, nothing forced but only the Windows files on disk (Crab
+    /// Game, downloaded for Windows) runs those with Proton.
     pub(super) fn use_native(forced: bool, native_installed: bool, windows_installed: bool) -> bool {
+        if !native_installed && windows_installed {
+            return false;
+        }
         !forced || (native_installed && !windows_installed)
     }
 
@@ -1715,7 +1891,7 @@ mod linux {
     }
 
     /// The command for a non-Steam game (see `super::spawn_non_steam`).
-    pub fn non_steam(exe: &Path, args: &str) -> Result<Command, String> {
+    pub fn non_steam(exe: &Path, args: &[String]) -> Result<Command, String> {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::process::CommandExt;
         let mut cmd = if is_windows_program(exe) {
@@ -1730,7 +1906,7 @@ mod linux {
             std::fs::create_dir_all(&data).map_err(|e| format!("couldn't create the Proton prefix: {e}"))?;
             tracing::info!("launching non-Steam game {} with {}", exe.display(), tool.display);
             let mut c = proton_base(&tool, &root);
-            c.arg("waitforexitandrun").arg(exe).args(split_args(args));
+            c.arg("waitforexitandrun").arg(exe).args(args);
             c.env("STEAM_COMPAT_DATA_PATH", &data)
                 .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &root)
                 .env("STEAM_COMPAT_INSTALL_PATH", exe.parent().unwrap_or(exe))
@@ -1746,7 +1922,7 @@ mod linux {
             }
             tracing::info!("launching non-Steam game {}", exe.display());
             let mut c = Command::new(exe);
-            c.args(split_args(args));
+            c.args(args);
             c
         };
         cmd.process_group(0);
@@ -2101,7 +2277,7 @@ mod win {
     use model::AppId;
     use std::path::{Path, PathBuf};
 
-    fn dot_steam() -> Option<PathBuf> {
+    pub fn dot_steam() -> Option<PathBuf> {
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".steam"))
     }
 
@@ -2191,6 +2367,29 @@ mod tests {
         assert!(use_native(true, true, false));
         // Proton forced, nothing installed: Proton's error, as before.
         assert!(!use_native(true, false, false));
+        // Nothing forced, only the Windows build on disk (Crab Game): Proton.
+        assert!(!use_native(false, false, true));
+        // Nothing forced, nothing installed: the Linux build's error, as before.
+        assert!(use_native(false, false, false));
+    }
+
+    /// Crab Game's case end to end: Linux and Windows launch options, only
+    /// the Windows files downloaded, no choice made. Needs a Steam install
+    /// with a Proton (skipped otherwise).
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_files_only_run_with_proton() {
+        if local::find_steam_root().is_none_or(|r| local::compat::tool_for(&r, 0).is_none()) {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sir-crab-{}", std::process::id())).join("steamapps").join("common").join("Crab Game");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Crab Game.exe"), b"MZ").unwrap();
+        let opt = |exe: &str, os: &str| model::LaunchOption { executable: exe.into(), arguments: String::new(), working_dir: String::new(), description: String::new(), os_list: os.into() };
+        let app = OwnedApp { app_id: 4_000_000_001, name: "Crab".into(), launch: vec![opt("Crab Game.exe", "windows"), opt("Crab Game.x86_64", "linux")], ..Default::default() };
+        let plan = super::linux::plan(&app, &dir).expect("a plan");
+        assert!(plan.uses_proton(), "{}", plan.describe());
+        let _ = std::fs::remove_dir_all(dir.ancestors().nth(3).unwrap());
     }
 
     /// A game with both builds on disk (like BeamNG.drive): native unless
@@ -2255,9 +2454,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn host_pid_file_is_put_back() {
+        let dir = std::env::temp_dir().join(format!("sir-pid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(".steam").join("steam.pid");
+        // No file before: written, then removed.
+        let f = super::HostPidFile::write(path.clone(), 4242).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "4242\n");
+        drop(f);
+        assert!(!path.exists());
+        // A stale pid before: it comes back.
+        std::fs::write(&path, "629628").unwrap();
+        drop(super::HostPidFile::write(path.clone(), 4242).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "629628");
+        // Steam wrote its own meanwhile: left alone.
+        let f = super::HostPidFile::write(path.clone(), 4242).unwrap();
+        std::fs::write(&path, "777\n").unwrap();
+        drop(f);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "777\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn splits_quoted_args() {
         assert_eq!(split_args(r#"-a "b c" d"#), vec!["-a", "b c", "d"]);
+    }
+
+    fn words(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn launch_options_like_steam() {
+        // No %command%: all game arguments, as before.
+        assert_eq!(UserOptions::parse("-novid -fullscreen"), UserOptions { args: words(&["-novid", "-fullscreen"]), ..Default::default() });
+        assert_eq!(UserOptions::parse(""), UserOptions::default());
+        let o = UserOptions::parse(r#"MANGOHUD=1 WINEDLLOVERRIDES="dinput8=n,b" gamemoderun mangohud %command% -dx11 'a b'"#);
+        assert_eq!(o.env, vec![("MANGOHUD".into(), "1".into()), ("WINEDLLOVERRIDES".into(), "dinput8=n,b".into())]);
+        assert_eq!(o.wrapper, words(&["gamemoderun", "mangohud"]));
+        assert_eq!(o.args, words(&["-dx11", "a b"]));
+        // Variables only after a wrapper belong to the wrapper (`env A=1`).
+        let o = UserOptions::parse("env A=1 %command%");
+        assert!(o.env.is_empty());
+        assert_eq!(o.wrapper, words(&["env", "A=1"]));
+        let o = UserOptions::parse("PROTON_LOG=1 %command%");
+        assert_eq!((o.env.len(), o.wrapper.len(), o.args.len()), (1, 0, 0));
+        assert_eq!(shell_words(r#"a "" b"#), words(&["a", "", "b"]));
+        assert_eq!(UserOptions::parse(r#"%command% "x y" -z"#).args_line(), r#""x y" -z"#);
+    }
+
+    #[test]
+    fn wrapper_goes_in_front() {
+        let mut game = Command::new("/games/proton");
+        game.args(["waitforexitandrun", "game.exe"]).current_dir("/games").env("SteamAppId", "1").env("MANGOHUD", "0");
+        let w = UserOptions::parse("MANGOHUD=1 mangohud --dlsym %command% -x").wrap({
+            let mut c = game;
+            c.arg("-x");
+            c
+        });
+        assert_eq!(w.get_program(), "mangohud");
+        assert_eq!(w.get_args().collect::<Vec<_>>(), ["--dlsym", "/games/proton", "waitforexitandrun", "game.exe", "-x"]);
+        assert_eq!(w.get_current_dir(), Some(Path::new("/games")));
+        let envs: Vec<_> = w.get_envs().collect();
+        assert!(envs.contains(&("MANGOHUD".as_ref(), Some("1".as_ref()))));
+        assert!(envs.contains(&("SteamAppId".as_ref(), Some("1".as_ref()))));
+    }
+
+    /// A real launch: variables and wrapper reach the game, arguments follow it.
+    #[cfg(unix)]
+    #[test]
+    fn non_steam_game_runs_through_the_wrapper() {
+        let dir = std::env::temp_dir().join(format!("sir-wrap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let game = dir.join("game.sh");
+        let out = dir.join("out");
+        std::fs::write(&game, format!("#!/bin/sh\necho \"$AURORA_T $WRAPPED $*\" > '{}'\n", out.display())).unwrap();
+        let wrapper = dir.join("wrap.sh");
+        std::fs::write(&wrapper, "#!/bin/sh\nWRAPPED=yes exec \"$@\"\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let opts = format!("AURORA_T=on '{}' %command% -a \"b c\"", wrapper.display());
+        let mut child = spawn_non_steam(&game.to_string_lossy(), &opts).unwrap().unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "on yes -a b c");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn app(categories: Vec<u32>, exe: &str) -> OwnedApp {
@@ -2373,7 +2656,7 @@ mod dry_run {
             ..Default::default()
         };
         println!("mode: {:?}", super::mode(&app, &dir));
-        let cmd = super::command(&app, &dir, "").expect("a command");
+        let cmd = super::command(&app, &dir, &super::UserOptions::default()).expect("a command");
         println!("program: {}", cmd.get_program().to_string_lossy());
         println!("args: {:?}", cmd.get_args().collect::<Vec<_>>());
         println!("cwd: {:?}", cmd.get_current_dir());
