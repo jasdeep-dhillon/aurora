@@ -55,6 +55,10 @@ pub struct Downloads {
     /// Network and disk speed (bytes/s), one sample a second, for the graph.
     history: std::collections::VecDeque<(u64, u64)>,
     last_sample: Option<std::time::Instant>,
+    /// Queued game being dragged to a new place.
+    dragging: Option<model::AppId>,
+    /// Order just sent to the engine, shown until the engine reports it.
+    pending_order: Option<Vec<model::AppId>>,
 }
 
 /// Seconds of speed history the graph shows.
@@ -67,7 +71,7 @@ fn running(state: &client::State) -> impl Iterator<Item = &model::DownloadStatus
 
 impl Downloads {
     pub fn new(flags: super::settings::SharedFlags) -> Self {
-        Self { flags, regions: None, probing: false, region_sent: false, settings: Default::default(), sent: None, auto_paused: Vec::new(), history: Default::default(), last_sample: None }
+        Self { flags, regions: None, probing: false, region_sent: false, settings: Default::default(), sent: None, auto_paused: Vec::new(), history: Default::default(), last_sample: None, dragging: None, pending_order: None }
     }
 
     /// Record the current speeds once a second while anything runs; the
@@ -289,22 +293,7 @@ impl Downloads {
             });
             ui.add_space(8.0);
         }
-        // Queued games; the one downloading is never listed twice.
-        for id in ctx.state.download_queue.clone().into_iter().filter(|id| !running.iter().any(|d| d.app_id == *id)) {
-            let name = ctx.state.app_name(id).unwrap_or_default().to_string();
-            ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(vec2(92.0, 43.0), Sense::hover());
-                w::image_or_skeleton(ui, t, r, &art::header(id), t.corner_small());
-                ui.label(w::text_medium(name, 14.0, t.text));
-                ui.label(w::text(t!("Queued"), 12.5, t.text_faint));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if w::icon_button(ui, t, ui::icons::X, t!("Remove from queue"), false, 0).clicked() {
-                        ctx.send(client::Command::CancelDownload { app_id: id });
-                    }
-                });
-            });
-            ui.add_space(4.0);
-        }
+        self.queued(ui, t, ctx, &running);
         let finished: Vec<model::DownloadStatus> = ctx.state.downloads.values().filter(|d| matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)).cloned().collect();
         if !finished.is_empty() {
             ui.add_space(12.0);
@@ -327,6 +316,102 @@ impl Downloads {
             }
         }
         ui.add_space(20.0);
+    }
+
+    /// Queued games, in download order; the one downloading is never listed
+    /// twice. Drag a row by its handle, or use the arrows, to reorder.
+    fn queued(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, running: &[model::DownloadStatus]) {
+        let engine: Vec<model::AppId> = ctx.state.download_queue.iter().copied().filter(|id| !running.iter().any(|d| d.app_id == *id)).collect();
+        // Until the engine reports the order we sent, show that one.
+        let queue = match &self.pending_order {
+            Some(p) if *p == engine => {
+                self.pending_order = None;
+                engine
+            }
+            Some(p) if p.len() == engine.len() && p.iter().all(|id| engine.contains(id)) => p.clone(),
+            _ => {
+                self.pending_order = None;
+                engine
+            }
+        };
+        if self.dragging.is_some_and(|d| !queue.contains(&d)) {
+            self.dragging = None;
+        }
+        let n = queue.len();
+        let mut rects = Vec::with_capacity(n);
+        let mut moved: Option<Vec<model::AppId>> = None;
+        for (i, &id) in queue.iter().enumerate() {
+            let name = ctx.state.app_name(id).unwrap_or_default().to_string();
+            let dragged = self.dragging == Some(id);
+            let row = ui.horizontal(|ui| {
+                let handle = ui
+                    .add(egui::Label::new(w::text(icons::DOTS, 18.0, if dragged { t.accent } else { t.text_faint })).sense(Sense::drag()))
+                    .on_hover_cursor(egui::CursorIcon::Grab)
+                    .on_hover_text(t!("Drag to change the order"));
+                if handle.drag_started() {
+                    self.dragging = Some(id);
+                }
+                let (r, _) = ui.allocate_exact_size(vec2(92.0, 43.0), Sense::hover());
+                w::image_or_skeleton(ui, t, r, &art::header(id), t.corner_small());
+                ui.label(w::text_medium(name, 14.0, t.text));
+                ui.label(w::text(t!("Queued · #{n}", n = i + 1), 12.5, t.text_faint));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if w::icon_button(ui, t, ui::icons::X, t!("Remove from queue"), false, 0).clicked() {
+                        ctx.send(client::Command::CancelDownload { app_id: id });
+                    }
+                    let mut order = queue.clone();
+                    if ui.add_enabled_ui(i + 1 < n, |ui| w::icon_button(ui, t, icons::CARET_DOWN, t!("Move down"), false, 0)).inner.clicked() {
+                        order.swap(i, i + 1);
+                        moved = Some(order.clone());
+                    }
+                    if ui.add_enabled_ui(i > 0, |ui| w::icon_button(ui, t, icons::CARET_UP, t!("Move up"), false, 0)).inner.clicked() {
+                        order.swap(i, i - 1);
+                        moved = Some(order.clone());
+                    }
+                    if i > 1 && w::icon_button(ui, t, icons::LIGHTNING, t!("Download next"), false, 0).clicked() {
+                        order.remove(i);
+                        order.insert(0, id);
+                        moved = Some(order);
+                    }
+                });
+            });
+            let rect = row.response.rect;
+            if dragged {
+                ui.painter().rect_filled(rect.expand(3.0), t.corner_small(), t.accent.gamma_multiply(0.12));
+            }
+            rects.push((id, rect));
+            ui.add_space(4.0);
+        }
+        // Dragging: a line shows where the game will land; letting go moves it.
+        if let Some(d) = self.dragging {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            let others: Vec<(model::AppId, egui::Rect)> = rects.iter().copied().filter(|(id, _)| *id != d).collect();
+            if let Some(pos) = ui.ctx().pointer_latest_pos() {
+                let at = others.iter().filter(|(_, r)| r.center().y < pos.y).count();
+                if let (Some(first), Some(last)) = (rects.first(), rects.last()) {
+                    let y = match others.get(at) {
+                        Some((_, r)) => r.top() - 2.0,
+                        None => others.last().map(|(_, r)| r.bottom() + 2.0).unwrap_or(last.1.bottom()),
+                    };
+                    ui.painter().hline(first.1.left()..=first.1.right(), y, egui::Stroke::new(2.0, t.accent));
+                }
+                if ui.input(|i| i.pointer.any_released()) {
+                    let mut order: Vec<model::AppId> = others.iter().map(|(id, _)| *id).collect();
+                    order.insert(at.min(order.len()), d);
+                    if order != queue {
+                        moved = Some(order);
+                    }
+                    self.dragging = None;
+                }
+            }
+            if !ui.input(|i| i.pointer.any_down()) {
+                self.dragging = None;
+            }
+        }
+        if let Some(order) = moved {
+            ctx.send(client::Command::ReorderDownloads(order.clone()));
+            self.pending_order = Some(order);
+        }
     }
 
     fn speed_card(&self, ui: &mut Ui, t: &Theme, ctx: &Ctx) {
