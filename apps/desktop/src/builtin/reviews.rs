@@ -3,7 +3,7 @@
 //! all), and your own review, which you can write, edit or delete.
 
 use client::Command;
-use egui::{Align, Layout, Ui, vec2};
+use egui::{Align, Layout, Margin, Ui, vec2};
 use extensions::Ctx;
 use i18n::t;
 use model::AppId;
@@ -88,8 +88,9 @@ impl ReviewWindow {
         let mut open = true;
         // A modal like the app's other dialogs, sized to the window every frame.
         let screen = ui.ctx().content_rect();
-        let width = (screen.width() - 80.0).clamp(320.0, 680.0);
-        let height = (screen.height() - 160.0).max(240.0);
+        // Big: most of the window, so long reviews are easy to read.
+        let width = (screen.width() - 120.0).clamp(360.0, 920.0);
+        let height = (screen.height() - 240.0).max(280.0);
         w::modal(ui.ctx(), egui::Id::unique(("reviews", self.app))).show(ui.ctx(), |ui| {
             ui.set_width(width);
             ui.horizontal(|ui| {
@@ -103,7 +104,7 @@ impl ReviewWindow {
             ui.add_space(6.0);
             self.summary(ui, t, ctx);
             ui.add_space(10.0);
-            egui::ScrollArea::vertical().max_height(height).auto_shrink([false, true]).show(ui, |ui| {
+            egui::ScrollArea::vertical().min_scrolled_height(height).max_height(height).auto_shrink([false, false]).show(ui, |ui| {
                 self.mine(ui, t, ctx);
                 ui.add_space(14.0);
                 self.list(ui, t, ctx);
@@ -128,7 +129,7 @@ impl ReviewWindow {
             if let Some(r) = reviews.filter(|r| r.total > 0) {
                 let pct = r.positive * 100 / (r.positive + r.negative).max(1);
                 let color = if pct >= 70 { t.play } else if pct >= 40 { t.away } else { t.danger };
-                ui.label(w::text_semibold(i18n::tr_dyn(&r.label), 15.0, color));
+                ui.label(w::text_semibold(capitalized(&i18n::tr_dyn(&r.label)), 15.0, color));
                 ui.label(w::text(t!("{pct}% of {n} reviews are positive", pct = pct, n = r.total), 13.0, t.text_dim));
             }
         });
@@ -264,7 +265,7 @@ impl ReviewWindow {
             return;
         }
         for r in &reviews.items {
-            w::card(t).show(ui, |ui| {
+            w::card(t).inner_margin(Margin::symmetric(18, 14)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     let (icon, label, color) = if r.recommended { (icons::THUMBS_UP, t!("Recommends it"), t.play) } else { (icons::THUMBS_DOWN, t!("Doesn't recommend it"), t.danger) };
@@ -284,7 +285,9 @@ impl ReviewWindow {
                 let long = r.text.chars().count() > 600;
                 let open = self.expanded.contains(&r.id);
                 let text = if long && !open { format!("{}…", r.text.chars().take(600).collect::<String>()) } else { r.text.clone() };
-                ui.add(egui::Label::new(w::text(text, 13.0, t.text)).wrap());
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(w::text(text, 14.5, t.text)).wrap());
+                ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     if long && w::button(ui, t, None, if open { t!("Show less") } else { t!("Read more") }, w::Kind::Ghost, w::Size::Sm).clicked() {
                         if open {
@@ -334,5 +337,15 @@ impl ReviewWindow {
         if close {
             self.confirm_delete = false;
         }
+    }
+}
+
+/// Steam's score labels come in the reader's language, sometimes lower
+/// case ("très positives"): start them with a capital.
+fn capitalized(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
     }
 }
