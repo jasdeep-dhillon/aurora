@@ -1787,3 +1787,7 @@
 "Windows (runs with Proton)" = "Windows (через Proton)"
 "Linux (native)" = "Linux (нативная)"
 "Aurora's own Steam features work in the Windows version. The Linux version gets them from your Steam install." = "Собственные функции Steam в Aurora работают в версии для Windows. Версия для Linux получает их от установленного Steam."
+
+# --- First launch ---
+"Welcome to {brand}" = "Добро пожаловать в {brand}"
+"Choose your language. You can change it later in Settings." = "Выберите язык. Его можно сменить позже в настройках."

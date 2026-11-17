@@ -78,11 +78,12 @@ pub fn show(app: &mut SteamApp, ui: &mut Ui) {
             crate::chrome::window_buttons(ui, &t, BAR, false);
         });
 
-        let splash = wants_splash(app);
+        let splash = wants_splash(app) && app.ask_language.is_none();
         let pad = if splash { 24.0 } else { 44.0 };
         let body = Rect::from_min_max(pos2(full.left() + pad, bar.bottom() + 14.0), pos2(full.right() - pad, full.bottom() - 30.0));
         let mut c = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)));
         match phase {
+            _ if app.ask_language.is_some() => language(app, &mut c, &t),
             Phase::Guard(guards) => guard(app, &mut c, &t, &guards),
             _ if app.login.connection_error.is_some() => {
                 if let Some(err) = app.login.connection_error.clone() {
@@ -97,6 +98,35 @@ pub fn show(app: &mut SteamApp, ui: &mut Ui) {
             ui.painter().text(pos2(full.center().x, full.bottom() - 16.0), Align2::CENTER_CENTER, t!("Not affiliated with Valve."), w::font(11.0), t.text_faint);
         }
     });
+}
+
+/// First launch: pick the interface language before anything else. The
+/// system's language is picked already; Settings › Interface changes it later.
+fn language(app: &mut SteamApp, ui: &mut Ui, t: &Theme) {
+    let Some(mut pick) = app.ask_language else { return };
+    ui.add_space(6.0);
+    ui.label(w::text_bold(t!("Welcome to {brand}", brand = i18n::BRAND), 22.0, t.text));
+    ui.label(w::text(t!("Choose your language. You can change it later in Settings."), 13.0, t.text_dim));
+    ui.add_space(14.0);
+    let width = ui.available_width();
+    for lang in i18n::Lang::ALL {
+        let on = pick == lang;
+        if w::wide_chip(ui, t, lang.native_name(), on, width).clicked() {
+            pick = lang;
+            // Show the screen in it right away.
+            i18n::set_language(lang);
+        }
+        ui.add_space(6.0);
+    }
+    app.ask_language = Some(pick);
+    ui.add_space(8.0);
+    let go = w::button(ui, t, Some(icons::ARROW_RIGHT), t!("Continue"), w::Kind::Primary, w::Size::Md).clicked();
+    if go || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        i18n::set_language(pick);
+        app.prefs.language = Some(pick.code().to_string());
+        app.prefs.language_asked = true;
+        app.ask_language = None;
+    }
 }
 
 /// A simple top-to-bottom gradient: a hint of the accent color fading into

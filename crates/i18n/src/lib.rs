@@ -9,8 +9,8 @@
 //!
 //! Other languages live in `locales/<code>.toml` as `"English" = "Translation"`.
 //! Missing entries fall back to English. To add a language, add a file and a
-//! [`Lang`] variant. A test checks that every `t!` string in the app has a
-//! Russian entry.
+//! [`Lang`] variant. Tests check that every `t!` string in the app has an
+//! entry in every language, with the same `{placeholders}`.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -20,15 +20,19 @@ use std::sync::atomic::{AtomicU8, Ordering};
 pub enum Lang {
     English,
     Russian,
+    French,
+    Spanish,
 }
 
 impl Lang {
-    pub const ALL: [Lang; 2] = [Lang::English, Lang::Russian];
+    pub const ALL: [Lang; 4] = [Lang::English, Lang::French, Lang::Spanish, Lang::Russian];
 
     pub fn code(self) -> &'static str {
         match self {
             Lang::English => "en",
             Lang::Russian => "ru",
+            Lang::French => "fr",
+            Lang::Spanish => "es",
         }
     }
     /// The language's own name.
@@ -36,6 +40,8 @@ impl Lang {
         match self {
             Lang::English => "English",
             Lang::Russian => "Русский",
+            Lang::French => "Français",
+            Lang::Spanish => "Español",
         }
     }
     /// Name Steam's store API expects (`l=` parameter).
@@ -43,6 +49,8 @@ impl Lang {
         match self {
             Lang::English => "english",
             Lang::Russian => "russian",
+            Lang::French => "french",
+            Lang::Spanish => "spanish",
         }
     }
     pub fn from_code(code: &str) -> Option<Lang> {
@@ -63,15 +71,21 @@ pub fn set_language(lang: Lang) {
 pub fn language() -> Lang {
     match CURRENT.load(Ordering::Relaxed) {
         1 => Lang::Russian,
+        2 => Lang::French,
+        3 => Lang::Spanish,
         _ => Lang::English,
     }
 }
 
 fn table(lang: Lang) -> Option<&'static HashMap<String, &'static str>> {
     static RU: OnceLock<HashMap<String, &'static str>> = OnceLock::new();
+    static FR: OnceLock<HashMap<String, &'static str>> = OnceLock::new();
+    static ES: OnceLock<HashMap<String, &'static str>> = OnceLock::new();
     match lang {
         Lang::English => None,
         Lang::Russian => Some(RU.get_or_init(|| load(include_str!("../locales/ru.toml")))),
+        Lang::French => Some(FR.get_or_init(|| load(include_str!("../locales/fr.toml")))),
+        Lang::Spanish => Some(ES.get_or_init(|| load(include_str!("../locales/es.toml")))),
     }
 }
 
@@ -142,12 +156,10 @@ mod tests {
         set_language(Lang::English);
     }
 
-    /// Every `t!("...")` in the app must have a Russian translation.
-    #[test]
-    fn russian_covers_all_strings() {
-        let ru = table(Lang::Russian).unwrap();
+    /// Every `t!("...")` in the app, as written in the code.
+    fn app_strings() -> Vec<String> {
         let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut missing = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
         let mut stack = vec![base.join("../../apps/desktop/src"), base.join("../../apps/installer/src"), base.join("../ui/src"), base.join("../video/src")];
         while let Some(dir) = stack.pop() {
             for e in std::fs::read_dir(&dir).unwrap().flatten() {
@@ -165,12 +177,44 @@ mod tests {
                     }
                     let Some(end) = part.find('"') else { continue };
                     let key = &part[..end];
-                    if !ru.contains_key(key) && !missing.contains(&key.to_string()) {
-                        missing.push(key.to_string());
+                    if !keys.iter().any(|k| k == key) {
+                        keys.push(key.to_string());
                     }
                 }
             }
         }
-        assert!(missing.is_empty(), "missing Russian strings:\n{}", missing.iter().map(|m| format!("\"{m}\" = \"\"")).collect::<Vec<_>>().join("\n"));
+        keys
+    }
+
+    /// Every `t!("...")` in the app must have a translation in every language.
+    #[test]
+    fn every_language_covers_all_strings() {
+        let keys = app_strings();
+        for lang in Lang::ALL.into_iter().filter(|l| *l != Lang::English) {
+            let table = table(lang).unwrap();
+            let missing: Vec<&String> = keys.iter().filter(|k| !table.contains_key(k.as_str())).collect();
+            assert!(missing.is_empty(), "missing {lang:?} strings:\n{}", missing.iter().map(|m| format!("\"{m}\" = \"\"")).collect::<Vec<_>>().join("\n"));
+        }
+    }
+
+    /// A translation keeps the English text's `{placeholders}`, or the value
+    /// would never be filled in (or the raw name would show).
+    #[test]
+    fn translations_keep_placeholders() {
+        fn names(s: &str) -> Vec<&str> {
+            let mut v: Vec<&str> = s.split('{').skip(1).filter_map(|p| p.split_once('}').map(|(n, _)| n)).collect();
+            v.sort();
+            v
+        }
+        let mut wrong = Vec::new();
+        for lang in Lang::ALL.into_iter().filter(|l| *l != Lang::English) {
+            for (key, value) in table(lang).unwrap() {
+                if names(key) != names(value) {
+                    wrong.push(format!("{lang:?}: \"{key}\" = \"{value}\""));
+                }
+            }
+        }
+        wrong.sort();
+        assert!(wrong.is_empty(), "placeholders differ:\n{}", wrong.join("\n"));
     }
 }
