@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.9.0](https://github.com/mollie2999/Aurora/compare/v0.8.1...v0.9.0)
+
+Aurora 0.9.0 is a major release with a Linux in-game overlay, two new languages, reviews, trading and more control over your library.
+
+### New
+
+* **French and Spanish:** choose your language on first launch, or change it later in Settings. The language also applies to supported Steam store content and reviews ([9259a3b](https://github.com/mollie2999/Aurora/commit/9259a3bed7f624169a10fe11911252fbcbd0840b)).
+* **Linux overlay:** press Shift+Tab to open the overlay inside Proton D3D11 games. Vulkan, OpenGL and native games use a separate overlay window ([db38113](https://github.com/mollie2999/Aurora/commit/db38113a78530f649c912d54d26127e57016f7be)) ([5e33767](https://github.com/mollie2999/Aurora/commit/5e33767d74cc53eeee698c293424a1b70dbbc320)).
+* **Game reviews:** read player reviews from the library or store, filter by language, and write, edit or delete your own review ([6b566ac](https://github.com/mollie2999/Aurora/commit/6b566ace1c51b38b36db1dfe961cc175da9b9082)).
+* **Trade offers:** offer items to a friend or someone with a Steam trade URL, or ask for theirs. Steam may ask you to confirm the offer in its mobile app. For now, an offer contains items from one game, one of each item ([ad9a8af](https://github.com/mollie2999/Aurora/commit/ad9a8afa6ea8e26068e5702d0697263e9b7ca3eb)).
+* **Steam Cloud:** see a game’s cloud files, sizes and dates in Properties, and delete individual files or all of them after confirmation. Copies on this PC stay ([259e1fd](https://github.com/mollie2999/Aurora/commit/259e1fd413465f960284dfb3e2e14cdd1d6ac024)).
+* **Collections:** collection buttons are back under the library filters. Collections, Favorites and Hidden sync with Steam, including changes made offline ([f266c1e](https://github.com/mollie2999/Aurora/commit/f266c1e381a4250789f8aa7849611414216f1381)).
+* **Store recommendations:** see picks for you, games popular with friends, recommended specials, free and upcoming games, and picks in your favourite tags ([8cfc3b6](https://github.com/mollie2999/Aurora/commit/8cfc3b60d74486cd3d2e844a5b864849da62e6ae)).
+* **Import non-Steam games:** bring shortcuts from the official Steam client into Aurora’s library. Games already added are left out ([80d4b14](https://github.com/mollie2999/Aurora/commit/80d4b147a60913cc9b8fedcd507a9f900eb5a988)).
+* **Downloads:** reorder queued games by dragging, using the arrows or choosing Download next. Update now queues an update without leaving the downloads page ([4ef8132](https://github.com/mollie2999/Aurora/commit/4ef81323e92e51b2fa9cd00f9563997f06c784f4)) ([daeefa2](https://github.com/mollie2999/Aurora/commit/daeefa2808158437f3ebf3c79299c81bcfb9314b)).
+
+### Fixes
+
+* **Windows:** PlayStation and other non-Xbox controllers now work through Aurora’s XInput support in XNA/FNA games such as Celeste ([d415edb](https://github.com/mollie2999/Aurora/commit/d415edbc3a6eb1c366c47aef3c060c586aabf54d)).
+* **Linux:** fixed an overlay helper window that could cause Aurora to close on Wayland, and improved Shift+Tab handling in games using raw keyboard input ([2eb06ae](https://github.com/mollie2999/Aurora/commit/2eb06ae6aee5545b5d0ec971bf63120ba518e609)) ([ec03d96](https://github.com/mollie2999/Aurora/commit/ec03d961080dca7ea30ec915f0669fc14eaf39ce)).
+
 ## [0.8.1](https://github.com/mollie2999/Aurora/compare/v0.8.0...v0.8.1) (2026-11-17)
 
 ### New
