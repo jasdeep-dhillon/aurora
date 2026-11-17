@@ -387,6 +387,9 @@ struct Online {
     cloud_flushing: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AppId>>>,
     /// Games compiling their shaders before launch; set to skip the rest.
     shader_jobs: HashMap<AppId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Games whose new Proton prefix was set up this session (once, even if
+    /// it didn't take; see `launch::prefix_setup`).
+    prefix_setups: std::collections::HashSet<AppId>,
 }
 
 /// Seconds before reconnect attempt `n` (1, 2, …), like Steam: quick at
@@ -495,6 +498,7 @@ async fn online(
         cache_saved: std::time::Instant::now(),
         cloud_flushing: Default::default(),
         shader_jobs: Default::default(),
+        prefix_setups: Default::default(),
         from_offline: false,
     };
     let (dl_tx, mut dl_rx) = mpsc::unbounded_channel::<(AppId, Result<String, String>)>();
@@ -567,7 +571,30 @@ async fn online(
                 .get(&app_id)
                 .filter(|a| !st.running.contains_key(&app_id) && !st.shader_jobs.contains_key(&app_id) && !matches!(launch::mode(a, &install_dir), crate::LaunchMode::OfficialSteam { .. }))
                 .and_then(|a| crate::installscript::pending(a, &install_dir));
-            if let Some(p) = script {
+            // First launch in a new Proton prefix, no install script to
+            // create it: set it up so our steamclient answers from the start.
+            #[cfg(not(windows))]
+            let setup = st
+                .apps
+                .get(&app_id)
+                .filter(|_| script.is_none() && !st.running.contains_key(&app_id) && !st.shader_jobs.contains_key(&app_id) && !st.prefix_setups.contains(&app_id))
+                .and_then(|a| launch::prefix_setup(a, &install_dir));
+            #[cfg(windows)]
+            let setup: Option<std::process::Command> = None;
+            if let Some(mut cmd) = setup {
+                st.prefix_setups.insert(app_id);
+                sink(Event::InstallScript { app_id, step: Some("Proton setup".into()) });
+                let (sink, tx) = (sink.clone(), launch_tx.clone());
+                tokio::task::spawn_blocking(move || {
+                    let started = std::time::Instant::now();
+                    match launch::run_quietly(&mut cmd, Duration::from_secs(180)) {
+                        Ok(()) => tracing::info!("Proton prefix for {app_id} set up in {:.1}s", started.elapsed().as_secs_f32()),
+                        Err(e) => tracing::warn!("Proton prefix setup for {app_id}: {e}"),
+                    }
+                    sink(Event::InstallScript { app_id, step: None });
+                    let _ = tx.send((app_id, install_dir, args));
+                });
+            } else if let Some(p) = script {
                 sink(Event::InstallScript { app_id, step: Some(String::new()) });
                 let (sink, tx) = (sink.clone(), launch_tx.clone());
                 tokio::task::spawn_blocking(move || {

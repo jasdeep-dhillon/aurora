@@ -379,10 +379,10 @@ pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, extra_args: &s
     {
         let root = local::find_steam_root().ok_or("Steam Play needs a Steam install for Proton")?;
         cmd.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", linux::client_shim(&root)?).env("STEAMINRUST_NO_INGAME_OVERLAY", "1");
-        let user_reg = local::compat::compat_data(install_dir, app.app_id).map(|d| d.join("pfx").join("user.reg"));
-        if user_reg.and_then(|p| std::fs::read_to_string(p).ok()).is_some_and(|r| r.contains("\"SteamClientDll64\"")) {
+        if prefix_knows_client(app, install_dir) {
             cmd.env("PROTON_DISABLE_LSTEAMCLIENT", "1");
         } else {
+            // `prefix_setup` normally ran first; if it failed, this launch keeps the bridge.
             tracing::info!("{}: new Proton prefix, Steam features from our steamclient from the next launch", app.name);
         }
     }
@@ -1557,6 +1557,54 @@ pub fn proton_user_dir(app: &OwnedApp, install_dir: &Path) -> Option<PathBuf> {
     {
         let _ = (app, install_dir);
         None
+    }
+}
+
+/// Has Proton's Steam bridge (lsteamclient) run in the game's prefix yet?
+/// It writes `ActiveProcess\SteamClientDll64` into the prefix's registry,
+/// which the game's steam_api reads to find our steamclient once the bridge
+/// is turned off.
+#[cfg(not(windows))]
+fn prefix_knows_client(app: &OwnedApp, install_dir: &Path) -> bool {
+    let user_reg = local::compat::compat_data(install_dir, app.app_id).map(|d| d.join("pfx").join("user.reg"));
+    user_reg.and_then(|p| std::fs::read_to_string(p).ok()).is_some_and(|r| r.contains("\"SteamClientDll64\""))
+}
+
+/// Before the first launch of an Aurora Proton game in a new prefix: run
+/// `cmd /c exit` there with the bridge on (about 15 s, Steam not needed),
+/// which creates the prefix and writes the registry entry. Without it that
+/// first launch would keep the bridge, which finds no Steam: no online, and
+/// games that need Steam quit (Crab Game, Bloons TD 6). `None` when there's
+/// nothing to do.
+#[cfg(not(windows))]
+pub(crate) fn prefix_setup(app: &OwnedApp, install_dir: &Path) -> Option<Command> {
+    if mode(app, install_dir) != LaunchMode::Aurora || prefix_knows_client(app, install_dir) {
+        return None;
+    }
+    let mut cmd = in_prefix(app, install_dir, "cmd", &["/c".into(), "exit".into()])?;
+    // Our DLLs, copied into the prefix as on a real launch.
+    let root = local::find_steam_root()?;
+    cmd.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", linux::client_shim(&root).ok()?);
+    Some(cmd)
+}
+
+/// Run a helper to the end with its output dropped; killed after `limit`.
+#[cfg(not(windows))]
+pub(crate) fn run_quietly(cmd: &mut Command, limit: Duration) -> Result<(), String> {
+    use std::process::Stdio;
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
+    let end = Instant::now() + limit;
+    loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(s) if s.success() => return Ok(()),
+            Some(s) => return Err(format!("exited with {s}")),
+            None if Instant::now() > end => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("still running after {}s, stopped", limit.as_secs()));
+            }
+            None => std::thread::sleep(Duration::from_millis(200)),
+        }
     }
 }
 
