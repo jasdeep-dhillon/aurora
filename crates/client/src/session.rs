@@ -950,6 +950,18 @@ async fn online(
                     let result = crate::social::badges(web.as_deref().ok(), steam_id).await;
                     sink(Event::Badges { steam_id, result });
                 }),
+                Some(Command::LoadReviews { steam_id, page }) => st.with_web(sink, move |web, sink| async move {
+                    let result = crate::social::reviews(web.as_deref().ok(), steam_id, page).await;
+                    sink(Event::Reviews { steam_id, page, result });
+                }),
+                Some(Command::LoadGroups { steam_id }) => st.with_web(sink, move |web, sink| async move {
+                    let result = crate::social::groups(web.as_deref().ok(), steam_id).await;
+                    sink(Event::Groups { steam_id, result });
+                }),
+                Some(Command::LoadCardSet { steam_id, app_id, foil }) => st.with_web(sink, move |web, sink| async move {
+                    let result = crate::social::card_set(web.as_deref().ok(), steam_id, app_id, foil).await;
+                    sink(Event::CardSet { steam_id, app_id, foil, result });
+                }),
                 Some(Command::LoadNotifications) => st.load_notifications(sink),
                 Some(Command::MarkNotificationsRead { ids }) => st.mark_read(ids, sink),
                 Some(Command::LoadSupportTickets) => st.support_tickets(sink),
@@ -3116,7 +3128,20 @@ fn econ_item(owner: SteamId, a: &CEconAsset, d: &CEconItemDescription) -> model:
         market_hold_days: d.market_marketable_restriction().max(0) as u32,
         commodity: d.commodity(),
         market_fee: d.market_fee().parse().ok(),
+        card_set: card_set(d.tags.iter().map(|t| (t.category(), t.internal_name())), d.market_hash_name()),
     }
+}
+
+/// A trading card's game and foil flag, from Steam's language-independent
+/// tag names (`item_class_2` = trading card, `app_<id>`, `cardborder_1` =
+/// foil); the market name ("<app>-Card name") is the fallback for the game.
+fn card_set<'a>(tags: impl Iterator<Item = (&'a str, &'a str)> + Clone, hash_name: &str) -> Option<(AppId, bool)> {
+    let tag = |cat: &str| tags.clone().find(|(c, _)| c.eq_ignore_ascii_case(cat)).map(|(_, n)| n);
+    if tag("item_class")? != "item_class_2" {
+        return None;
+    }
+    let app = tag("Game").and_then(|n| n.strip_prefix("app_")?.parse().ok()).or_else(|| hash_name.split_once('-')?.0.parse().ok())?;
+    Some((app, tag("cardborder") == Some("cardborder_1")))
 }
 
 /// A profile's community visibility, from its public XML summary.
@@ -3190,5 +3215,19 @@ mod invite_tests {
         assert_eq!(super::lobby_of("+connect_lobby 109775243904435019"), 109775243904435019);
         assert_eq!(super::lobby_of("-dev +connect 1.2.3.4"), 0);
         assert_eq!(super::invite_link(477160, "+connect_lobby 5"), "steam://run/477160//+connect_lobby%205");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn trading_cards_know_their_set() {
+        let card = [("Game", "app_365360"), ("item_class", "item_class_2"), ("cardborder", "cardborder_0")];
+        assert_eq!(super::card_set(card.iter().copied(), "365360-The Goblins"), Some((365360, false)));
+        let foil = [("item_class", "item_class_2"), ("cardborder", "cardborder_1")];
+        assert_eq!(super::card_set(foil.iter().copied(), "20920-Zoltan (Foil)"), Some((20920, true)));
+        let emoticon = [("Game", "app_365360"), ("item_class", "item_class_4")];
+        assert_eq!(super::card_set(emoticon.iter().copied(), "365360-:goblin:"), None);
+        assert_eq!(super::card_set([("Rarity", "Rare")].iter().copied(), "AK-47 | Redline"), None);
     }
 }
