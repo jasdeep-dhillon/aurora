@@ -205,6 +205,54 @@ pub fn parse_badges(body: &str) -> model::Badges {
     model::Badges { level, xp, next, progress, items }
 }
 
+/// The game's card collection behind a badge (`foil`: the foil set).
+pub async fn card_set(web: Option<&Web>, steam_id: SteamId, app: model::AppId, foil: bool) -> Result<model::CardSet, String> {
+    let mut req = http(web).get(format!("{COMMUNITY}/profiles/{steam_id}/gamecards/{app}/"));
+    if foil {
+        req = req.query(&[("border", "1")]);
+    }
+    let body = req.send().await.map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())?;
+    if !body.contains("badge_card_set_card") && body.contains("profile_private_info") {
+        return Err("private".into());
+    }
+    let set = parse_card_set(&body);
+    if set.cards.is_empty() {
+        return Err("This game has no trading cards".into());
+    }
+    Ok(set)
+}
+
+pub fn parse_card_set(body: &str) -> model::CardSet {
+    let title = between(body, "class=\"badge_title\">", "</div>").map(clean).unwrap_or_default();
+    let playtime = between(body, "class=\"badge_title_stats_playtime\">", "</div>").map(clean).unwrap_or_default();
+    let drops = between(body, "class=\"badge_title_stats_drops\">", "</div>").map(clean).unwrap_or_default();
+    let badge = between(body, "class=\"badge_info_description\">", "<div style=\"clear").and_then(|info| {
+        let name = between(info, "class=\"badge_info_title\">", "</div>").map(clean).filter(|n| !n.is_empty())?;
+        let after = info.split("badge_info_title").nth(1).unwrap_or_default();
+        let level = between(after, "<div>", "</div>").map(clean).unwrap_or_default();
+        let unlocked = between(info, "class=\"badge_info_unlocked\">", "</div>").map(clean).unwrap_or_default();
+        let icon = between(body, "class=\"badge_info_image\">", "</div>").and_then(|b| between(b, "src=\"", "\"")).map(String::from);
+        Some(model::CardBadge { name, icon, level, unlocked })
+    });
+    let cards = body
+        .split("class=\"badge_card_set_card ")
+        .skip(1)
+        .filter_map(|c| {
+            let owned = c.starts_with("owned");
+            let image = between(c, "class=\"gamecard\" src=\"", "\"")?.to_string();
+            let title = between(c, "badge_card_set_title ellipsis\">", "<div style")?;
+            let count = match between(title, "class=\"badge_card_set_text_qty\">(", ")") {
+                Some(n) => n.trim().parse().unwrap_or(1),
+                None => u32::from(owned),
+            };
+            let name = clean(title.rsplit("</div>").next().unwrap_or(title));
+            let series = c.split("badge_card_set_title").nth(1).and_then(|r| between(r, "class=\"badge_card_set_text ellipsis\">", "</div>")).map(clean).unwrap_or_default();
+            Some(model::Card { name, image, count, series })
+        })
+        .collect();
+    model::CardSet { title, badge, playtime, drops, cards }
+}
+
 /// One page (1-based, 10 a page) of a profile's reviews.
 pub async fn reviews(web: Option<&Web>, steam_id: SteamId, page: u32) -> Result<model::UserReviews, String> {
     let body = http(web)
@@ -376,6 +424,30 @@ mod tests {
         assert_eq!(cats.len(), 2);
         assert!(cats[0].single);
         assert_eq!(cats[1].tags, vec![("Weapon".to_string(), "Weapon".to_string())]);
+    }
+
+    #[test]
+    fn reads_card_sets() {
+        let page = r#"<div class="badge_title_stats_playtime">
+        &nbsp;29 hrs on record </div><div class="badge_title_stats_drops"><span class="progress_info_bold">No card drops remaining</span></div></div></div>
+        <div class="badge_title">
+        The Witcher 2 Badge	</div></div><div class="badge_info"><div class="badge_info_image"><img src="https://x/badge.png" class="badge_icon"></div><div class="badge_info_description"><div class="badge_info_title">Sellsword</div><div>
+        Level 1, 100 XP	</div><div class="badge_info_unlocked">Unlocked 21 Jun, 2014 @ 5:20am</div></div><div style="clear: inline-start;"></div>
+        <div class="badge_card_set_cards"><div class="badge_card_set_card owned"><div class="game_card_ctn "><img class="gamecard" src="https://x/a.png"></div><div class="badge_card_set_text badge_card_set_title ellipsis"><div class="badge_card_set_text_qty">(5)</div>
+        The Ancient Dead	<div style="clear: inline-end"></div></div><div class="badge_card_set_text ellipsis">
+        1 of 2, Series 1	</div></div>
+        <div class="badge_card_set_card owned"><div class="game_card_ctn "><img class="gamecard" src="https://x/b.png"></div><div class="badge_card_set_text badge_card_set_title ellipsis">
+        Solo	<div style="clear: inline-end"></div></div><div class="badge_card_set_text ellipsis">2 of 3, Series 1</div></div>
+        <div class="badge_card_set_card unowned"><div class="game_card_ctn "><div class="game_card_unowned_border"></div><img class="gamecard" src="https://x/c.png"></div><div class="badge_card_set_text badge_card_set_title ellipsis">
+        Iorweth	<div style="clear: inline-end"></div></div><div class="badge_card_set_text ellipsis">3 of 3, Series 1</div></div></div>"#;
+        let s = super::parse_card_set(page);
+        assert_eq!(s.title, "The Witcher 2 Badge");
+        assert_eq!((s.playtime.as_str(), s.drops.as_str()), ("29 hrs on record", "No card drops remaining"));
+        let b = s.badge.unwrap();
+        assert_eq!((b.name.as_str(), b.level.as_str(), b.icon.as_deref()), ("Sellsword", "Level 1, 100 XP", Some("https://x/badge.png")));
+        let names: Vec<(&str, u32, &str)> = s.cards.iter().map(|c| (c.name.as_str(), c.count, c.series.as_str())).collect();
+        assert_eq!(names, vec![("The Ancient Dead", 5, "1 of 2, Series 1"), ("Solo", 1, "2 of 3, Series 1"), ("Iorweth", 0, "3 of 3, Series 1")]);
+        assert_eq!(s.cards[2].image, "https://x/c.png");
     }
 
     #[test]

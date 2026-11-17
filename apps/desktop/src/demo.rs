@@ -256,7 +256,26 @@ fn inventory(me: u64, now: u64) -> Vec<Event> {
             xp: "1,915 XP".into(),
             next: "85 XP to reach Level 19".into(),
             progress: 0.6,
-            items: vec![badge("Years of Service", "300 XP", "Unlocked 3 Feb, 2019"), badge("Community Leader", "100 XP", "Unlocked 14 Jun, 2021"), badge("Game Collector", "250 XP", "Unlocked 2 Jan, 2024")],
+            items: vec![
+                model::Badge { url: format!("https://steamcommunity.com/profiles/{me}/gamecards/413150/"), ..badge("Stardew Valley Badge", "Level 2, 200 XP", "Unlocked 9 Mar, 2023") },
+                badge("Years of Service", "300 XP", "Unlocked 3 Feb, 2019"),
+                badge("Community Leader", "100 XP", "Unlocked 14 Jun, 2021"),
+                badge("Game Collector", "250 XP", "Unlocked 2 Jan, 2024"),
+            ],
+        }),
+    });
+    // Its card collection (`--page=profile --arg=<id>/cards/413150`).
+    let card = |name: &str, n: u32, count: u32| model::Card { name: name.into(), count, series: format!("{n} of 6, Series 1"), image: model::art::header(413150) };
+    out.push(Event::CardSet {
+        steam_id: me,
+        app_id: 413150,
+        foil: false,
+        result: Ok(model::CardSet {
+            title: "Stardew Valley Badge".into(),
+            badge: Some(model::CardBadge { name: "Farmhand".into(), icon: None, level: "Level 2, 200 XP".into(), unlocked: "Unlocked 9 Mar, 2023".into() }),
+            playtime: "212 hrs on record".into(),
+            drops: "No card drops remaining".into(),
+            cards: vec![card("Abigail", 1, 2), card("Linus", 2, 0), card("Shane", 3, 1), card("Krobus", 4, 0), card("Pierre's Shop", 5, 3), card("Spring Festival", 6, 1)],
         }),
     });
     let review = |app_id, recommended, hours: &str, text: &str| model::UserReview {

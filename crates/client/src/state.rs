@@ -48,6 +48,8 @@ pub struct State {
     /// Profile reviews by (profile, page).
     pub reviews: HashMap<(SteamId, u32), Result<model::UserReviews, String>>,
     pub groups: HashMap<SteamId, Result<Vec<model::UserGroup>, String>>,
+    /// Card collections by (profile, game, foil).
+    pub card_sets: HashMap<(SteamId, AppId, bool), Result<model::CardSet, String>>,
     pub notifications: Option<model::Notifications>,
     pub support_tickets: Option<Result<Vec<model::SupportTicket>, String>>,
     pub account_security: Option<Result<model::AccountSecurity, String>>,
@@ -172,6 +174,9 @@ impl State {
             }
             Event::Groups { steam_id, result } => {
                 self.groups.insert(*steam_id, result.clone());
+            }
+            Event::CardSet { steam_id, app_id, foil, result } => {
+                self.card_sets.insert((*steam_id, *app_id, *foil), result.clone());
             }
             Event::CommentPosted { .. } => {}
             Event::ServerInfo { addr, result } => {

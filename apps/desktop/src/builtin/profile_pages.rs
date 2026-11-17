@@ -1,7 +1,7 @@
-//! A profile's badges, reviews and groups, each as its own list (like the
-//! games list), from the profile's pages on steamcommunity.com.
+//! A profile's badges, reviews, groups and card collections, each as its own
+//! list (like the games list), from the profile's pages on steamcommunity.com.
 
-use super::{Profile, Section, badge_icon, level_badge, panel};
+use super::{Profile, Section, badge_icon, card_set_of, level_badge, open_badge, panel};
 use client::Command;
 use egui::{Align, Align2, Color32, CornerRadius, Layout, Rect, Sense, Ui, pos2, vec2};
 use extensions::Ctx;
@@ -17,8 +17,10 @@ impl Profile {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn list_page(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, id: SteamId, name: &str, mine: bool, section: Section) {
         ui.horizontal(|ui| {
-            if w::button(ui, t, Some(icons::ARROW_LEFT), t!("Back to profile"), w::Kind::Ghost, w::Size::Sm).clicked() {
-                ctx.navigate("profile", Some(id.to_string()));
+            // A card collection is reached from the badges.
+            let (label, to) = if section == Section::Cards { (t!("Back to badges"), format!("{id}/{}", Section::Badges.slug())) } else { (t!("Back to profile"), id.to_string()) };
+            if w::button(ui, t, Some(icons::ARROW_LEFT), label, w::Kind::Ghost, w::Size::Sm).clicked() {
+                ctx.navigate("profile", Some(to));
             }
         });
         ui.add_space(8.0);
@@ -26,6 +28,7 @@ impl Profile {
             Section::Badges => self.badges_list(ui, t, ctx, id, name, mine),
             Section::Reviews => self.reviews_list(ui, t, ctx, id, name, mine),
             Section::Groups => self.groups_list(ui, t, ctx, id, name, mine),
+            Section::Cards => self.card_set(ui, t, ctx, id),
             Section::Profile | Section::Games => {}
         });
     }
@@ -65,16 +68,100 @@ impl Profile {
             let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
             ui.painter().rect_filled(r, t.corner_small(), w::mix(Color32::TRANSPARENT, t.surface_hover, hover));
             let mut icon_ui = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(r.min + vec2(6.0, 6.0), vec2(60.0, 60.0))));
-            badge_icon(&mut icon_ui, t, badge, 60.0);
+            let icon_clicked = badge_icon(&mut icon_ui, t, badge, 60.0);
             let x = r.left() + 80.0;
             let p = ui.painter();
             p.text(pos2(x, r.top() + 20.0), Align2::LEFT_CENTER, &badge.title, w::font_semibold(14.0), t.text);
             p.text(pos2(x, r.top() + 38.0), Align2::LEFT_CENTER, &badge.detail, w::font(12.5), t.accent);
             p.text(pos2(x, r.top() + 55.0), Align2::LEFT_CENTER, &badge.unlocked, w::font(11.5), t.text_faint);
-            if !badge.url.is_empty() && resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t!("Opens in your browser")).clicked() {
-                let _ = open::that_detached(&badge.url);
+            let cards = card_set_of(&badge.url).is_some();
+            if cards {
+                p.text(pos2(r.right() - 12.0, r.center().y), Align2::RIGHT_CENTER, format!("{}  {}", t!("Card collection"), icons::CARET_RIGHT), w::font_medium(12.5), t.text_dim);
+            }
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let resp = if cards || badge.url.is_empty() { resp } else { resp.on_hover_text(t!("Opens in your browser")) };
+            if resp.clicked() || icon_clicked {
+                open_badge(ctx, id, badge);
             }
         }
+    }
+
+    /// A game's trading cards on this profile, like Steam's badge page:
+    /// the badge so far, then every card, the missing ones dimmed.
+    fn card_set(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, id: SteamId) {
+        let (app, foil) = self.cards;
+        if self.lists_requested.insert((id, Section::Cards, app * 2 + u32::from(foil))) {
+            ctx.send(Command::LoadCardSet { steam_id: id, app_id: app, foil });
+        }
+        let set = match ctx.state.card_sets.get(&(id, app, foil)).cloned() {
+            None => {
+                ui.label(w::text_bold(t!("Card collection"), 24.0, t.text));
+                return skeleton_rows(ui, t, 80.0);
+            }
+            Some(Err(e)) => return hidden(ui, t, &e, t!("This card collection is hidden")),
+            Some(Ok(s)) => s,
+        };
+        ui.horizontal(|ui| {
+            let (img, resp) = ui.allocate_exact_size(vec2(184.0, 69.0), Sense::click());
+            w::image_or_skeleton(ui, t, img, &model::art::header(app), t.corner_small());
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                let owned = ctx.state.apps.as_ref().is_some_and(|a| a.contains_key(&app));
+                ctx.navigate(if owned { "library" } else { "store" }, Some(if owned { app.to_string() } else { format!("app:{app}") }));
+            }
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.label(w::text_bold(&set.title, 20.0, t.text));
+                let sub = [set.playtime.as_str(), set.drops.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+                if !sub.is_empty() {
+                    ui.label(w::text(sub, 13.0, t.text_dim));
+                }
+                let mut kind = foil;
+                w::segmented(ui, t, &mut kind, &[(false, &t!("Normal")), (true, &t!("Foil"))]);
+                if kind != foil {
+                    ctx.navigate("profile", Some(format!("{id}/cards/{app}{}", if kind { "/foil" } else { "" })));
+                }
+            });
+        });
+        ui.add_space(12.0);
+        if let Some(b) = &set.badge {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
+                match &b.icon {
+                    Some(u) => {
+                        if !w::paint_contain(ui, r, u, Align2::CENTER_CENTER) {
+                            w::skeleton(ui, t, r, CornerRadius::same(6));
+                        }
+                    }
+                    None => w::placeholder(ui, t, r, "", CornerRadius::same(6)),
+                }
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(w::text_bold(&b.name, 15.0, t.text));
+                    ui.label(w::text(&b.level, 13.0, t.accent));
+                    ui.label(w::text(&b.unlocked, 12.0, t.text_faint));
+                });
+            });
+        } else {
+            ui.label(w::text(t!("No badge crafted yet."), 13.5, t.text_faint));
+        }
+        let have = set.cards.iter().filter(|c| c.count > 0).count();
+        let total = set.cards.len();
+        ui.add_space(12.0);
+        ui.label(w::text_bold(t!("Collected {n} of {total} cards", n = have, total = total), 15.0, t.text));
+        ui.add_space(4.0);
+        let width = ui.available_width().min(420.0);
+        w::progress(ui, t, have as f32 / total.max(1) as f32, width);
+        if have == total && total > 0 {
+            ui.label(w::text(t!("Every card is collected: the next badge level can be crafted on Steam."), 12.5, t.online));
+        }
+        ui.add_space(14.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(14.0, 14.0);
+            for c in &set.cards {
+                card_tile(ui, t, c);
+            }
+        });
     }
 
     fn reviews_list(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, id: SteamId, name: &str, mine: bool) {
@@ -219,4 +306,25 @@ fn hidden(ui: &mut Ui, t: &Theme, error: &str, title: &str) {
     let body = if error == "private" { t!("Its owner has chosen to keep it private.").to_string() } else { error.to_string() };
     ui.add_space(10.0);
     w::empty(ui, t, icons::LOCK_SIMPLE, title, &body);
+}
+
+/// One trading card; missing ones dimmed, extra copies counted.
+fn card_tile(ui: &mut Ui, t: &Theme, c: &model::Card) {
+    let (r, resp) = ui.allocate_exact_size(vec2(124.0, 196.0), Sense::hover());
+    let img = Rect::from_min_size(r.min, vec2(124.0, 145.0));
+    w::image_or_skeleton(ui, t, img, &c.image, CornerRadius::same(6));
+    let p = ui.painter().with_clip_rect(r);
+    if c.count == 0 {
+        p.rect_filled(img, CornerRadius::same(6), t.bg.gamma_multiply(0.65));
+    }
+    if c.count > 1 {
+        let tag = Rect::from_min_size(pos2(img.right() - 34.0, img.top() + 6.0), vec2(28.0, 20.0));
+        p.rect_filled(tag, CornerRadius::same(10), t.accent);
+        p.text(tag.center(), Align2::CENTER_CENTER, format!("×{}", c.count), w::font_bold(12.0), t.on_accent);
+    }
+    let color = if c.count > 0 { t.text } else { t.text_faint };
+    p.text(pos2(r.left(), img.bottom() + 14.0), Align2::LEFT_CENTER, &c.name, w::font_semibold(12.5), color);
+    p.text(pos2(r.left(), img.bottom() + 32.0), Align2::LEFT_CENTER, &c.series, w::font(11.0), t.text_faint);
+    let tip = if c.count == 0 { format!("{}\n{}", c.name, t!("Not collected yet")) } else { c.name.clone() };
+    resp.on_hover_text(tip);
 }

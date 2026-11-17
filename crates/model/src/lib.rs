@@ -711,6 +711,40 @@ pub struct UserGroup {
     pub online: String,
 }
 
+/// A game's trading-card collection on a profile (its badge's page).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CardSet {
+    /// e.g. "The Witcher 2 Badge".
+    pub title: String,
+    /// The badge reached so far (`None` before the first craft).
+    pub badge: Option<CardBadge>,
+    /// e.g. "29 hrs on record".
+    pub playtime: String,
+    /// e.g. "No card drops remaining" (only on your own profile).
+    pub drops: String,
+    pub cards: Vec<Card>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CardBadge {
+    pub name: String,
+    pub icon: Option<String>,
+    /// e.g. "Level 1, 100 XP".
+    pub level: String,
+    pub unlocked: String,
+}
+
+/// One card of a set.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Card {
+    pub name: String,
+    pub image: String,
+    /// How many the profile has (0 = missing).
+    pub count: u32,
+    /// e.g. "1 of 8, Series 1".
+    pub series: String,
+}
+
 /// A badge on a profile.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Badge {

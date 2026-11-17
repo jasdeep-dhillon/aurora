@@ -22,6 +22,8 @@ enum Section {
     Badges,
     Reviews,
     Groups,
+    /// A game's card collection (the game and foil set in `Profile::cards`).
+    Cards,
 }
 
 impl Section {
@@ -32,11 +34,12 @@ impl Section {
             Section::Badges => "badges",
             Section::Reviews => "reviews",
             Section::Groups => "groups",
+            Section::Cards => "cards",
         }
     }
 
     fn from_slug(s: Option<&str>) -> Section {
-        [Section::Games, Section::Badges, Section::Reviews, Section::Groups].into_iter().find(|x| Some(x.slug()) == s).unwrap_or_default()
+        [Section::Games, Section::Badges, Section::Reviews, Section::Groups, Section::Cards].into_iter().find(|x| Some(x.slug()) == s).unwrap_or_default()
     }
 }
 
@@ -59,6 +62,8 @@ pub struct Profile {
     /// Reviews page shown (1-based), and the review pages and group lists asked for.
     review_page: u32,
     lists_requested: HashSet<(SteamId, Section, u32)>,
+    /// The card collection shown: game and foil set.
+    cards: (model::AppId, bool),
     games_search: String,
     games_sort: GameSort,
     showcase_requested: HashSet<SteamId>,
@@ -94,6 +99,9 @@ impl Extension for Profile {
         self.viewing = parts.next().and_then(|a| a.parse().ok());
         self.section = Section::from_slug(parts.next());
         self.review_page = 1;
+        if self.section == Section::Cards {
+            self.cards = (parts.next().and_then(|a| a.parse().ok()).unwrap_or(0), parts.next() == Some("foil"));
+        }
         self.games_search.clear();
     }
 
@@ -451,7 +459,9 @@ impl Profile {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                     for badge in b.items.iter().take(8) {
-                        badge_icon(ui, t, badge, 54.0);
+                        if badge_icon(ui, t, badge, 54.0) {
+                            open_badge(ctx, id, badge);
+                        }
                     }
                 });
             }
@@ -826,8 +836,27 @@ fn level_badge(ui: &mut Ui, t: &Theme, level: u32) {
     ui.painter().text(r.center(), Align2::CENTER_CENTER, level.to_string(), w::font_bold(13.5), t.text);
 }
 
-/// A badge picture with its name and details on hover.
-fn badge_icon(ui: &mut Ui, t: &Theme, badge: &model::Badge, size: f32) {
+/// The game and foil flag of a badge crafted from a card collection.
+fn card_set_of(url: &str) -> Option<(model::AppId, bool)> {
+    let rest = url.split("/gamecards/").nth(1)?;
+    let app = rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()?;
+    Some((app, rest.contains("border=1")))
+}
+
+/// A badge from a card collection opens that collection here; others
+/// open their page on Steam.
+fn open_badge(ctx: &mut Ctx, id: SteamId, badge: &model::Badge) {
+    match card_set_of(&badge.url) {
+        Some((app, foil)) => ctx.navigate("profile", Some(format!("{id}/cards/{app}{}", if foil { "/foil" } else { "" }))),
+        None if !badge.url.is_empty() => {
+            let _ = open::that_detached(&badge.url);
+        }
+        None => {}
+    }
+}
+
+/// A badge picture with its name and details on hover; true when clicked.
+fn badge_icon(ui: &mut Ui, t: &Theme, badge: &model::Badge, size: f32) -> bool {
     let (r, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
     match &badge.icon {
         Some(u) => {
@@ -838,7 +867,15 @@ fn badge_icon(ui: &mut Ui, t: &Theme, badge: &model::Badge, size: f32) {
         None => w::placeholder(ui, t, r, "", CornerRadius::same(6)),
     }
     let tip = [badge.title.as_str(), badge.detail.as_str(), badge.unlocked.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
-    if resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !badge.url.is_empty() {
-        let _ = open::that_detached(&badge.url);
+    resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn badges_from_card_collections() {
+        assert_eq!(super::card_set_of("https://steamcommunity.com/id/x/gamecards/570/"), Some((570, false)));
+        assert_eq!(super::card_set_of("https://steamcommunity.com/profiles/1/gamecards/20920/?border=1"), Some((20920, true)));
+        assert_eq!(super::card_set_of("https://steamcommunity.com/id/x/badges/13"), None);
     }
 }

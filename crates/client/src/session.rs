@@ -931,6 +931,10 @@ async fn online(
                     let result = crate::social::groups(web.as_deref().ok(), steam_id).await;
                     sink(Event::Groups { steam_id, result });
                 }),
+                Some(Command::LoadCardSet { steam_id, app_id, foil }) => st.with_web(sink, move |web, sink| async move {
+                    let result = crate::social::card_set(web.as_deref().ok(), steam_id, app_id, foil).await;
+                    sink(Event::CardSet { steam_id, app_id, foil, result });
+                }),
                 Some(Command::LoadNotifications) => st.load_notifications(sink),
                 Some(Command::MarkNotificationsRead { ids }) => st.mark_read(ids, sink),
                 Some(Command::LoadSupportTickets) => st.support_tickets(sink),

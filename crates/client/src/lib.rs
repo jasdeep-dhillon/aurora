@@ -142,6 +142,8 @@ pub enum Command {
     LoadReviews { steam_id: SteamId, page: u32 },
     /// The groups a profile belongs to.
     LoadGroups { steam_id: SteamId },
+    /// A game's trading-card collection on a profile (`foil`: the foil set).
+    LoadCardSet { steam_id: SteamId, app_id: AppId, foil: bool },
     LoadNotifications,
     /// Mark notifications as read (empty = all).
     MarkNotificationsRead { ids: Vec<u64> },
@@ -307,6 +309,7 @@ pub enum Event {
     Badges { steam_id: SteamId, result: Result<model::Badges, String> },
     Reviews { steam_id: SteamId, page: u32, result: Result<model::UserReviews, String> },
     Groups { steam_id: SteamId, result: Result<Vec<model::UserGroup>, String> },
+    CardSet { steam_id: SteamId, app_id: AppId, foil: bool, result: Result<model::CardSet, String> },
     /// The full notification list (replaces the old one).
     Notifications(model::Notifications),
     /// New notifications just arrived (for a toast).
