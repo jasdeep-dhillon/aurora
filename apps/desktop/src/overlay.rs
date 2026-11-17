@@ -104,6 +104,7 @@ impl Overlay {
             if e.state == HotKeyState::Pressed {
                 flag.store(true, Ordering::Relaxed);
                 repaint.request_repaint();
+                repaint.request_repaint_of(overlay_viewport());
             }
         }));
         // A game's in-game overlay sent something: run the UI.
@@ -475,20 +476,29 @@ fn ingame_frame(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Actio
 /// in-game overlay would run at 10 fps. So a 1×1 helper window that never
 /// takes focus or shows in the taskbar gets the frames instead, and runs the
 /// in-game overlay at full speed.
+/// The app for a deferred viewport's callback.
+struct AppPtr(*mut SteamApp);
+// SAFETY: only used on the UI thread: eframe calls deferred viewport
+// callbacks there, in their own frames, never inside `App::ui` (callers
+// check that viewports aren't embedded), and the app outlives its viewports.
+unsafe impl Send for AppPtr {}
+unsafe impl Sync for AppPtr {}
+impl AppPtr {
+    fn get(&self) -> *mut SteamApp {
+        self.0
+    }
+}
+
+/// The window overlay's own viewport.
+fn overlay_viewport() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("aurora-overlay")
+}
+
 fn keep_ticking(app: &mut SteamApp, ctx: &egui::Context) {
     // Without real windows the callback would run inside this frame, while
     // `app` is borrowed: the main window's frames have to do then.
     if ctx.embed_viewports() {
         return;
-    }
-    struct AppPtr(*mut SteamApp);
-    // SAFETY: only used on the UI thread (see below).
-    unsafe impl Send for AppPtr {}
-    unsafe impl Sync for AppPtr {}
-    impl AppPtr {
-        fn get(&self) -> *mut SteamApp {
-            self.0
-        }
     }
     let app = AppPtr(app);
     let builder = egui::ViewportBuilder::default()
@@ -556,7 +566,7 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
         keep_ticking(app, ctx);
         return;
     }
-    let viewport = egui::ViewportId::from_hash_of("aurora-overlay");
+    let viewport = overlay_viewport();
     // Not true fullscreen: Windows turns a window that exactly covers the
     // screen into exclusive fullscreen, which drops transparency (the game
     // went black). One pixel short keeps it a normal see-through window.
@@ -570,6 +580,45 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
         .with_inner_size(monitor - egui::vec2(0.0, 1.0))
         .with_mouse_passthrough(!active)
         .with_taskbar(false);
+    // Linux: the overlay window draws in its own frames. The main window is
+    // behind the game or minimized then, and the compositor (GNOME on
+    // Wayland) hardly gives it frames, so an overlay drawn from them
+    // opened late and crawled.
+    #[cfg(target_os = "linux")]
+    if !ctx.embed_viewports() {
+        let ptr = AppPtr(app);
+        ctx.show_viewport_deferred(viewport, builder, move |ui, _class| {
+            let app = unsafe { &mut *ptr.get() };
+            // Shift+Tab while the overlay is in front closes it right here.
+            if app.overlay.pressed.swap(false, Ordering::Relaxed) {
+                app.overlay.toggle();
+            }
+            let active = app.overlay.open;
+            let opened_now = active && !app.overlay.focused;
+            if app.overlay.passthrough != Some(!active) {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::MousePassthrough(!active));
+                app.overlay.passthrough = Some(!active);
+            }
+            if opened_now {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+                app.overlay.focused = true;
+            }
+            let t = app.prefs.theme.clone();
+            let mut actions = std::mem::take(&mut app.overlay.pending);
+            if content(app, ui, &t, &mut actions, active) {
+                app.overlay.close();
+            }
+            app.overlay.pending = actions;
+            // Window commands (and closing) are the main window's job.
+            if !app.overlay.pending.is_empty() || !app.overlay.open {
+                ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+            }
+            if app.overlay.open {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        });
+        return;
+    }
     let opened_now = active && !app.overlay.focused;
     ctx.show_viewport_immediate(viewport, builder, |ui, _class| {
         // Pinned windows over the game let clicks through; the open overlay takes them.
