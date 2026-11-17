@@ -694,6 +694,37 @@ pub struct UserReview {
     pub url: String,
 }
 
+/// One player's review of a game, from Steam's review feed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppReview {
+    pub id: String,
+    pub author: SteamId,
+    pub minutes_played: u64,
+    pub minutes_at_review: u64,
+    pub recommended: bool,
+    pub text: String,
+    /// Unix seconds.
+    pub created: u64,
+    pub helpful: u32,
+    pub funny: u32,
+    pub early_access: bool,
+    /// The player got the game for free.
+    pub free: bool,
+}
+
+/// A game's reviews: the summary and one or more pages of reviews.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppReviews {
+    /// e.g. "Very Positive".
+    pub label: String,
+    pub positive: u32,
+    pub negative: u32,
+    pub total: u32,
+    pub items: Vec<AppReview>,
+    /// Where the next page starts; `None` at the end.
+    pub cursor: Option<String>,
+}
+
 /// One page (10) of a profile's reviews.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UserReviews {

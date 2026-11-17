@@ -44,6 +44,8 @@ enum View {
 }
 
 pub struct Store {
+    /// A game's reviews (read, or write your own).
+    reviews: Option<super::reviews::ReviewWindow>,
     /// A view opened inside the store, to record in Back/Forward history.
     nav_out: Option<Option<String>>,
     /// Set while the app navigates us (Back, Forward, links): don't record again.
@@ -112,6 +114,7 @@ struct Saved {
 impl Store {
     pub fn new(rt: tokio::runtime::Handle, egui: egui::Context) -> Self {
         Self {
+            reviews: None,
             rt,
             egui,
             api: StoreClient::default(),
@@ -368,6 +371,9 @@ impl Extension for Store {
     }
 
     fn on_event(&mut self, event: &client::Event, ctx: &mut Ctx) {
+        if let Some(r) = &mut self.reviews {
+            r.on_event(event, ctx);
+        }
         if let client::Event::FreeLicense { app_id, result } = event {
             if self.free_pending == Some(*app_id) {
                 self.free_pending = None;
@@ -467,6 +473,11 @@ impl Extension for Store {
                 }
             }
         });
+        if let Some(r) = &mut self.reviews {
+            if !r.show(ui, &t, ctx) {
+                self.reviews = None;
+            }
+        }
         self.flush_ratings();
         self.gift_dialog(ui, &t, ctx);
         self.cart_popup_ui(ui, &t, ctx);
@@ -932,6 +943,17 @@ impl Store {
                     w::image_or_skeleton(ui, t, r, &d.header, t.corner_small());
                     ui.add_space(8.0);
                     ui.add(egui::Label::new(w::text(&d.short_description, 14.0, t.text_dim)).wrap());
+                    ui.add_space(10.0);
+                    // Read what players say, or write your own review.
+                    ui.horizontal(|ui| {
+                        let owned = self.owned.contains(&id);
+                        if w::button(ui, t, Some(icons::CHATS), t!("Read reviews"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                            self.reviews = Some(super::reviews::ReviewWindow::new(id, &d.name, owned, false));
+                        }
+                        if owned && w::button(ui, t, Some(icons::NOTE), t!("Write a review"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                            self.reviews = Some(super::reviews::ReviewWindow::new(id, &d.name, owned, true));
+                        }
+                    });
                     ui.add_space(10.0);
                     let info = self.browse_info(id);
                     egui::Grid::new("app-facts").num_columns(2).spacing(vec2(14.0, 6.0)).show(ui, |ui| {

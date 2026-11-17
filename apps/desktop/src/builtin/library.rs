@@ -241,6 +241,8 @@ pub struct Library {
     players: HashMap<AppId, (std::time::Instant, news::PlayersSlot)>,
     reader: Option<Reader>,
     props: Option<props::Props>,
+    /// A game's reviews, opened from the link row.
+    reviews: Option<super::reviews::ReviewWindow>,
     install_dialog: Option<InstallDialog>,
     /// Games to put on the desktop once their install finishes.
     collections: Vec<Collection>,
@@ -289,6 +291,9 @@ impl Extension for Library {
     fn on_event(&mut self, event: &client::Event, ctx: &mut Ctx) {
         // An uninstall can end while another page is open.
         self.finish_uninstalls(ctx);
+        if let Some(r) = &mut self.reviews {
+            r.on_event(event, ctx);
+        }
         match event {
             client::Event::VerifyFinished { app_id, result } => self.verify_finished(ctx, *app_id, result),
             client::Event::LoggedIn { steam_id, .. } => {
@@ -368,6 +373,11 @@ impl Extension for Library {
         self.run_pending(ctx);
         self.cloud_conflict_dialog(ui, &t, ctx);
         self.naming_dialog(ui, &t);
+        if let Some(r) = &mut self.reviews {
+            if !r.show(ui, &t, ctx) {
+                self.reviews = None;
+            }
+        }
         if let Some((id, act)) = self.menu_request.take() {
             self.apply_menu(ctx, id, act);
         }
@@ -432,6 +442,10 @@ impl Library {
             ("update", Some(g)) => self.queue_install(ctx, id, Some(g.library.clone())),
             ("props", _) => self.props = Some(props::Props { app: id, tab: props::PropTab::General, ..Default::default() }),
             ("news", _) => self.reader = Some(Reader { app: id, index: 0 }),
+            ("reviews", _) => {
+                let name = ctx.state.app_name(id).unwrap_or_default().to_string();
+                self.reviews = Some(super::reviews::ReviewWindow::new(id, &name, true, false));
+            }
             ("resetargs", _) => {
                 if let Some(s) = self.games.get_mut(&id) {
                     s.args.clear();
@@ -1494,24 +1508,28 @@ impl Library {
             egui::Frame::new().outer_margin(Margin::symmetric(24, 0)).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                    let link = |ui: &mut Ui, label: &str| w::button(ui, t, None, label, w::Kind::Secondary, w::Size::Sm).clicked();
-                    if link(ui, t!("Store page")) {
+                    let link = |ui: &mut Ui, icon: &str, label: &str| w::button(ui, t, Some(icon), label, w::Kind::Secondary, w::Size::Sm).clicked();
+                    if link(ui, icons::STORE, t!("Store page")) {
                         ctx.navigate("store", Some(format!("app:{id}")));
                     }
-                    if link(ui, t!("Workshop")) {
+                    if link(ui, icons::THUMBS_UP, t!("Reviews")) {
+                        let name = ctx.state.app_name(id).unwrap_or_default().to_string();
+                        self.reviews = Some(super::reviews::ReviewWindow::new(id, &name, true, false));
+                    }
+                    if link(ui, icons::PUZZLE, t!("Workshop")) {
                         ctx.navigate("workshop", Some(id.to_string()));
                     }
-                    for (label, page) in [
-                        (t!("Community hub"), "hub"),
-                        (t!("Discussions"), "discussions"),
-                        (t!("Guides"), "guides"),
-                        (t!("Achievements"), "achievements"),
+                    for (icon, label, page) in [
+                        (icons::USERS_THREE, t!("Community hub"), "hub"),
+                        (icons::CHATS, t!("Discussions"), "discussions"),
+                        (icons::SCROLL, t!("Guides"), "guides"),
+                        (icons::TROPHY, t!("Achievements"), "achievements"),
                     ] {
-                        if link(ui, label) {
+                        if link(ui, icon, label) {
                             ctx.navigate(page, Some(id.to_string()));
                         }
                     }
-                    if link(ui, t!("Support")) {
+                    if link(ui, icons::QUESTION, t!("Support")) {
                         ctx.navigate("support", Some(format!("game:{id}")));
                     }
                     // The Market has no native page yet.

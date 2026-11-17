@@ -20,6 +20,7 @@ mod installscript;
 pub mod market;
 pub mod social;
 pub mod cloud;
+pub mod reviews;
 pub mod regions;
 pub mod a2s;
 pub mod game_ugc;
@@ -140,6 +141,14 @@ pub enum Command {
     LoadBadges { steam_id: SteamId },
     /// A page (1-based) of a profile's reviews.
     LoadReviews { steam_id: SteamId, page: u32 },
+    /// A game's reviews (Steam language name or "all"). `cursor`: the next
+    /// page after the ones loaded (`AppReviews::cursor`); `None` for the first.
+    LoadAppReviews { app_id: AppId, language: String, cursor: Option<String> },
+    /// Your own review of a game, if any.
+    LoadMyReview { app_id: AppId },
+    /// Write or replace your review of a game.
+    PostReview { app_id: AppId, text: String, recommended: bool, public: bool, allow_comments: bool, language: String },
+    DeleteReview { app_id: AppId },
     /// The groups a profile belongs to.
     LoadGroups { steam_id: SteamId },
     /// A game's trading-card collection on a profile (`foil`: the foil set).
@@ -308,6 +317,11 @@ pub enum Event {
     Blocked { steam_id: SteamId, result: Result<bool, String> },
     Badges { steam_id: SteamId, result: Result<model::Badges, String> },
     Reviews { steam_id: SteamId, page: u32, result: Result<model::UserReviews, String> },
+    /// A page of a game's reviews (`more`: added after the loaded ones).
+    AppReviews { app_id: AppId, more: bool, result: Result<model::AppReviews, String> },
+    MyReview { app_id: AppId, result: Result<Option<model::UserReview>, String> },
+    /// A review was posted (`deleted`: removed) or failed.
+    ReviewSaved { app_id: AppId, deleted: bool, result: Result<(), String> },
     Groups { steam_id: SteamId, result: Result<Vec<model::UserGroup>, String> },
     CardSet { steam_id: SteamId, app_id: AppId, foil: bool, result: Result<model::CardSet, String> },
     /// The full notification list (replaces the old one).
