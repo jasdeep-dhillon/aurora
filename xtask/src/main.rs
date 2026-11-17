@@ -106,6 +106,12 @@ fn package() -> Result {
     // The headless Steam host for Steam-DRM games (loads the user's own
     // steamclient64.dll; nothing of Valve's is bundled).
     copy(&release.join("steamhost.exe"), &stage.join("steamhost.exe"))?;
+    // SDL3 reads PlayStation, Switch and other non-Xbox controllers for games
+    // (crates/client/src/pads.rs). CI downloads the official build.
+    match std::env::var_os("SIR_SDL3").map(PathBuf::from).filter(|p| p.is_file()) {
+        Some(sdl) => copy(&sdl, &stage.join("SDL3.dll"))?,
+        None => eprintln!("warning: SIR_SDL3 not set: games will only see Xbox controllers (no SDL3.dll)."),
+    }
 
     // The same DLL for 32-bit games, when a 32-bit MinGW is around.
     if gcc32().is_some() {

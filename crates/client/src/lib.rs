@@ -28,6 +28,7 @@ pub mod game_servers;
 mod input_config;
 pub mod account;
 mod notify;
+mod pads;
 
 /// One HTTP client for plain requests (one connection pool and TLS setup,
 /// instead of a new client per request).

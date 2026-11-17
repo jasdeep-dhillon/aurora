@@ -37,6 +37,9 @@ mod jingle;
 mod lobby;
 pub mod overlay;
 mod p2p;
+mod pads;
+#[allow(dead_code)]
+mod pads_shm;
 mod pseudotcp;
 mod screenshots;
 mod servers;
@@ -153,6 +156,8 @@ fn create_interface(version: usize, err: usize) -> usize {
         if state::ensure_session() {
             // Draw the Shift+Tab overlay inside the game (see overlay/).
             overlay::start();
+            // PlayStation/Switch pads the app reads, as XInput pads.
+            pads::install();
             steam_drm_check(version);
         }
     }

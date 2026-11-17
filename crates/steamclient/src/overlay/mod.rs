@@ -20,6 +20,8 @@ pub mod wire;
 mod d3d11;
 #[cfg(windows)]
 mod input;
+#[cfg(windows)]
+pub(crate) use input::patch_module;
 
 use wire::{Mesh, TexSet};
 

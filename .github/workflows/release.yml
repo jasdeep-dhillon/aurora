@@ -158,6 +158,17 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      - name: SDL3 (reads PlayStation/Switch controllers for games)
+        shell: pwsh
+        run: |
+          $v = "3.4.18"
+          $zip = "$env:RUNNER_TEMP\sdl3.zip"
+          Invoke-WebRequest "https://github.com/libsdl-org/SDL/releases/download/release-$v/SDL3-$v-win32-x64.zip" -OutFile $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne "75c2c0fc74e7d1206aaedc22893a35887332f4f85f5c8b74fddc10d177985f2c") { throw "SDL3 zip checksum mismatch: $hash" }
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\sdl3" -Force
+          echo "SIR_SDL3=$env:RUNNER_TEMP\sdl3\SDL3.dll" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Package
         shell: pwsh
         env:
