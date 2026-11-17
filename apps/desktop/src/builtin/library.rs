@@ -373,6 +373,16 @@ impl Extension for Library {
         }
     }
 
+    /// `update:<id>` from the Downloads page: queue the update right away,
+    /// with this game's own settings (branch, language, DLC), without
+    /// opening its page.
+    fn request(&mut self, what: &str, ctx: &mut Ctx) -> bool {
+        let Some(id) = what.strip_prefix("update:").and_then(|i| i.parse::<AppId>().ok()) else { return false };
+        let library = ctx.local.games.iter().find(|g| g.app_id == id).map(|g| g.library.clone());
+        self.queue_install(ctx, id, library);
+        true
+    }
+
     fn settings(&mut self, ui: &mut Ui, ctx: &mut Ctx) -> bool {
         let t = ctx.theme.clone();
         super::settings::switch(ui, &t, t!("Show collections"), t!("Collection filters and the new collection button in the library sidebar, and the Add to collection menu on games."), &mut self.show_collections);

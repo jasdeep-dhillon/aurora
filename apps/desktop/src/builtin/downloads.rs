@@ -653,7 +653,8 @@ fn row(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, app_id: u32, name: &str, status: &
     });
     c.with_layout(Layout::right_to_left(Align::Center), |ui| {
         if pending {
-            if w::button(ui, t, Some(icons::DOWNLOAD), t!("Update"), w::Kind::Primary, w::Size::Sm).clicked() {
+            if w::button(ui, t, Some(icons::DOWNLOAD), t!("Update"), w::Kind::Primary, w::Size::Sm).clicked() && !ctx.request(&format!("update:{app_id}")) {
+                // No library to ask (turned off): its page does it.
                 ctx.navigate("library", Some(format!("update:{app_id}")));
             }
         } else if w::button(ui, t, Some(icons::NOTE), t!("What's new"), w::Kind::Ghost, w::Size::Sm).clicked() {
