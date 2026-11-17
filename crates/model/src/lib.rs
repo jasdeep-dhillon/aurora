@@ -694,6 +694,17 @@ pub struct UserReview {
     pub url: String,
 }
 
+/// The store's picks for you, from Steam's personal sources.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StoreRecommendations {
+    /// Discovery queues by shelf id ("ml", "on_sale", "free", "coming_soon").
+    pub queues: Vec<(String, Vec<AppId>)>,
+    /// Games your friends play a lot lately: (game, how many friends).
+    pub friends: Vec<(AppId, u32)>,
+    /// Your favourite tags, best first: (tag id, name).
+    pub tags: Vec<(u32, String)>,
+}
+
 /// One page (10) of a profile's reviews.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UserReviews {

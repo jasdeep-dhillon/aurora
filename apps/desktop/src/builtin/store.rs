@@ -44,6 +44,10 @@ enum View {
 }
 
 pub struct Store {
+    /// The personal picks were asked for (once per sign-in).
+    recs_asked: bool,
+    /// Personal shelves built from the picks: (picks they came from, shelves).
+    recs: Option<(model::StoreRecommendations, Shared<Vec<Section>>)>,
     /// A view opened inside the store, to record in Back/Forward history.
     nav_out: Option<Option<String>>,
     /// Set while the app navigates us (Back, Forward, links): don't record again.
@@ -112,6 +116,8 @@ struct Saved {
 impl Store {
     pub fn new(rt: tokio::runtime::Handle, egui: egui::Context) -> Self {
         Self {
+            recs_asked: false,
+            recs: None,
             rt,
             egui,
             api: StoreClient::default(),
@@ -368,6 +374,11 @@ impl Extension for Store {
     }
 
     fn on_event(&mut self, event: &client::Event, ctx: &mut Ctx) {
+        if let client::Event::LoggedIn { .. } = event {
+            // A new account: its own picks.
+            self.recs_asked = false;
+            self.recs = None;
+        }
         if let client::Event::FreeLicense { app_id, result } = event {
             if self.free_pending == Some(*app_id) {
                 self.free_pending = None;
@@ -419,6 +430,7 @@ impl Extension for Store {
             ctx.navigate("store", arg);
         }
         let t = ctx.theme.clone();
+        self.personal(ctx);
         // Refresh the owned set only when the library changes size.
         let count = ctx.state.apps.as_ref().map(|a| a.len()).unwrap_or(0) + ctx.local.games.len();
         if count != self.owned.len() {
@@ -617,6 +629,28 @@ impl Store {
                 s
             })
             .collect();
+        // Your picks first (Steam's discovery queues, friends, favourite tags),
+        // without games you own; the featured lists follow.
+        let personal: Vec<Section> = self
+            .personal_sections()
+            .into_iter()
+            .map(|mut s| {
+                s.items.retain(|i| !self.owned.contains(&i.app_id) && self.safe(i.app_id) != Some(false));
+                s
+            })
+            .filter(|s| s.items.len() >= 3)
+            .collect();
+        let spotlight = match personal.first() {
+            Some(s) => s.items.iter().filter(|i| self.safe(i.app_id) == Some(true)).take(10).cloned().collect(),
+            None => spotlight,
+        };
+        let sections: Vec<Section> = sections
+            .into_iter()
+            .map(|mut s| {
+                s.items.retain(|i| !self.owned.contains(&i.app_id));
+                s
+            })
+            .collect();
         if spotlight.is_empty() && !self.ratings_pending.is_empty() {
             let w_ = ui.available_width();
             let (r, _) = ui.allocate_exact_size(vec2(w_, 400.0), Sense::hover());
@@ -624,12 +658,76 @@ impl Store {
             ui.add_space(32.0);
         }
         if !spotlight.is_empty() {
+            if let Some(s) = personal.first() {
+                ui.label(w::text_bold(&s.title, 20.0, t.text));
+                ui.add_space(8.0);
+            }
             self.carousel(ui, t, &spotlight);
             ui.add_space(32.0);
         }
-        for s in &sections {
+        for s in personal.iter().skip(1).chain(sections.iter()) {
             self.shelf(ui, t, s);
             ui.add_space(28.0);
+        }
+    }
+
+    /// Ask for the personal picks once signed in, and turn them into
+    /// shelves of store cards when they arrive.
+    fn personal(&mut self, ctx: &mut Ctx) {
+        if !self.recs_asked && ctx.state.online() {
+            self.recs_asked = true;
+            ctx.send(client::Command::LoadStoreRecommendations { language: i18n::language().steam_name().to_string() });
+        }
+        let Some(recs) = ctx.state.store_recs.clone() else { return };
+        if self.recs.as_ref().is_some_and(|(r, _)| *r == recs) {
+            return;
+        }
+        let api = self.api.clone();
+        let picks = recs.clone();
+        let titles: Vec<(String, String)> = [
+            ("ml", t!("Recommended for you")),
+            ("friends", t!("Popular with your friends")),
+            ("on_sale", t!("Recommended specials")),
+            ("free", t!("Free games you might like")),
+            ("coming_soon", t!("Upcoming games you might like")),
+        ]
+        .into_iter()
+        .map(|(id, title)| (id.to_string(), title.to_string()))
+        .collect();
+        let tag_title = t!("Top picks in {tag}", tag = "{tag}").to_string();
+        let shelves = self.fetch(async move {
+            // Shelf id → app ids, in the order Steam gave them.
+            let mut lists: Vec<(String, Vec<AppId>)> = picks.queues.clone();
+            let mut friends = picks.friends.clone();
+            friends.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+            lists.push(("friends".into(), friends.into_iter().map(|(a, _)| a).collect()));
+            let ids: Vec<AppId> = lists.iter().flat_map(|(_, l)| l.iter().copied()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+            let cards: HashMap<AppId, Item> = api.items(&ids).await?.into_iter().map(|q| (q.app_id, query_card(q))).collect();
+            let mut out = Vec::new();
+            for (id, title) in &titles {
+                let Some((_, list)) = lists.iter().find(|(l, _)| l == id) else { continue };
+                let items: Vec<Item> = list.iter().filter_map(|a| cards.get(a).cloned()).collect();
+                out.push(Section { id: format!("you-{id}"), title: title.clone(), items });
+            }
+            // Your two favourite tags, best-selling first.
+            for (tag, name) in picks.tags.iter().take(2) {
+                let f = store::query::Filters { tags: vec![*tag], sort: store::query::Sort::TopSellers, ..Default::default() };
+                if let Ok((items, _)) = api.query(&f, 0, 24).await {
+                    out.push(Section { id: format!("you-tag-{tag}"), title: tag_title.replace("{tag}", name), items: items.into_iter().map(query_card).collect() });
+                }
+            }
+            Ok(out)
+        });
+        self.recs = Some((recs, shelves));
+    }
+
+    fn personal_sections(&self) -> Vec<Section> {
+        match self.recs.as_ref().map(|(_, s)| s.lock().unwrap()) {
+            Some(guard) => match &*guard {
+                Load::Ready(s) => s.clone(),
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
         }
     }
 
@@ -1531,4 +1629,9 @@ fn view_arg(view: &View) -> Option<String> {
         View::Wishlist => Some("wishlist".into()),
         View::Cart => Some("cart".into()),
     }
+}
+
+/// A store card from a store query result.
+fn query_card(q: store::query::QueryItem) -> Item {
+    Item { app_id: q.app_id, name: q.name, header: q.header, large: q.capsule, price: q.price, windows: q.platforms.0 }
 }

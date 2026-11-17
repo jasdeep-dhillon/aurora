@@ -47,6 +47,8 @@ pub struct State {
     pub badges: HashMap<SteamId, Result<model::Badges, String>>,
     /// Profile reviews by (profile, page).
     pub reviews: HashMap<(SteamId, u32), Result<model::UserReviews, String>>,
+    /// The store's personal picks for this account (after sign-in).
+    pub store_recs: Option<model::StoreRecommendations>,
     pub groups: HashMap<SteamId, Result<Vec<model::UserGroup>, String>>,
     /// Card collections by (profile, game, foil).
     pub card_sets: HashMap<(SteamId, AppId, bool), Result<model::CardSet, String>>,
@@ -172,6 +174,7 @@ impl State {
             Event::Reviews { steam_id, page, result } => {
                 self.reviews.insert((*steam_id, *page), result.clone());
             }
+            Event::StoreRecommendations(r) => self.store_recs = Some(r.clone()),
             Event::Groups { steam_id, result } => {
                 self.groups.insert(*steam_id, result.clone());
             }

@@ -958,6 +958,12 @@ async fn online(
                     let result = crate::social::groups(web.as_deref().ok(), steam_id).await;
                     sink(Event::Groups { steam_id, result });
                 }),
+                Some(Command::LoadStoreRecommendations { language }) => {
+                    let (conn, sink) = (conn.clone(), sink.clone());
+                    tokio::spawn(async move {
+                        sink(Event::StoreRecommendations(crate::store_recs::load(&conn, &language).await));
+                    });
+                }
                 Some(Command::LoadCardSet { steam_id, app_id, foil }) => st.with_web(sink, move |web, sink| async move {
                     let result = crate::social::card_set(web.as_deref().ok(), steam_id, app_id, foil).await;
                     sink(Event::CardSet { steam_id, app_id, foil, result });
