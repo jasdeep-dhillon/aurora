@@ -55,7 +55,9 @@ fn engine(lib: &Lib) -> Result<*mut c_void, String> {
 /// IPC server in this process, which games then connect to.
 fn global_instance(lib: &Lib) -> Result<(*mut c_void, HSteamPipe, HSteamUser), String> {
     let e = engine(lib)?;
-    // SAFETY: slots and signatures from `layout`, checked against this build.
+    sys::verify_slot(e, layout::CREATE_STEAM_PIPE)?;
+    sys::verify_slot(e, layout::CREATE_GLOBAL_USER)?;
+    // SAFETY: slots and signatures from `layout`, verified inside steamclient code.
     let (pipe, user) = unsafe {
         let create_pipe: unsafe extern "C" fn(*mut c_void) -> HSteamPipe = slot(e, layout::CREATE_STEAM_PIPE);
         let create_global: unsafe extern "C" fn(*mut c_void, *mut HSteamPipe) -> HSteamUser =
@@ -93,20 +95,68 @@ mod user {
 /// only thing a parent needs to match on stdout.
 pub const READY: &str = "STEAMHOST-READY";
 
+fn zeroize_slice(buf: &mut [u8]) {
+    for b in buf {
+        // SAFETY: volatile write to valid mutable byte prevents dead-store elimination.
+        unsafe { std::ptr::write_volatile(b, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Refresh token held as a NUL-terminated buffer that volatile-zeroizes on use
+/// and on drop.
+struct SecretCString(Vec<u8>);
+
+impl SecretCString {
+    fn new(mut s: String) -> Result<Self, String> {
+        let has_nul = s.as_bytes().contains(&0);
+        let mut buf = Vec::with_capacity(s.len() + 1);
+        if !has_nul {
+            buf.extend_from_slice(s.as_bytes());
+            buf.push(0);
+        }
+        // SAFETY: all-zero bytes are valid UTF-8.
+        unsafe {
+            zeroize_slice(s.as_bytes_mut());
+        }
+        drop(s);
+        if has_nul {
+            zeroize_slice(&mut buf);
+            return Err("nul byte in refresh token".into());
+        }
+        Ok(Self(buf))
+    }
+
+    fn as_ptr(&self) -> *const c_char {
+        self.0.as_ptr().cast()
+    }
+
+    fn zeroize(&mut self) {
+        zeroize_slice(&mut self.0);
+    }
+}
+
+impl Drop for SecretCString {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
 /// Account name, refresh token and SteamID, read one per line from stdin —
 /// never argv/env, which other processes can read.
 fn read_credentials(
     lines: &mut impl Iterator<Item = std::io::Result<String>>,
-) -> Result<(CString, CString, u64), String> {
+) -> Result<(CString, SecretCString, u64), String> {
     let mut next = |what: &str| -> Result<String, String> {
         let l = lines.next().ok_or(format!("stdin: missing {what}"))?.map_err(|e| e.to_string())?;
         Ok(l.trim().to_owned())
     };
     let (account, token, steam_id) = (next("account name")?, next("refresh token")?, next("SteamID")?);
+    let token = SecretCString::new(token)?;
     let steam_id: u64 = steam_id.parse().map_err(|_| "SteamID must be a 64-bit number".to_string())?;
     Ok((
         CString::new(account).map_err(|e| e.to_string())?,
-        CString::new(token).map_err(|e| e.to_string())?,
+        token,
         steam_id,
     ))
 }
@@ -119,25 +169,32 @@ struct Session {
 
 /// Become the global instance and sign in with the given credentials, waiting
 /// until the engine reports logged-on (or timing out).
-fn sign_in(root: &Path, account: CString, token: CString, steam_id: u64) -> Result<Session, String> {
+fn sign_in(root: &Path, account: CString, mut token: SecretCString, steam_id: u64) -> Result<Session, String> {
     let lib = Lib::open(root)?;
     let (e, pipe, h_user) = global_instance(&lib)?;
-    // SAFETY: getter slot shaped (this, hUser, hPipe), see `layout`.
+    sys::verify_slot(e, user::GETTER)?;
+    // SAFETY: getter slot shaped (this, hUser, hPipe), verified in `steamclient`.
     let cu = unsafe {
         let get: unsafe extern "C" fn(*mut c_void, HSteamUser, HSteamPipe) -> *mut c_void = slot(e, user::GETTER);
         get(e, h_user, pipe)
     };
     if class_name(cu).as_deref() != Some(sys::USER_CLASS) {
-        return Err("GetIClientUser didn't return IClientUser: not the pinned build".into());
+        return Err("unsupported Steam build: GetIClientUser didn't return IClientUser".into());
     }
-    // SAFETY: IClientUser slots and signatures from `user`, checked against this build.
+    // Fail closed if any required IClientUser vtable slot (0..=SET_LOGIN_TOKEN)
+    // is null or outside steamclient's executable code segment.
+    sys::verify_vtable(cu, user::SET_LOGIN_TOKEN)?;
+    // SAFETY: IClientUser vtable slots 0..=SET_LOGIN_TOKEN verified above.
     unsafe {
         let set_token: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) = slot(cu, user::SET_LOGIN_TOKEN);
         set_token(cu, token.as_ptr(), account.as_ptr());
+    }
+    token.zeroize();
+    drop(token);
+    unsafe {
         let log_on: unsafe extern "C" fn(*mut c_void, u64) -> c_int = slot(cu, user::LOG_ON);
         eprintln!("LogOn -> EResult {}", log_on(cu, steam_id));
     }
-    drop(token);
     let logged_on: unsafe extern "C" fn(*mut c_void) -> bool = unsafe { slot(cu, user::B_LOGGED_ON) };
     let state: unsafe extern "C" fn(*mut c_void) -> c_int = unsafe { slot(cu, user::GET_LOGON_STATE) };
     let mut last = -1;
@@ -187,13 +244,15 @@ pub fn probe(root: &Path) -> Result<(), String> {
     let lib = Lib::open(root)?;
     let (e, pipe, user) = global_instance(&lib)?;
     for &i in layout::USER_GETTERS {
-        // SAFETY: lookup-only getter shaped (this, hUser, hPipe).
+        sys::verify_slot(e, i)?;
+        // SAFETY: lookup-only getter shaped (this, hUser, hPipe), slot verified.
         let f: unsafe extern "C" fn(*mut c_void, HSteamUser, HSteamPipe) -> *mut c_void = unsafe { slot(e, i) };
         let o = unsafe { f(e, user, pipe) };
         println!("slot {i:2} (user,pipe) -> {}", class_name(o).unwrap_or_else(|| format!("{o:?}")));
     }
     for &i in layout::PIPE_GETTERS {
-        // SAFETY: lookup-only getter shaped (this, hPipe).
+        sys::verify_slot(e, i)?;
+        // SAFETY: lookup-only getter shaped (this, hPipe), slot verified.
         let f: unsafe extern "C" fn(*mut c_void, HSteamPipe) -> *mut c_void = unsafe { slot(e, i) };
         let o = unsafe { f(e, pipe) };
         println!("slot {i:2} (pipe)      -> {}", class_name(o).unwrap_or_else(|| format!("{o:?}")));
@@ -216,4 +275,23 @@ pub fn client_test(root: &Path) -> Result<(), String> {
     let user = unsafe { connect(pipe) };
     println!("client user={user}");
     if user == 0 { Err("ConnectToGlobalUser refused".into()) } else { Ok(()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_cstring_zeroizes_bytes_immediately() {
+        let mut secret = SecretCString::new("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.secret".to_string()).unwrap();
+        assert_eq!(unsafe { std::ffi::CStr::from_ptr(secret.as_ptr()).to_str().unwrap() }, "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.secret");
+        secret.zeroize();
+        assert!(secret.0.iter().all(|&b| b == 0), "token buffer must be completely zeroed");
+    }
+
+    #[test]
+    fn verify_vtable_fails_closed_on_invalid_object() {
+        let err = sys::verify_vtable(std::ptr::null_mut(), user::SET_LOGIN_TOKEN).unwrap_err();
+        assert!(err.contains("unsupported Steam build"), "got: {err}");
+    }
 }
