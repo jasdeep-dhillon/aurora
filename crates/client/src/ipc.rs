@@ -51,18 +51,38 @@ impl Drop for Server {
     }
 }
 
-/// Hard-to-guess hex from the OS-seeded hasher keys, time and a counter.
-fn random_hex() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let mut out = String::new();
-    for _ in 0..2 {
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u64(N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
-        out.push_str(&format!("{:016x}", h.finish()));
+/// Generate `bytes * 2` lowercase hex characters from the OS CSPRNG.
+pub fn os_random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    #[cfg(windows)]
+    {
+        #[link(name = "advapi32")]
+        unsafe extern "system" {
+            fn SystemFunction036(buf: *mut u8, len: u32) -> u8;
+        }
+        let len = u32::try_from(buf.len()).expect("os_random_hex length overflows u32");
+        // SAFETY: RtlGenRandom (`SystemFunction036`) fills `len` bytes with CSPRNG entropy.
+        assert!(unsafe { SystemFunction036(buf.as_mut_ptr(), len) } != 0, "OS CSPRNG unavailable");
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut f = std::fs::File::open("/dev/urandom").expect("OS CSPRNG unavailable");
+        f.read_exact(&mut buf).expect("OS CSPRNG unavailable");
+    }
+    #[cfg(not(any(windows, unix)))]
+    compile_error!("os_random_hex requires Windows or Unix OS CSPRNG");
+    let mut out = String::with_capacity(bytes * 2);
+    for b in buf {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{b:02x}");
     }
     out
+}
+
+/// 128-bit cryptographically random hex token from the OS CSPRNG.
+fn random_hex() -> String {
+    os_random_hex(16)
 }
 
 impl Server {
@@ -142,7 +162,9 @@ impl Server {
     /// Queue an event for one launch only.
     pub fn push_to(&self, token: &str, event: GameEvent) {
         if let Some(slot) = self.tokens.lock().unwrap().get_mut(token) {
-            slot.events.push_back(event);
+            if slot.events.len() < 4096 {
+                slot.events.push_back(event);
+            }
             slot.notify.notify_one();
         }
     }
@@ -1272,12 +1294,27 @@ pub async fn http_request(method: i32, url: &str, headers: &[(String, String)], 
     if let Some((content_type, data)) = body {
         req = req.header("Content-Type", content_type).body(data);
     }
+    const MAX_HTTP_BODY: usize = 64 * 1024 * 1024;
     match req.send().await {
-        Ok(r) => {
+        Ok(mut r) => {
+            if r.content_length().is_some_and(|len| len > MAX_HTTP_BODY as u64) {
+                return Reply::HttpDone { status: 0, headers: Vec::new(), body: Vec::new(), timed_out: false };
+            }
             let status = r.status().as_u16() as i32;
             let headers = r.headers().iter().map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string())).collect();
-            let body = r.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
-            Reply::HttpDone { status, headers, body, timed_out: false }
+            let mut body = Vec::with_capacity(r.content_length().unwrap_or(0).min(1024 * 1024) as usize);
+            loop {
+                match r.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if body.len().saturating_add(chunk.len()) > MAX_HTTP_BODY {
+                            return Reply::HttpDone { status: 0, headers: Vec::new(), body: Vec::new(), timed_out: false };
+                        }
+                        body.extend_from_slice(&chunk);
+                    }
+                    Ok(None) => break Reply::HttpDone { status, headers, body, timed_out: false },
+                    Err(e) => break Reply::HttpDone { status: 0, headers: Vec::new(), body: Vec::new(), timed_out: e.is_timeout() },
+                }
+            }
         }
         Err(e) => Reply::HttpDone { status: 0, headers: Vec::new(), body: Vec::new(), timed_out: e.is_timeout() },
     }
@@ -1383,5 +1420,59 @@ mod tests {
         let env = protocol::Envelope { token: "t".into(), pid: 1, req: Request::StoreStats { stats: vec![(4, 1)], crc: 9, reset: false } };
         let back: protocol::Envelope = serde_json::from_str(&serde_json::to_string(&env).unwrap()).unwrap();
         assert!(matches!(back.req, Request::StoreStats { crc: 9, .. }));
+    }
+
+    #[test]
+    fn push_to_caps_queue_at_4096() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = rt.enter();
+        let (server, _rx) = Server::start();
+        let token = server.register(480);
+        assert_eq!(token.len(), 32);
+        assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+        for _ in 0..5000 {
+            server.push_to(&token, GameEvent::Signal { from: 1, data: Vec::new() });
+        }
+        let queued = server.tokens.lock().unwrap().get(&token).unwrap().events.len();
+        assert_eq!(queued, 4096, "push_to must cap queued events at 4096");
+
+        let rt2 = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt2.block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let srv = tokio::spawn(async move {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut req_buf = [0u8; 512];
+                let _ = s.read(&mut req_buf).await;
+                // Stream > 64 MiB chunked without Content-Length so streaming cap is exercised too!
+                let hdr = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                let _ = s.write_all(hdr.as_bytes()).await;
+                let chunk_payload = vec![b'x'; 64 * 1024];
+                let chunk_hdr = format!("{:x}\r\n", chunk_payload.len());
+                // 1025 * 64 KiB = 64 MiB + 64 KiB
+                for _ in 0..1025 {
+                    if s.write_all(chunk_hdr.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    if s.write_all(&chunk_payload).await.is_err() {
+                        return;
+                    }
+                    if s.write_all(b"\r\n").await.is_err() {
+                        return;
+                    }
+                }
+                let _ = s.write_all(b"0\r\n\r\n").await;
+            });
+            let reply = http_request(1, &format!("http://{addr}/big"), &[], &[], None, 5_000).await;
+            let _ = srv.await;
+            match reply {
+                Reply::HttpDone { status, body, .. } => {
+                    assert_eq!(status, 0, "oversized >64MiB HTTP response must fail closed");
+                    assert!(body.is_empty());
+                }
+                other => panic!("unexpected reply: {other:?}"),
+            }
+        });
     }
 }
