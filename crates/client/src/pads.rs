@@ -37,12 +37,8 @@ mod imp {
     unsafe extern "system" {
         fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
         fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
-        fn CreateFileMappingW(file: isize, attrs: *const c_void, protect: u32, size_hi: u32, size_lo: u32, name: *const u16) -> *mut c_void;
-        fn MapViewOfFile(map: *mut c_void, access: u32, off_hi: u32, off_lo: u32, bytes: usize) -> *mut c_void;
     }
     const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x8;
-    const PAGE_READWRITE: u32 = 0x4;
-    const FILE_MAP_ALL_ACCESS: u32 = 0xF001F;
     const INIT_GAMEPAD: u32 = 0x2000;
 
     type Gp = *mut c_void;
@@ -123,27 +119,17 @@ mod imp {
 
     /// The shared memory, created once for the app's lifetime.
     fn mapping() -> Option<(&'static Shared, &'static str)> {
-        static MAP: OnceLock<Option<(usize, String)>> = OnceLock::new();
-        let (addr, name) = MAP
+        static MAP: OnceLock<Option<shm::Shm>> = OnceLock::new();
+        let shm = MAP
             .get_or_init(|| {
-                let name = format!("Local\\sir-pads-{}", std::process::id());
-                let size = std::mem::size_of::<Shared>();
-                let h = unsafe { CreateFileMappingW(-1, std::ptr::null(), PAGE_READWRITE, 0, size as u32, wide(&name).as_ptr()) };
-                if h.is_null() {
+                let created = shm::Shm::create();
+                if created.is_none() {
                     tracing::warn!("controllers: couldn't create the shared memory");
-                    return None;
                 }
-                let view = unsafe { MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, size) };
-                if view.is_null() {
-                    return None;
-                }
-                // Zeroed by the system; the handle stays open for good.
-                let shared = unsafe { &*(view as *const Shared) };
-                shared.magic.store(shm::MAGIC, Ordering::Release);
-                Some((view as usize, name))
+                created
             })
             .as_ref()?;
-        Some((unsafe { &*(*addr as *const Shared) }, name.as_str()))
+        Some((shm.shared(), shm.name()))
     }
 
     /// Games using the pads right now.
