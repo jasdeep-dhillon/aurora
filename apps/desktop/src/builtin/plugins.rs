@@ -11,17 +11,33 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use ui::{Theme, icons, widgets as w};
 
+const MAX_ROW_DEPTH: usize = 8;
+
 pub struct Plugins {
     dir: PathBuf,
     data_dir: PathBuf,
     loaded: bool,
     list: Vec<Plugin>,
     broken: Vec<(PathBuf, String)>,
-    enabled: BTreeSet<String>,
+    enabled: BTreeMap<String, BTreeSet<Permission>>,
     /// Plugin waiting for the user to approve its permissions.
     consent: Option<String>,
     show_logs: Option<String>,
     seen: HashMap<SteamId, (bool, Option<AppId>, Option<String>)>,
+}
+
+fn parse_enabled(data: &str) -> BTreeMap<String, BTreeSet<Permission>> {
+    if let Ok(map) = serde_json::from_str::<BTreeMap<String, BTreeSet<Permission>>>(data) {
+        return map;
+    }
+    if let Ok(legacy) = serde_json::from_str::<BTreeSet<String>>(data) {
+        return legacy.into_iter().map(|id| (id, BTreeSet::new())).collect();
+    }
+    BTreeMap::new()
+}
+
+fn permissions_approved(manifest: &[Permission], approved: &BTreeSet<Permission>) -> bool {
+    manifest.iter().all(|p| approved.contains(p))
 }
 
 impl Plugins {
@@ -33,7 +49,7 @@ impl Plugins {
             loaded: false,
             list: Vec::new(),
             broken: Vec::new(),
-            enabled: BTreeSet::new(),
+            enabled: BTreeMap::new(),
             consent: None,
             show_logs: None,
             seen: HashMap::new(),
@@ -55,7 +71,7 @@ impl Plugins {
                 Err((path, e)) => self.broken.push((path, e.to_string())),
             }
         }
-        let ids: Vec<String> = self.enabled.iter().cloned().collect();
+        let ids: Vec<String> = self.enabled.keys().cloned().collect();
         for id in ids {
             self.start(&id);
         }
@@ -69,9 +85,18 @@ impl Plugins {
     }
 
     fn start(&mut self, id: &str) {
+        let Some(approved) = self.enabled.get(id).cloned() else { return };
         let storage = self.storage(id);
         if let Some(p) = self.list.iter_mut().find(|p| p.manifest.id == id) {
-            p.start(storage);
+            if permissions_approved(&p.manifest.permissions, &approved) {
+                p.start(&approved, storage);
+            } else {
+                p.stop();
+                self.enabled.remove(id);
+                if self.consent.is_none() {
+                    self.consent = Some(id.to_string());
+                }
+            }
         }
     }
 
@@ -206,7 +231,7 @@ impl Extension for Plugins {
                     ui.label(w::text(format!("{}  {e}", icons::WARNING), 13.0, t.danger));
                 }
                 ui.add_space(10.0);
-                render(ui, &t, ctx, &widgets, &mut clicked);
+                render(ui, &t, ctx, &widgets, &mut clicked, 0);
             });
         });
         if let Some(b) = clicked {
@@ -235,7 +260,7 @@ impl Extension for Plugins {
         let mut toggle_req: Option<(String, bool)> = None;
         for p in &self.list {
             let m = &p.manifest;
-            let on = self.enabled.contains(&m.id);
+            let on = self.enabled.get(&m.id).is_some_and(|ap| permissions_approved(&m.permissions, ap));
             w::card(&t).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -319,7 +344,7 @@ impl Extension for Plugins {
     }
 
     fn load(&mut self, data: &str) {
-        self.enabled = serde_json::from_str(data).unwrap_or_default();
+        self.enabled = parse_enabled(data);
     }
 }
 
@@ -363,7 +388,7 @@ impl Plugins {
         });
         match decision {
             Some(true) => {
-                self.enabled.insert(id.clone());
+                self.enabled.insert(id.clone(), perms.into_iter().collect());
                 self.start(&id);
                 self.consent = None;
             }
@@ -374,7 +399,7 @@ impl Plugins {
     }
 }
 
-fn render(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, widgets: &[Widget], clicked: &mut Option<String>) {
+fn render(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, widgets: &[Widget], clicked: &mut Option<String>, depth: usize) {
     for wd in widgets {
         match wd {
             Widget::Heading(s) => {
@@ -405,7 +430,9 @@ fn render(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, widgets: &[Widget], clicked: &m
                 w::progress(ui, t, *v, width);
             }
             Widget::Row(items) => {
-                ui.horizontal_wrapped(|ui| render(ui, t, ctx, items, clicked));
+                if depth < MAX_ROW_DEPTH {
+                    ui.horizontal_wrapped(|ui| render(ui, t, ctx, items, clicked, depth + 1));
+                }
             }
             Widget::Game(id) => {
                 let name = ctx.state.app_name(*id).map(String::from).or_else(|| ctx.local.games.iter().find(|g| g.app_id == *id).map(|g| g.name.clone())).unwrap_or_else(|| t!("App {id}", id = id));
@@ -419,5 +446,79 @@ fn render(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, widgets: &[Widget], clicked: &m
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_host() -> Plugins {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!("sir-desktop-plugins-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        Plugins {
+            dir: base.join("plugins"),
+            data_dir: base.join("plugin-data"),
+            loaded: false,
+            list: Vec::new(),
+            broken: Vec::new(),
+            enabled: BTreeMap::new(),
+            consent: None,
+            show_logs: None,
+            seen: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_json_only_auto_enables_zero_permission_plugins() {
+        let mut host = temp_host();
+        let zdir = host.dir.join("zero");
+        let pdir = host.dir.join("priv");
+        std::fs::create_dir_all(&zdir).unwrap();
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(zdir.join("plugin.toml"), "id = \"zero\"\nname = \"Zero\"\n").unwrap();
+        std::fs::write(zdir.join("main.rhai"), "fn on_load() { log(\"ok\"); }").unwrap();
+        std::fs::write(pdir.join("plugin.toml"), "id = \"priv\"\nname = \"Priv\"\npermissions = [\"chat.write\"]\n").unwrap();
+        std::fs::write(pdir.join("main.rhai"), "fn on_load() { log(\"should-not-run\"); }").unwrap();
+
+        host.load("[\"zero\", \"priv\"]");
+        host.ensure_loaded();
+
+        let zero = host.list.iter().find(|p| p.manifest.id == "zero").unwrap();
+        assert!(zero.is_running(), "0-permission plugin may keep legacy enablement");
+        let priv_p = host.list.iter().find(|p| p.manifest.id == "priv").unwrap();
+        assert!(!priv_p.is_running(), "privileged plugin must not start from legacy BTreeSet JSON");
+        assert!(!host.enabled.contains_key("priv"));
+        assert_eq!(host.consent.as_deref(), Some("priv"));
+    }
+
+    #[test]
+    fn permission_escalation_on_reload_requires_fresh_consent() {
+        let mut host = temp_host();
+        let pdir = host.dir.join("escalate");
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(pdir.join("plugin.toml"), "id = \"escalate\"\nname = \"Esc\"\npermissions = [\"notifications\"]\n").unwrap();
+        std::fs::write(pdir.join("main.rhai"), "fn on_load() { notify(\"hi\"); }").unwrap();
+
+        host.load("{\"escalate\":[\"notifications\"]}");
+        host.ensure_loaded();
+        assert!(host.list.iter().find(|p| p.manifest.id == "escalate").unwrap().is_running());
+
+        // Manifest adds a new permission before reload.
+        std::fs::write(
+            pdir.join("plugin.toml"),
+            "id = \"escalate\"\nname = \"Esc\"\npermissions = [\"notifications\", \"chat.write\"]\n",
+        )
+        .unwrap();
+        host.loaded = false;
+        host.consent = None;
+        host.ensure_loaded();
+
+        let p = host.list.iter().find(|p| p.manifest.id == "escalate").unwrap();
+        assert!(!p.is_running(), "escalated plugin must stop and require fresh consent");
+        assert!(!host.enabled.contains_key("escalate"));
+        assert_eq!(host.consent.as_deref(), Some("escalate"));
     }
 }
