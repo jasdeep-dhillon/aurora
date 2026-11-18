@@ -234,7 +234,7 @@ impl Profile {
             p.text(pos2(x, r.top() + 42.0), Align2::LEFT_CENTER, sub, w::font(12.5), t.text_dim);
             p.text(pos2(r.right() - 12.0, r.center().y), Align2::RIGHT_CENTER, icons::EXTERNAL, w::font(12.0), t.text_faint);
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t!("Opens in your browser")).clicked() {
-                let _ = open::that_detached(&g.url);
+                crate::links::open_http(&g.url);
             }
         }
     }
@@ -270,7 +270,7 @@ fn review_card(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, r: &model::UserReview) {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if !r.url.is_empty() && w::icon_button(ui, t, icons::EXTERNAL, t!("Open on Steam"), false, 0).clicked() {
-                            let _ = open::that_detached(&r.url);
+                            crate::links::open_http(&r.url);
                         }
                     });
                 });
