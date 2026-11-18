@@ -171,8 +171,8 @@ pub struct H264 {
 
 impl H264 {
     pub fn new(width: u32, height: u32) -> Result<Self> {
-        if width == 0 || height == 0 {
-            return Err("unknown picture size".into());
+        if width == 0 || height == 0 || width > crate::mp4::MAX_DIM || height > crate::mp4::MAX_DIM {
+            return Err("invalid picture size".into());
         }
         ffmpeg().ok_or("FFmpeg isn't installed")?;
         // NV12 needs even sizes; ffmpeg scales to exactly this.
@@ -383,6 +383,12 @@ mod tests {
         assert!(!has_fps_mode("ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright"));
         assert!(!has_fps_mode("ffmpeg version 5.0.1"));
         assert!(has_fps_mode("ffmpeg version N-118000-gabcdef Copyright"));
+    }
+
+    #[test]
+    fn rejects_oversized_dimensions() {
+        assert!(H264::new(8192, 4096).is_err());
+        assert!(H264::new(4096, 4097).is_err());
     }
 
     /// A real clip (High profile with B-frames, AAC-LC), demuxed by our own
