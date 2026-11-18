@@ -200,42 +200,92 @@ pub fn uninstall(game: &InstalledGame) -> Result<(), String> {
 pub fn uninstall_with(game: &InstalledGame, progress: &Progress) -> Result<(), String> {
     let common = game.library.join("steamapps").join("common");
     let dir = &game.install_dir;
-    let inside = dir.starts_with(&common) && dir != &common && dir.parent() == Some(common.as_path());
-    if !inside {
-        return Err(format!("refusing to delete {}: not a game folder in {}", dir.display(), common.display()));
-    }
-    if dir.exists() {
-        // List the files first, so the total is known before deleting.
-        let mut files = Vec::new();
-        let mut stack = vec![dir.clone()];
-        while let Some(d) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&d) else { continue };
-            for e in entries.flatten() {
-                match e.file_type() {
-                    Ok(ft) if ft.is_dir() => stack.push(e.path()),
-                    Ok(_) => files.push((e.path(), e.metadata().map(|m| m.len()).unwrap_or(0))),
-                    Err(_) => {}
+    crate::validate_common_child(&common, dir)?;
+
+    match fs::symlink_metadata(&common) {
+        Ok(cm) => {
+            if crate::is_symlink_or_reparse(&cm) || !cm.is_dir() {
+                return Err(format!("refusing to delete {}: {} is not a real directory", dir.display(), common.display()));
+            }
+            match fs::symlink_metadata(dir) {
+                Ok(dm) if crate::is_symlink_or_reparse(&dm) => {
+                    // Never walk or recurse into a symlink/junction target: unlink only the link itself.
+                    crate::unlink_symlink_or_junction(dir, &dm)
+                        .map_err(|e| format!("could not unlink {}: {e}", dir.display()))?;
                 }
+                Ok(dm) if dm.is_dir() => {
+                    let canon_common = common
+                        .canonicalize()
+                        .map_err(|e| format!("could not resolve {}: {e}", common.display()))?;
+                    let canon_dir = dir
+                        .canonicalize()
+                        .map_err(|e| format!("could not resolve {}: {e}", dir.display()))?;
+                    if canon_dir == canon_common || canon_dir.parent() != Some(canon_common.as_path()) {
+                        return Err(format!(
+                            "refusing to delete {}: canonical path escapes {}",
+                            dir.display(),
+                            common.display()
+                        ));
+                    }
+
+                    // List the files first, so the total is known before deleting.
+                    let mut files = Vec::new();
+                    let mut stack = vec![dir.clone()];
+                    while let Some(d) = stack.pop() {
+                        let Ok(dm) = fs::symlink_metadata(&d) else { continue };
+                        if crate::is_symlink_or_reparse(&dm) || !dm.is_dir() {
+                            continue;
+                        }
+                        let Ok(entries) = fs::read_dir(&d) else { continue };
+                        for e in entries.flatten() {
+                            let p = e.path();
+                            let Ok(em) = fs::symlink_metadata(&p) else { continue };
+                            if crate::is_symlink_or_reparse(&em) {
+                                files.push((p, 0, true));
+                            } else if em.is_dir() {
+                                stack.push(p);
+                            } else {
+                                files.push((p, em.len(), false));
+                            }
+                        }
+                    }
+                    progress.total_bytes.store(files.iter().map(|f| f.1).sum::<u64>().max(1), Ordering::Relaxed);
+                    for (path, size, is_link) in files {
+                        if is_link {
+                            if let Ok(m) = fs::symlink_metadata(&path)
+                                && crate::is_symlink_or_reparse(&m)
+                            {
+                                let _ = crate::unlink_symlink_or_junction(&path, &m);
+                            }
+                        } else if fs::remove_file(&path).is_err() {
+                            // Read-only files: clear the flag (only if not a symlink) and try again.
+                            if let Ok(m) = fs::symlink_metadata(&path)
+                                && !crate::is_symlink_or_reparse(&m)
+                            {
+                                let mut perms = m.permissions();
+                                #[allow(clippy::permissions_set_readonly_false)]
+                                perms.set_readonly(false);
+                                let _ = fs::set_permissions(&path, perms);
+                                let _ = fs::remove_file(&path);
+                            }
+                        }
+                        progress.done_bytes.fetch_add(size, Ordering::Relaxed);
+                    }
+                    fs::remove_dir_all(dir).map_err(|e| format!("could not delete {}: {e}", dir.display()))?;
+                }
+                Ok(_) => {
+                    return Err(format!("refusing to delete {}: not a directory", dir.display()));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("could not inspect {}: {e}", dir.display())),
             }
         }
-        progress.total_bytes.store(files.iter().map(|f| f.1).sum::<u64>().max(1), Ordering::Relaxed);
-        for (path, size) in files {
-            if fs::remove_file(&path).is_err() {
-                // Read-only files: clear the flag and try again.
-                if let Ok(m) = fs::metadata(&path) {
-                    let mut perms = m.permissions();
-                    #[allow(clippy::permissions_set_readonly_false)]
-                    perms.set_readonly(false);
-                    let _ = fs::set_permissions(&path, perms);
-                }
-                let _ = fs::remove_file(&path);
-            }
-            progress.done_bytes.fetch_add(size, Ordering::Relaxed);
-        }
-        fs::remove_dir_all(dir).map_err(|e| format!("could not delete {}: {e}", dir.display()))?;
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("could not inspect {}: {e}", common.display())),
     }
+
     let manifest = manifest_file(game);
-    if manifest.exists() {
+    if fs::symlink_metadata(&manifest).is_ok() {
         fs::remove_file(&manifest).map_err(|e| format!("could not delete {}: {e}", manifest.display()))?;
     }
     Ok(())
@@ -278,6 +328,69 @@ mod tests {
             last_update_bytes: None,
         };
         assert!(uninstall(&g).is_err());
+    }
+
+    #[test]
+    fn refuses_dotdot_traversal_and_unlinks_symlink_without_deleting_target() {
+        let lib = std::env::temp_dir().join(format!("sir-uninstall-sec-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&lib);
+        let apps = lib.join("steamapps");
+        let common = apps.join("common");
+        let compat = apps.join("compatdata");
+        fs::create_dir_all(&common).unwrap();
+        fs::create_dir_all(&compat).unwrap();
+        let save = compat.join("precious.sav");
+        fs::write(&save, b"important save").unwrap();
+
+        for bad_dir in [common.join(".."), common.join("."), common.join("sub").join("..")] {
+            let g = InstalledGame {
+                app_id: 99,
+                name: "Evil".into(),
+                install_dir: bad_dir.clone(),
+                library: lib.clone(),
+                size_on_disk: 0,
+                last_updated: None,
+                last_played: None,
+                playtime_minutes: None,
+                state: model::InstallState::Installed,
+                last_update_bytes: None,
+            };
+            assert!(uninstall(&g).is_err(), "accepted {bad_dir:?}");
+            assert!(save.exists(), "deleted steamapps/compatdata via {bad_dir:?}!");
+            assert!(common.exists(), "deleted steamapps/common via {bad_dir:?}!");
+        }
+
+        #[cfg(unix)]
+        {
+            let outside = std::env::temp_dir().join(format!("sir-uninstall-ext-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&outside);
+            fs::create_dir_all(&outside).unwrap();
+            let victim = outside.join("victim.txt");
+            fs::write(&victim, b"do not delete").unwrap();
+            let sym_game = common.join("SymGame");
+            std::os::unix::fs::symlink(&outside, &sym_game).unwrap();
+            fs::write(apps.join("appmanifest_77.acf"), "\"AppState\" {}").unwrap();
+
+            let g = InstalledGame {
+                app_id: 77,
+                name: "SymGame".into(),
+                install_dir: sym_game.clone(),
+                library: lib.clone(),
+                size_on_disk: 0,
+                last_updated: None,
+                last_played: None,
+                playtime_minutes: None,
+                state: model::InstallState::Installed,
+                last_update_bytes: None,
+            };
+            uninstall(&g).unwrap();
+            assert!(victim.exists(), "uninstall followed top-level symlink and deleted target!");
+            assert!(fs::symlink_metadata(&sym_game).is_err(), "symlink itself should be unlinked");
+            assert!(!apps.join("appmanifest_77.acf").exists());
+            let _ = fs::remove_dir_all(&outside);
+        }
+
+        let _ = fs::remove_dir_all(&lib);
     }
 }
 
@@ -346,17 +459,34 @@ fn parse_workshop_items(game: &InstalledGame, ws: &Path, text: Option<String>) -
 /// you also unsubscribe).
 pub fn delete_workshop_files(item: &WorkshopItem) -> Result<(), String> {
     // Only ever delete <library>/steamapps/workshop/content/<app>/<item>.
+    if !crate::has_only_normal_components(&item.folder) {
+        return Err("unexpected workshop folder".into());
+    }
     let named_right = item.folder.file_name().is_some_and(|n| n.to_string_lossy() == item.id.to_string());
-    let in_content = item
-        .folder
+    let Some(app_dir) = item.folder.parent() else {
+        return Err("unexpected workshop folder".into());
+    };
+    let in_content = app_dir
         .parent()
-        .and_then(|p| p.parent())
         .is_some_and(|p| p.file_name().is_some_and(|n| n == "content") && p.parent().is_some_and(|w| w.file_name().is_some_and(|n| n == "workshop")));
     if !named_right || !in_content {
         return Err("unexpected workshop folder".into());
     }
-    if item.folder.exists() {
-        fs::remove_dir_all(&item.folder).map_err(|e| e.to_string())?;
+    match fs::symlink_metadata(&item.folder) {
+        Ok(m) if crate::is_symlink_or_reparse(&m) => {
+            crate::unlink_symlink_or_junction(&item.folder, &m).map_err(|e| e.to_string())?;
+        }
+        Ok(m) if m.is_dir() => {
+            let canon_parent = app_dir.canonicalize().map_err(|e| e.to_string())?;
+            let canon_item = item.folder.canonicalize().map_err(|e| e.to_string())?;
+            if canon_item == canon_parent || canon_item.parent() != Some(canon_parent.as_path()) {
+                return Err("workshop folder escapes content directory".into());
+            }
+            fs::remove_dir_all(&item.folder).map_err(|e| e.to_string())?;
+        }
+        Ok(_) => return Err("unexpected workshop folder".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
     }
     Ok(())
 }
