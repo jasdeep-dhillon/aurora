@@ -47,7 +47,7 @@ pub mod state;
 pub mod store;
 
 pub use auth::Guard;
-pub use launch::{LaunchMode, STEAM_DRM, anti_cheat_headless, mode as launch_mode, mode_cached as launch_mode_cached, mode_peek as launch_mode_peek, proton_builds, proton_override, app_proton, app_protons, default_proton, native_build, NATIVE, DEFAULT_PROTON, set_app_proton, set_app_protons, set_anti_cheat_headless, set_prefer_official as launch_through_steam, set_proton_override, set_steam_setting, steam_setting, steam_settings_locked, SteamSetting, apply_steam_prefs, gameplay_downloads, set_gameplay_downloads, spawn_non_steam};
+pub use launch::{LaunchArgs, LaunchMode, STEAM_DRM, anti_cheat_headless, mode as launch_mode, mode_cached as launch_mode_cached, mode_peek as launch_mode_peek, proton_builds, proton_override, app_proton, app_protons, default_proton, native_build, NATIVE, DEFAULT_PROTON, safe_connect_args, set_app_proton, set_app_protons, set_anti_cheat_headless, set_prefer_official as launch_through_steam, set_proton_override, set_steam_setting, steam_setting, steam_settings_locked, SteamSetting, apply_steam_prefs, gameplay_downloads, set_gameplay_downloads, spawn_non_steam};
 pub use state::State;
 pub use store::SavedAccount;
 
@@ -79,16 +79,16 @@ pub enum Command {
     ForgetAccount { account: String },
     SetPersonaState(PersonaState),
     /// Start an installed game from its folder.
-    Launch { app_id: AppId, install_dir: PathBuf, args: String },
+    Launch { app_id: AppId, install_dir: PathBuf, args: LaunchArgs },
     /// Start a game without the Steam Cloud check (after a conflict, "play anyway").
-    LaunchWithoutCloud { app_id: AppId, install_dir: PathBuf, args: String },
+    LaunchWithoutCloud { app_id: AppId, install_dir: PathBuf, args: LaunchArgs },
     /// Stop compiling a game's shaders and start it now.
     SkipShaderCompile { app_id: AppId },
     /// Where Steam keeps `userdata`, and games with Steam Cloud turned off.
     CloudSettings { steam_root: Option<PathBuf>, disabled: Vec<AppId> },
     /// Sync a game's saves now. Conflicts listed in `keep_local` are uploaded,
     /// in `keep_cloud` downloaded. `then_launch` starts the game afterwards.
-    CloudSync { app_id: AppId, install_dir: PathBuf, mode: cloud::Mode, keep_local: Vec<String>, keep_cloud: Vec<String>, then_launch: Option<String> },
+    CloudSync { app_id: AppId, install_dir: PathBuf, mode: cloud::Mode, keep_local: Vec<String>, keep_cloud: Vec<String>, then_launch: Option<LaunchArgs> },
     /// Delete files from a game's Steam Cloud (`CloudFile::raw` names),
     /// then report the cloud again.
     CloudDelete { app_id: AppId, install_dir: PathBuf, names: Vec<String> },
@@ -296,7 +296,7 @@ pub enum Event {
     CloudSyncing { app_id: AppId },
     /// Result of a Steam Cloud sync. `held_launch` is set when the game
     /// wasn't started because of conflicts (its launch arguments).
-    CloudReport { report: model::CloudReport, held_launch: Option<String> },
+    CloudReport { report: model::CloudReport, held_launch: Option<LaunchArgs> },
     GameStopped { app_id: AppId },
     /// A game was stopped because its Steam DRM refused Aurora's
     /// steamclient; Play it again (it now starts on Valve's engine).

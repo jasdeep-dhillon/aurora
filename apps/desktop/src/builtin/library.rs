@@ -57,7 +57,7 @@ enum Dialog {
     Uninstall,
     /// One-time notice before the first Steam-DRM game launches: it starts
     /// through a background Steam instance. Play confirms and launches.
-    DrmNotice { id: AppId, install_dir: PathBuf, args: String },
+    DrmNotice { id: AppId, install_dir: PathBuf, args: client::LaunchArgs },
 }
 
 /// A Steam-DRM (SteamStub) game: it starts through a background Steam instance
@@ -113,7 +113,7 @@ struct Collection {
 /// A launch held back because saves changed both here and in Steam Cloud.
 struct CloudHold {
     app: AppId,
-    args: String,
+    args: client::LaunchArgs,
     report: model::CloudReport,
 }
 
@@ -330,7 +330,7 @@ impl Extension for Library {
             client::Event::RelaunchForSteamDrm { app_id } => {
                 let Some(g) = ctx.local.games.iter().find(|g| g.app_id == *app_id).cloned() else { return };
                 ctx.toast(t!("{name} uses Steam DRM: starting it again through Steam", name = g.name.clone()));
-                let args = self.games.get(app_id).map(|s| s.args.clone()).unwrap_or_default();
+                let args = client::LaunchArgs::user(self.games.get(app_id).map(|s| s.args.clone()).unwrap_or_default());
                 self.launch_or_notice(ctx, *app_id, g.install_dir, args);
             }
             client::Event::SteamCollections(Ok(list)) => self.merge_steam_collections(list),
@@ -891,7 +891,7 @@ impl Library {
         match act {
             MenuAct::Play => {
                 if let Some(g) = local {
-                    let args = self.games.get(&id).map(|s| s.args.clone()).unwrap_or_default();
+                    let args = client::LaunchArgs::user(self.games.get(&id).map(|s| s.args.clone()).unwrap_or_default());
                     self.launch_or_notice(ctx, id, g.install_dir.clone(), args);
                 }
             }
@@ -1672,7 +1672,7 @@ impl Library {
                             Some(g) => {
                                 let r = w::button(ui, t, Some(icons::PLAY), t!("Play"), w::Kind::Play, w::Size::Lg);
                                 if r.clicked() {
-                                    let args = self.games.get(&id).map(|s| s.args.clone()).unwrap_or_default();
+                                    let args = client::LaunchArgs::user(self.games.get(&id).map(|s| s.args.clone()).unwrap_or_default());
                                     self.launch_or_notice(ctx, id, g.install_dir.clone(), args);
                                 }
                             }
@@ -2170,7 +2170,7 @@ impl Library {
     /// The game's main button, like Steam's: Play, Update, or what's running.
     /// Start a game, or — the first time a Steam-DRM game is launched — show
     /// the one-time notice about the background Steam instance first.
-    fn launch_or_notice(&mut self, ctx: &mut Ctx, id: AppId, install_dir: PathBuf, args: String) {
+    fn launch_or_notice(&mut self, ctx: &mut Ctx, id: AppId, install_dir: PathBuf, args: client::LaunchArgs) {
         let is_drm = ctx.state.apps.as_ref().and_then(|a| a.get(&id)).is_some_and(|o| is_steam_drm(&client::launch_mode_cached(o, &install_dir)));
         let acked = self.flags.as_ref().is_some_and(|f| f.lock().unwrap().drm_host_ack);
         if is_drm && !acked {
@@ -2198,7 +2198,7 @@ impl Library {
                 self.queue_install(ctx, id, Some(g.library.clone()));
             }
         } else if w::button(ui, t, Some(icons::PLAY), t!("Play"), w::Kind::Play, w::Size::Lg).clicked() {
-            let args = self.games.get(&id).map(|s| s.args.clone()).unwrap_or_default();
+            let args = client::LaunchArgs::user(self.games.get(&id).map(|s| s.args.clone()).unwrap_or_default());
             self.launch_or_notice(ctx, id, g.install_dir.clone(), args);
         }
     }

@@ -347,17 +347,44 @@ pub fn steamclient_dll(is64: bool) -> Option<PathBuf> {
     candidates.into_iter().find(|p| pe_is_64bit(p) == Some(is64))
 }
 
-pub fn spawn(app: &OwnedApp, install_dir: &Path, extra_args: &str) -> Result<Child, String> {
-    let opts = UserOptions::parse(extra_args);
-    finish(app, install_dir, &opts, command(app, install_dir, &opts)?).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+/// Arguments for starting an installed game: `user` comes from the player's
+/// local Launch Options (eligible for `VAR=val` and `%command%` wrappers),
+/// while `connect` comes from an untrusted remote invite, link, or Rich
+/// Presence and is strictly validated by [`safe_connect_args`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LaunchArgs {
+    pub user: String,
+    pub connect: String,
+}
+
+impl LaunchArgs {
+    pub fn user(user: impl Into<String>) -> Self {
+        Self { user: user.into(), connect: String::new() }
+    }
+
+    pub fn connect(connect: impl Into<String>) -> Self {
+        Self { user: String::new(), connect: connect.into() }
+    }
+}
+
+/// Validate untrusted remote `connect` arguments fail-closed before launching.
+pub fn safe_connect_args(connect: &str) -> Result<Vec<String>, String> {
+    model::safe_connect_tokens(connect).map_err(|why| format!("refusing launch: {why}"))
+}
+
+pub fn spawn(app: &OwnedApp, install_dir: &Path, args: &LaunchArgs) -> Result<Child, String> {
+    let connect = safe_connect_args(&args.connect)?;
+    let opts = UserOptions::parse(&args.user);
+    finish(app, install_dir, &opts, command(app, install_dir, &opts, &connect)?).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
 }
 
 /// Start a game with our steamclient: environment like a Steam launch, plus
 /// the pipe and token for the DLL. The registry swap must be in place.
 /// `pads` names the shared memory with the controllers XInput can't see.
-pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, extra_args: &str, ipc_env: &str, account: &str, pads: Option<&str>) -> Result<Child, String> {
-    let opts = UserOptions::parse(extra_args);
-    let mut cmd = command(app, install_dir, &opts)?;
+pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, args: &LaunchArgs, ipc_env: &str, account: &str, pads: Option<&str>) -> Result<Child, String> {
+    let connect = safe_connect_args(&args.connect)?;
+    let opts = UserOptions::parse(&args.user);
+    let mut cmd = command(app, install_dir, &opts, &connect)?;
     let id = app.app_id.to_string();
     cmd.env(crate::ipc::protocol::ENV_IPC, ipc_env)
         .env("SteamOverlayGameId", &id)
@@ -449,11 +476,11 @@ fn finish(app: &OwnedApp, install_dir: &Path, opts: &UserOptions, cmd: Command) 
 
 /// The game's own command plus the player's arguments; their variables and
 /// wrapper come last, with `UserOptions::wrap`.
-fn command(app: &OwnedApp, install_dir: &Path, opts: &UserOptions) -> Result<Command, String> {
+fn command(app: &OwnedApp, install_dir: &Path, opts: &UserOptions, connect: &[String]) -> Result<Command, String> {
     #[cfg(not(windows))]
     {
         let mut cmd = linux::plan(app, install_dir)?.command(app, install_dir);
-        cmd.args(&opts.args);
+        cmd.args(&opts.args).args(connect);
         return Ok(cmd);
     }
     #[allow(unreachable_code)]
@@ -474,6 +501,7 @@ fn command(app: &OwnedApp, install_dir: &Path, opts: &UserOptions) -> Result<Com
     let mut cmd = Command::new(&exe);
     cmd.args(split_args(&opt.arguments))
         .args(&opts.args)
+        .args(connect)
         .current_dir(cwd)
         .env("SteamAppId", app.app_id.to_string())
         .env("SteamGameId", app.app_id.to_string());
@@ -916,7 +944,8 @@ fn wait_until(limit: Duration, mut f: impl FnMut() -> bool) -> bool {
 /// Steam signs in to it by itself when it remembers it. With `offline`,
 /// Steam starts in its own offline mode (if it isn't running already).
 /// Errors are for the player to read.
-pub fn run_through_steam(app_id: AppId, args: &str, steam_id: u64, offline: bool, started: impl FnOnce()) -> Result<(), String> {
+pub fn run_through_steam(app_id: AppId, args: &LaunchArgs, steam_id: u64, offline: bool, started: impl FnOnce()) -> Result<(), String> {
+    let connect = safe_connect_args(&args.connect)?;
     swap_restore_now();
     // However this ends, Steam's sign-in settings go back once it closes.
     struct RestoreLogin;
@@ -951,12 +980,12 @@ pub fn run_through_steam(app_id: AppId, args: &str, steam_id: u64, offline: bool
     restore_login_user();
     // Steam starts the game itself: it only takes arguments, its own launch
     // options (Properties in Steam) do the rest.
-    let opts = UserOptions::parse(args);
+    let opts = UserOptions::parse(&args.user);
     if !opts.args_only() {
         tracing::warn!("launch options: variables and wrappers don't apply when the official Steam client starts the game; set them in Steam's launch options");
     }
     let mut cmd = Command::new(&exe);
-    cmd.arg("-applaunch").arg(app_id.to_string()).args(&opts.args);
+    cmd.arg("-applaunch").arg(app_id.to_string()).args(&opts.args).args(&connect);
     quiet(&mut cmd).spawn().map_err(|e| format!("Couldn't ask Steam to start the game: {e}"))?;
     // Steam may update the game first; give it a while.
     if !wait_until(Duration::from_secs(600), || app_running(app_id)) {
@@ -1131,7 +1160,7 @@ const STEAMHOST_READY: &str = "STEAMHOST-READY";
 pub fn run_through_host(
     app: &OwnedApp,
     install_dir: &Path,
-    args: &str,
+    args: &LaunchArgs,
     account: &str,
     token: &str,
     steam_id: u64,
@@ -1140,6 +1169,7 @@ pub fn run_through_host(
     use std::io::{BufRead, BufReader, Write};
     use std::sync::mpsc;
 
+    let connect = safe_connect_args(&args.connect)?;
     let bin = steamhost_bin().ok_or("the steamhost helper is missing")?;
     let root = local::find_steam_root().ok_or("no Steam install found for the headless host")?;
 
@@ -1211,7 +1241,7 @@ pub fn run_through_host(
     // Launch the game through Proton with lsteamclient ON (the default), so the
     // game's steamclient reaches the host. `command` already points
     // STEAM_COMPAT_CLIENT_INSTALL_PATH at the real Steam root.
-    let game = spawn_for_host(app, install_dir, args, account);
+    let game = spawn_for_host(app, install_dir, &args.user, &connect, account);
     let mut child = match game {
         Ok(c) => c,
         Err(e) => {
@@ -1236,9 +1266,9 @@ pub fn run_through_host(
 /// The game launch for the headless-host path: the normal command (Proton on
 /// Linux, with lsteamclient left enabled) plus the `Steam*` environment a
 /// game expects.
-fn spawn_for_host(app: &OwnedApp, install_dir: &Path, args: &str, account: &str) -> Result<Child, String> {
-    let opts = UserOptions::parse(args);
-    let mut cmd = command(app, install_dir, &opts)?;
+fn spawn_for_host(app: &OwnedApp, install_dir: &Path, user_args: &str, connect: &[String], account: &str) -> Result<Child, String> {
+    let opts = UserOptions::parse(user_args);
+    let mut cmd = command(app, install_dir, &opts, connect)?;
     let id = app.app_id.to_string();
     cmd.env("SteamOverlayGameId", &id)
         .env("SteamClientLaunch", "1")
@@ -2746,6 +2776,107 @@ mod tests {
         assert_eq!(pe_is_64bit(&exe), Some(cfg!(target_pointer_width = "64")));
         assert_eq!(pe_is_64bit(Path::new("Cargo.toml")), None);
     }
+
+    #[test]
+    fn safe_connect_args_allowlist() {
+        assert_eq!(safe_connect_args("").unwrap(), Vec::<String>::new());
+        assert_eq!(safe_connect_args("   ").unwrap(), Vec::<String>::new());
+        assert_eq!(safe_connect_args("+connect_lobby 109775241000000001").unwrap(), words(&["+connect_lobby", "109775241000000001"]));
+        assert_eq!(safe_connect_args("+invite 30095787509687845").unwrap(), words(&["+invite", "30095787509687845"]));
+        assert_eq!(safe_connect_args("+connect 192.168.1.10:27015").unwrap(), words(&["+connect", "192.168.1.10:27015"]));
+        assert_eq!(safe_connect_args("+connect [2001:db8::1]:27015 +password s3cr3t_pw").unwrap(), words(&["+connect", "[2001:db8::1]:27015", "+password", "s3cr3t_pw"]));
+        assert_eq!(safe_connect_args("+connect play.example-srv_1.com:27015").unwrap(), words(&["+connect", "play.example-srv_1.com:27015"]));
+
+        for bad in [
+            "LD_PRELOAD=/tmp/evil.so /bin/sh %command%",
+            "%command%",
+            "MANGOHUD=1",
+            "--gpu-launcher=/bin/sh",
+            "-mono-assembly-path=/tmp/evil",
+            "+exec autoexec.cfg",
+            "+connect -evil:27015",
+            "+connect +evil:27015",
+            "+connect 1.2.3.4:27015 --gpu-launcher=calc",
+            "+connect 1.2.3.4:27015 +exec evil",
+            "+connect 1.2.3.4:27015 %command%",
+            "+connect 1.2.3.4:27015 +password",
+            "+connect 1.2.3.4:27015 +password -flag",
+            "+connect 1.2.3.4:27015 +password +exec",
+            "+connect 1.2.3.4:27015 +password %command%",
+            "+connect 1.2.3.4:27015 +password a\nb",
+            "+connect 1.2.3.4:27015 +password a\"+exec",
+            "+connect 1.2.3.4:27015 +password a;quit",
+            "+connect 1.2.3.4:27015 +password pw extra",
+            "+password secret",
+            "+connect_lobby +123",
+            "+connect_lobby -1",
+            "+connect_lobby abc",
+            "+connect_lobby 99999999999999999999999",
+            "+invite +123",
+            "+invite 30095787509687845 -launchsource2",
+            "+connect\t1.2.3.4:27015",
+        ] {
+            assert!(safe_connect_args(bad).is_err(), "expected rejection for {bad:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invite_connect_args_cannot_inject_wrapper_or_flags() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sir-aur01-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let game = dir.join("game.sh");
+        let out = dir.join("out");
+        let pwned = dir.join("pwned");
+        let evil = dir.join("evil.sh");
+        let good_wrap = dir.join("good_wrap.sh");
+        std::fs::write(&game, format!("#!/bin/sh\necho \"$SAFE_VAR|$WRAPPED|$*\" > '{}'\n", out.display())).unwrap();
+        std::fs::write(&evil, format!("#!/bin/sh\necho pwned > '{}'\n", pwned.display())).unwrap();
+        std::fs::write(&good_wrap, "#!/bin/sh\nWRAPPED=1 exec \"$@\"\n").unwrap();
+        std::fs::set_permissions(&game, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&evil, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&good_wrap, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let test_app = OwnedApp {
+            app_id: 480,
+            name: "TestNative".into(),
+            launch: vec![model::LaunchOption {
+                executable: "game.sh".into(),
+                arguments: String::new(),
+                working_dir: String::new(),
+                description: String::new(),
+                os_list: "linux".into(),
+            }],
+            ..Default::default()
+        };
+
+        for payload in [
+            format!("LD_PRELOAD=/tmp/x.so '{}' %command%", evil.display()),
+            "--gpu-launcher=/bin/sh".into(),
+            "-mono-assembly-path=/tmp/evil".into(),
+            "+exec autoexec.cfg".into(),
+        ] {
+            let args = LaunchArgs { user: "-novid".into(), connect: payload.clone() };
+            assert!(spawn(&test_app, &dir, &args).is_err(), "spawn must fail closed for {payload}");
+            assert!(spawn_with_steamclient(&test_app, &dir, &args, "127.0.0.1:1:tok", "acct", None).is_err());
+            assert!(run_through_steam(480, &args, 1, false, || {}).unwrap_err().contains("refusing launch"));
+            assert!(run_through_host(&test_app, &dir, &args, "acct", "tok", 1, || {}).unwrap_err().contains("refusing launch"));
+            assert!(!pwned.exists(), "evil wrapper executed!");
+            assert!(!out.exists(), "game started despite unsafe connect!");
+        }
+
+        // Valid user wrapper + valid remote +connect works and preserves separation.
+        let ok_args = LaunchArgs {
+            user: format!("SAFE_VAR=ok '{}' %command% -novid", good_wrap.display()),
+            connect: "+connect 127.0.0.1:27015 +password pass123".into(),
+        };
+        let mut child = spawn(&test_app, &dir, &ok_args).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "ok|1|-novid +connect 127.0.0.1:27015 +password pass123");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Prints how a game would start on this machine, without starting it:
@@ -2768,7 +2899,7 @@ mod dry_run {
             ..Default::default()
         };
         println!("mode: {:?}", super::mode(&app, &dir));
-        let cmd = super::command(&app, &dir, &super::UserOptions::default()).expect("a command");
+        let cmd = super::command(&app, &dir, &super::UserOptions::default(), &[]).expect("a command");
         println!("program: {}", cmd.get_program().to_string_lossy());
         println!("args: {:?}", cmd.get_args().collect::<Vec<_>>());
         println!("cwd: {:?}", cmd.get_current_dir());
