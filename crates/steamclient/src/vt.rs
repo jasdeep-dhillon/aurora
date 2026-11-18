@@ -96,30 +96,54 @@ mod x86 {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn VirtualAlloc(addr: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
+        fn VirtualProtect(addr: *mut c_void, size: usize, new_protect: u32, old_protect: *mut u32) -> i32;
+        fn VirtualFree(addr: *mut c_void, size: usize, free_type: u32) -> i32;
+        fn FlushInstructionCache(process: *mut c_void, base: *const c_void, size: usize) -> i32;
+        fn GetCurrentProcess() -> *mut c_void;
     }
 
+    const MEM_COMMIT_RESERVE: u32 = 0x3000;
+    const MEM_RELEASE: u32 = 0x8000;
+    const PAGE_READWRITE: u32 = 0x04;
+    const PAGE_EXECUTE_READ: u32 = 0x20;
     const SIZE: usize = 80;
 
     /// thiscall -> cdecl(this, args...) -> `ret bytes`, one per slot. With a
     /// trace id, the call is logged first (see `trace::called`).
     pub fn trampolines(targets: &[(Fp, u16, Option<u32>)]) -> Vec<Fp> {
-        // MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE
-        let mem = unsafe { VirtualAlloc(std::ptr::null_mut(), targets.len() * SIZE, 0x3000, 0x40) } as *mut u8;
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let Some(total_len) = targets.len().checked_mul(SIZE) else {
+            return targets.iter().map(|_| super::zero as Fp).collect();
+        };
+        // W^X: allocate RW, emit machine code, then flip to RX and flush icache.
+        let mem = unsafe { VirtualAlloc(std::ptr::null_mut(), total_len, MEM_COMMIT_RESERVE, PAGE_READWRITE) } as *mut u8;
         if mem.is_null() {
             return targets.iter().map(|_| super::zero as Fp).collect();
         }
-        targets
+        let out: Vec<Fp> = targets
             .iter()
             .enumerate()
             .map(|(i, &(target, bytes, trace))| {
                 let code = code(target as u32, bytes, trace);
+                assert!(code.len() <= SIZE);
                 unsafe {
                     let at = mem.add(i * SIZE);
                     std::ptr::copy_nonoverlapping(code.as_ptr(), at, code.len());
                     at as Fp
                 }
             })
-            .collect()
+            .collect();
+        let mut old = 0u32;
+        if unsafe { VirtualProtect(mem.cast(), total_len, PAGE_EXECUTE_READ, &mut old) } == 0 {
+            unsafe { VirtualFree(mem.cast(), 0, MEM_RELEASE) };
+            return targets.iter().map(|_| super::zero as Fp).collect();
+        }
+        unsafe {
+            FlushInstructionCache(GetCurrentProcess(), mem.cast(), total_len);
+        }
+        out
     }
 
     fn code(target: u32, bytes: u16, trace: Option<u32>) -> Vec<u8> {
@@ -130,7 +154,7 @@ mod x86 {
             c.extend_from_slice(&[0xFF, 0x75, 0x10, 0xFF, 0x75, 0x0C, 0xFF, 0x75, 0x08, 0x68]);
             c.extend_from_slice(&id.to_le_bytes());
             c.push(0xB8);
-            c.extend_from_slice(&(crate::trace::called as usize as u32).to_le_bytes());
+            c.extend_from_slice(&(crate::trace::called as *const () as usize as u32).to_le_bytes());
             c.extend_from_slice(&[0xFF, 0xD0, 0x83, 0xC4, 0x10]);
         }
         c.extend_from_slice(&[0x81, 0xEC]); // sub esp, k
@@ -146,15 +170,37 @@ mod x86 {
 
     #[cfg(test)]
     mod tests {
+        use std::ffi::c_void;
+
         type F = unsafe extern "thiscall" fn(*mut u8, u32, u64, f32) -> u64;
+
+        #[repr(C)]
+        struct MemoryBasicInformation {
+            base_address: *mut c_void,
+            allocation_base: *mut c_void,
+            allocation_protect: u32,
+            region_size: usize,
+            state: u32,
+            protect: u32,
+            kind: u32,
+        }
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn VirtualQuery(addr: *const c_void, info: *mut MemoryBasicInformation, len: usize) -> usize;
+        }
 
         extern "C" fn sum(this: *mut u8, a: u32, b: u64, c: f32) -> u64 {
             this as u64 + a as u64 + b + c as u64
         }
 
         #[test]
-        fn thiscall_reaches_cdecl() {
+        fn thiscall_reaches_cdecl_and_is_not_rwx() {
             let t = super::trampolines(&[(sum as super::Fp, 16, None)]);
+            let mut info: MemoryBasicInformation = unsafe { std::mem::zeroed() };
+            let queried = unsafe { VirtualQuery(t[0], &mut info, size_of::<MemoryBasicInformation>()) };
+            assert_ne!(queried, 0);
+            assert_eq!(info.protect, 0x20, "trampoline page must be PAGE_EXECUTE_READ (0x20), not RWX");
             let f: F = unsafe { std::mem::transmute(t[0]) };
             assert_eq!(unsafe { f(100 as *mut u8, 1, 1 << 40, 2.0) }, 100 + 1 + (1 << 40) + 2);
         }

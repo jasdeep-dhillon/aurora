@@ -48,11 +48,7 @@ unsafe extern "system" {
     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
     fn GetModuleFileNameW(module: *mut c_void, name: *mut u16, len: u32) -> u32;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
-    fn OpenFileMappingW(access: u32, inherit: i32, name: *const u16) -> *mut c_void;
-    fn MapViewOfFile(map: *mut c_void, access: u32, off_hi: u32, off_lo: u32, bytes: usize) -> *mut c_void;
 }
-const FILE_MAP_WRITE: u32 = 0x2;
-const FILE_MAP_READ: u32 = 0x4;
 const NOT_CONNECTED: u32 = 1167;
 
 fn wide(s: &str) -> Vec<u16> {
@@ -99,17 +95,19 @@ pub static XINPUT: LazyLock<Option<XInput>> = LazyLock::new(|| {
 
 // ------------------------------------------------------------ shared pads
 
+fn open_shm(name: &str) -> Option<&'static Shared> {
+    let out = pads_shm::open_shm(name);
+    if out.is_none() {
+        crate::log!("pads: no shared pads at {name}");
+    }
+    out
+}
+
 /// The app's shared memory, when it gave us one (Windows only).
 fn mapped() -> Option<&'static Shared> {
     static MAP: LazyLock<usize> = LazyLock::new(|| {
         let Ok(name) = std::env::var(pads_shm::ENV_PADS) else { return 0 };
-        let access = FILE_MAP_READ | FILE_MAP_WRITE;
-        let h = unsafe { OpenFileMappingW(access, 0, wide(&name).as_ptr()) };
-        if h.is_null() {
-            crate::log!("pads: no shared pads at {name}");
-            return 0;
-        }
-        unsafe { MapViewOfFile(h, access, 0, 0, std::mem::size_of::<Shared>()) as usize }
+        open_shm(&name).map(|s| s as *const Shared as usize).unwrap_or(0)
     });
     unsafe { (*MAP as *const Shared).as_ref() }
 }
@@ -488,5 +486,13 @@ mod tests {
         s.heartbeat.store(0, Ordering::Relaxed);
         let mut p = Pad::default();
         assert_ne!(unsafe { hook_get_state(i as u32, &mut p) }, 0);
+    }
+
+    #[test]
+    fn open_shm_rejects_non_sir_pads_names() {
+        let rogue = format!("Local\\evil-pads-{}", std::process::id());
+        let h = unsafe { CreateFileMappingW(-1, std::ptr::null(), 0x4, 0, std::mem::size_of::<Shared>() as u32, wide(&rogue).as_ptr()) };
+        assert!(!h.is_null());
+        assert!(open_shm(&rogue).is_none(), "must reject mapping names outside Local\\sir-pads-");
     }
 }
