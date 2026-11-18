@@ -29,6 +29,7 @@ impl Web {
 pub type WebCache = Arc<tokio::sync::Mutex<Option<(Arc<Web>, Instant)>>>;
 
 const COMMUNITY: &str = "https://steamcommunity.com";
+const STEAM_WEB_HOSTS: [&str; 3] = ["steamcommunity.com", "store.steampowered.com", "help.steampowered.com"];
 
 /// The signed-in web session, made on first use and renewed every 20 minutes.
 pub async fn web(conn: &Connection, me: SteamId, refresh: &str, cache: &WebCache) -> Result<Arc<Web>, String> {
@@ -44,29 +45,121 @@ pub async fn web(conn: &Connection, me: SteamId, refresh: &str, cache: &WebCache
     if r.access_token().is_empty() {
         return Err("Steam didn't give a web sign-in".into());
     }
-    let session_id: String = (0..12).map(|_| format!("{:02x}", rand_byte())).collect();
-    let jar = Arc::new(reqwest::cookie::Jar::default());
-    for site in ["https://steamcommunity.com", "https://store.steampowered.com", "https://help.steampowered.com"] {
-        let url: reqwest::Url = site.parse().unwrap();
-        let host = url.host_str().unwrap_or_default().to_string();
-        jar.add_cookie_str(&format!("steamLoginSecure={me}%7C%7C{}; Domain={host}; Path=/; Secure; HttpOnly", r.access_token()), &url);
-        jar.add_cookie_str(&format!("sessionid={session_id}; Domain={host}; Path=/; Secure"), &url);
-    }
-    let http = reqwest::Client::builder()
-        .cookie_provider(jar)
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let session_id = new_session_id();
+    let jar = build_cookie_jar(me, r.access_token(), &session_id);
+    let http = build_web_http(jar)?;
     let w = Arc::new(Web { http, me, session_id });
     *slot = Some((w.clone(), Instant::now()));
     Ok(w)
 }
 
-fn rand_byte() -> u8 {
-    use std::hash::{BuildHasher, Hasher};
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
-    h.finish() as u8
+fn build_cookie_jar(me: SteamId, access_token: &str, session_id: &str) -> Arc<reqwest::cookie::Jar> {
+    let jar = Arc::new(reqwest::cookie::Jar::default());
+    for host in STEAM_WEB_HOSTS {
+        let url: reqwest::Url = format!("https://{host}").parse().unwrap();
+        // Omit Domain= so cookies stay host-only and cannot be sent to subdomains.
+        jar.add_cookie_str(&format!("steamLoginSecure={me}%7C%7C{access_token}; Path=/; Secure; HttpOnly"), &url);
+        jar.add_cookie_str(&format!("sessionid={session_id}; Path=/; Secure"), &url);
+    }
+    jar
+}
+
+fn build_web_http(jar: Arc<reqwest::cookie::Jar>) -> Result<reqwest::Client, String> {
+    let redirect = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+        if check_steam_url_parts(attempt.url(), &STEAM_WEB_HOSTS).is_ok() {
+            attempt.follow()
+        } else {
+            attempt.error("redirect leaves allowed Steam origins")
+        }
+    });
+    reqwest::Client::builder()
+        .cookie_provider(jar)
+        .redirect(redirect)
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+fn decode_percent_segment(seg: &str) -> Result<String, String> {
+    let bytes = seg.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3).and_then(|s| std::str::from_utf8(s).ok()).ok_or_else(|| "invalid percent-encoding in URL path".to_string())?;
+            let b = u8::from_str_radix(hex, 16).map_err(|_| "invalid percent-encoding in URL path".to_string())?;
+            out.push(b);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    if out.iter().any(|&b| b == b'/' || b == b'\\' || b < 0x20 || b == 0x7f) {
+        return Err("forbidden character in URL path".into());
+    }
+    String::from_utf8(out).map_err(|_| "non-UTF-8 URL path".into())
+}
+
+fn check_segment(seg: &str) -> Result<(), String> {
+    if seg == "." || seg == ".." {
+        return Err("path traversal in URL".into());
+    }
+    let decoded = decode_percent_segment(seg)?;
+    if decoded == "." || decoded == ".." {
+        return Err("encoded path traversal in URL".into());
+    }
+    Ok(())
+}
+
+fn check_steam_url_parts(url: &reqwest::Url, allowed_hosts: &[&str]) -> Result<(), String> {
+    if url.scheme() != "https" {
+        return Err("Steam URL must use https".into());
+    }
+    let Some(host) = url.host_str() else {
+        return Err("Steam URL missing host".into());
+    };
+    if !allowed_hosts.contains(&host) {
+        return Err("not a Steam URL".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
+        return Err("unexpected authority components in Steam URL".into());
+    }
+    if let Some(segments) = url.path_segments() {
+        for seg in segments {
+            check_segment(seg)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_steam_url_hosts(raw: &str, allowed_hosts: &[&str]) -> Result<reqwest::Url, String> {
+    if raw.bytes().any(|b| b < 0x20 || b == 0x7f) || raw.contains('\\') {
+        return Err("forbidden character in URL".into());
+    }
+    let url = reqwest::Url::parse(raw).map_err(|e| e.to_string())?;
+    check_steam_url_parts(&url, allowed_hosts)?;
+    // Check raw pre-normalization segments so literal `/../` is rejected before Url::parse collapses it.
+    if let Some((_, after_scheme)) = raw.split_once("://") {
+        let before_q = after_scheme.split(['?', '#']).next().unwrap_or("");
+        if let Some((_, raw_path)) = before_q.split_once('/') {
+            for seg in raw_path.split('/') {
+                check_segment(seg)?;
+            }
+        }
+    }
+    Ok(url)
+}
+
+pub(crate) fn validate_steam_url(raw: &str, expected_host: &str) -> Result<reqwest::Url, String> {
+    validate_steam_url_hosts(raw, &[expected_host])
+}
+
+fn new_session_id() -> String {
+    auth::random_hex(12)
 }
 
 /// Every game with items in an account's inventory, read from the
@@ -146,7 +239,7 @@ fn str_of(v: &Value, key: &str) -> String {
     v.get(key).and_then(|n| n.as_str()).unwrap_or_default().to_string()
 }
 
-fn encode(s: &str) -> String {
+pub(crate) fn encode(s: &str) -> String {
     s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
@@ -315,7 +408,7 @@ pub async fn send_trade_offer(web: &Web, partner: SteamId, token: Option<&str>, 
         None => serde_json::json!({}),
     };
     let referer = match token {
-        Some(t) => format!("{COMMUNITY}/tradeoffer/new/?partner={account}&token={t}"),
+        Some(t) => format!("{COMMUNITY}/tradeoffer/new/?partner={account}&token={}", encode(t)),
         None => format!("{COMMUNITY}/tradeoffer/new/?partner={account}"),
     };
     let resp = web
@@ -507,10 +600,54 @@ var g_strInventoryLoadURL = "x";</script>"#;
         assert_eq!(apps[0].contexts, vec![(2, "Backpack".to_string(), 40)]);
         assert_eq!(apps[1].contexts[0].0, 6);
     }
+
+    #[tokio::test]
+    async fn cookies_are_host_only_and_redirects_stay_on_steam() {
+        use reqwest::cookie::CookieStore;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let jar = super::build_cookie_jar(76561198000000001, "tok", "deadbeef");
+        for host in ["steamcommunity.com", "store.steampowered.com", "help.steampowered.com"] {
+            let root: reqwest::Url = format!("https://{host}/market/").parse().unwrap();
+            let sub: reqwest::Url = format!("https://evil.{host}/market/").parse().unwrap();
+            assert!(jar.cookies(&root).is_some(), "expected cookie on {host}");
+            assert!(jar.cookies(&sub).is_none(), "cookie must be host-only, leaked to {sub}");
+        }
+
+        for bad in [
+            "https://steamcommunity.com.evil.tld/discussions/",
+            "https://user@steamcommunity.com/discussions/",
+            "http://steamcommunity.com/discussions/",
+            "https://steamcommunity.com/app/440/../secret",
+            "https://steamcommunity.com/app/440/%2e%2e/secret",
+            "https://steamcommunity.com/app/440/%2E./secret",
+        ] {
+            assert!(super::validate_steam_url(bad, "steamcommunity.com").is_err(), "must reject {bad}");
+        }
+        assert!(super::validate_steam_url("https://steamcommunity.com/app/440/discussions/", "steamcommunity.com").is_ok());
+
+        // Off-origin redirect from a local server must be blocked by Web.http redirect policy.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf);
+            let _ = sock.write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: https://steamcommunity.com.evil.tld/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        });
+        let http = super::build_web_http(jar).unwrap();
+        let err = http.get(format!("http://{addr}/start")).send().await.unwrap_err();
+        assert!(err.is_redirect(), "expected redirect policy error, got {err}");
+        srv.join().unwrap();
+    }
 }
 
 /// Fetch a signed-in Steam web page (for features without an API).
 pub async fn page(web: &Web, url: &str) -> Result<String, String> {
+    let url = validate_steam_url_hosts(url, &STEAM_WEB_HOSTS)?;
     let r = web.http.get(url).send().await.map_err(|e| e.to_string())?;
     let status = r.status();
     let body = r.text().await.map_err(|e| e.to_string())?;
