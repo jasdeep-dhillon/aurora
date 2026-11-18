@@ -32,18 +32,30 @@ const POOL: usize = 4;
 /// Downloads smaller than this say more about latency than speed.
 const MIN_SAMPLE: usize = 64 << 10;
 
+pub fn valid_host(host: &str) -> bool {
+    !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'))
+}
+
 impl Cdn {
     pub fn new(servers: Vec<Server>) -> Self {
         let http = reqwest::Client::builder()
             .user_agent("Valve/Steam HTTP Client 1.0")
             .timeout(Duration::from_secs(60))
             .pool_max_idle_per_host(32)
+            .https_only(true)
             // Downloads spread over many connections; HTTP/2 would put them
             // all on one.
             .http1_only()
             .build()
             .expect("http client");
-        let mut s: Vec<(Server, f64)> = servers.into_iter().map(|s| (s, 0.0)).collect();
+        let mut s: Vec<(Server, f64)> = servers
+            .into_iter()
+            .filter(|s| s.https && valid_host(&s.host))
+            .map(|s| (s, 0.0))
+            .collect();
         s.sort_by(|a, b| a.0.load.total_cmp(&b.0.load));
         Self { http, servers: Mutex::new(s), requests: AtomicUsize::new(0) }
     }
@@ -59,7 +71,7 @@ impl Cdn {
         let list: Vec<Server> = self.servers.lock().unwrap().iter().map(|s| s.0.clone()).collect();
         let mut timed = Vec::new();
         for s in list.into_iter().take(8) {
-            let url = format!("{}://{}/", if s.https { "https" } else { "http" }, s.host);
+            let url = format!("https://{}/", s.host);
             let start = Instant::now();
             let ok = tokio::time::timeout(Duration::from_secs(3), self.http.head(&url).send()).await.is_ok();
             let ms = if ok { start.elapsed().as_secs_f64() * 1000.0 } else { 10_000.0 };
@@ -124,7 +136,7 @@ impl Cdn {
         let mut last = None;
         for attempt in 0..5 {
             let s = self.pick(attempt)?;
-            let url = format!("{}://{}{}", if s.https { "https" } else { "http" }, s.host, path);
+            let url = format!("https://{}{}", s.host, path);
             let start = Instant::now();
             match self.http.get(&url).send().await.and_then(|r| r.error_for_status()) {
                 Ok(r) => match r.bytes().await {
@@ -188,5 +200,19 @@ mod tests {
         assert_eq!(c.servers.lock().unwrap().last().unwrap().0.host, "b");
         c.record("c", 1 << 20, Duration::from_millis(200));
         assert_ne!(c.servers.lock().unwrap()[0].0.host, "b");
+    }
+
+    #[test]
+    fn filters_out_plaintext_http_servers() {
+        let c = Cdn::new(vec![
+            Server { host: "plain.example.com".into(), https: false, load: 0.0 },
+            Server { host: "tls.example.com".into(), https: true, load: 50.0 },
+        ]);
+        assert_eq!(c.server_count(), 1);
+        assert_eq!(c.pick(0).unwrap().host, "tls.example.com");
+
+        let only_http = Cdn::new(vec![Server { host: "plain.example.com".into(), https: false, load: 0.0 }]);
+        assert_eq!(only_http.server_count(), 0);
+        assert!(matches!(only_http.pick(0), Err(Error::NoServers)));
     }
 }

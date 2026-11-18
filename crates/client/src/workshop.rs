@@ -73,7 +73,13 @@ pub async fn sync(conn: &Connection, me: SteamId, app: AppId, library: &Path, ce
         let id = d.publishedfileid();
         let title = d.title().to_string();
         let manifest = d.hcontent_file();
-        let dir = ws.join("content").join(app.to_string()).join(id.to_string());
+        let dir = match depot::install::resolve_inside(&ws, &format!("content/{app}/{id}")) {
+            Ok(p) => p,
+            Err(e) => {
+                report.failed.push((id, title, e.to_string()));
+                continue;
+            }
+        };
         if record.installed.get(&id).is_some_and(|i| i.manifest == manifest && i.updated >= d.time_updated()) && dir.is_dir() {
             continue;
         }
@@ -81,6 +87,10 @@ pub async fn sync(conn: &Connection, me: SteamId, app: AppId, library: &Path, ce
             if cdn.is_none() {
                 let servers = crate::download::content_servers(conn, cell_id).await?;
                 let c = Arc::new(depot::Cdn::new(servers));
+                if c.server_count() == 0 {
+                    report.failed.push((id, title, "Steam returned no HTTPS content servers".into()));
+                    continue;
+                }
                 c.rank().await;
                 cdn = Some(c);
             }
@@ -115,6 +125,7 @@ async fn depot_item(conn: &Connection, cdn: Arc<depot::Cdn>, app: AppId, gid: u6
     let mut manifest = depot::Manifest::from_cdn(&raw).map_err(|e| e.to_string())?;
     manifest.decrypt_names(&key).map_err(|e| e.to_string())?;
     let size = manifest.original_size;
+    depot::install::ensure_real_dir(dir).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let job = depot::DepotJob { depot: app, manifest, key, old: None };
     depot::install(cdn, dir, vec![job], Arc::new(depot::Progress::default())).await.map_err(|e| e.to_string())?;
@@ -219,5 +230,19 @@ mod tests {
         let i = &back.installed[&42];
         assert_eq!((i.size, i.updated, i.manifest, i.subscribed_by), (10, 5, 7, 9));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_workshop_content_dir() {
+        let root = std::env::temp_dir().join(format!("sir-ws-sym-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("workshop");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("content")).unwrap();
+        assert!(depot::install::resolve_inside(&ws, "content/477160/99").is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

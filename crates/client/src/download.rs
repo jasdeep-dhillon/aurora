@@ -94,9 +94,10 @@ pub async fn content_servers(conn: &Connection, cell_id: u32) -> Result<Vec<depo
         .filter(|s| matches!(s.r#type(), "SteamCache" | "CDN"))
         .map(|s| depot::Server {
             host: if s.vhost().is_empty() { s.host().to_string() } else { s.vhost().to_string() },
-            https: s.https_support() != "none" && !s.https_support().is_empty(),
+            https: !s.https_support().is_empty() && !s.https_support().eq_ignore_ascii_case("none"),
             load: s.weighted_load(),
         })
+        .filter(|s| s.https && depot::cdn::valid_host(&s.host))
         .collect())
 }
 
@@ -167,6 +168,22 @@ pub fn status(app_id: AppId, p: &depot::Progress, speed: u64) -> DownloadStatus 
     }
 }
 
+pub(crate) fn install_folder_name(app: &OwnedApp) -> Result<String, String> {
+    if !app.install_dir.is_empty() {
+        return depot::install::validate_folder_name(&app.install_dir).map_err(|e| e.to_string());
+    }
+    if app.name.is_empty() || app.name == "." || app.name == ".." || app.name.contains(['/', '\\', '\0']) {
+        return Err(format!("unsafe app folder name: {:?}", app.name));
+    }
+    let sanitized: String = app
+        .name
+        .chars()
+        .map(|c| if matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|') || (c as u32) < 0x20 { '_' } else { c })
+        .collect();
+    let trimmed = sanitized.trim_end_matches([' ', '.']);
+    depot::install::validate_folder_name(trimmed).map_err(|e| e.to_string())
+}
+
 /// Run one install/update to completion.
 pub async fn run(
     conn: Connection,
@@ -179,6 +196,9 @@ pub async fn run(
     progress: Arc<depot::Progress>,
 ) -> Result<depot::Report, String> {
     progress.set_phase(depot::Phase::Preparing);
+    let folder = install_folder_name(&app)?;
+    let common = req.library.join("steamapps").join("common");
+    let dir = depot::install::resolve_inside(&common, &folder).map_err(|e| e.to_string())?;
     let old = installed_manifests(&req);
     let on_disk: HashSet<u32> = old.iter().map(|(d, _)| *d).collect();
     let depots = pick_depots(&app, &owned, &req, &on_disk);
@@ -188,14 +208,14 @@ pub async fn run(
     }
     let mut servers = content_servers(&conn, cell_id).await?;
     // A host the player picked goes first (the others stay as fallbacks).
-    if let Some(host) = preferred_host {
+    if let Some(host) = preferred_host.filter(|h| depot::cdn::valid_host(h)) {
         servers.retain(|s| s.host != host);
         servers.insert(0, depot::Server { host, https: true, load: 0.0 });
     }
-    if servers.is_empty() {
-        return Err("Steam returned no content servers".into());
-    }
     let cdn = Arc::new(depot::Cdn::new(servers));
+    if cdn.server_count() == 0 {
+        return Err("Steam returned no HTTPS content servers".into());
+    }
     cdn.rank().await;
 
     let mut jobs = Vec::new();
@@ -237,7 +257,6 @@ pub async fn run(
         return Err("This account can't download any of this game's content".into());
     }
 
-    let dir = req.library.join("steamapps").join("common").join(if app.install_dir.is_empty() { &app.name } else { &app.install_dir });
     // Make sure it fits (a rough upper bound: the full new size).
     let need: u64 = jobs.iter().map(|j| j.manifest.original_size).sum();
     if let Ok(free) = fs4::available_space(&req.library) {
@@ -293,14 +312,15 @@ pub async fn run(
     for m in &manifests {
         let _ = std::fs::write(cache.join(format!("{}_{}.manifest", m.depot, m.gid)), m.to_bytes());
     }
-    write_app_manifest(&req, &app, &installed, need, owner).map_err(|e| e.to_string())?;
+    write_app_manifest(&req, &app, &folder, &installed, need, owner).map_err(|e| e.to_string())?;
     Ok(report)
 }
 
 /// Delete the files of depots that are no longer installed (a DLC turned
 /// off), except files another installed depot still has.
 fn remove_dropped(req: &InstallRequest, dir: &Path, dropped: &[(u32, u64)], kept: &[depot::Manifest]) {
-    let keep: HashSet<String> = kept.iter().flat_map(|m| m.files.iter().map(|f| f.name.to_lowercase())).collect();
+    let norm = |s: &str| s.replace('\\', "/").to_lowercase();
+    let keep: HashSet<String> = kept.iter().flat_map(|m| m.files.iter().map(|f| norm(&f.name))).collect();
     let cache = req.steam_root.join("depotcache");
     for (depot, gid) in dropped {
         let Some(m) = std::fs::read(cache.join(format!("{depot}_{gid}.manifest"))).ok().and_then(|b| depot::Manifest::parse(&b).ok()) else {
@@ -309,11 +329,12 @@ fn remove_dropped(req: &InstallRequest, dir: &Path, dropped: &[(u32, u64)], kept
         };
         let mut removed = 0;
         for f in m.files.iter().filter(|f| !f.directory) {
-            if keep.contains(&f.name.to_lowercase()) {
+            if keep.contains(&norm(&f.name)) {
                 continue;
             }
-            let path = dir.join(&f.name);
-            if path.starts_with(dir) && std::fs::remove_file(&path).is_ok() {
+            if let Ok(path) = depot::install::resolve_inside(dir, &f.name)
+                && std::fs::remove_file(&path).is_ok()
+            {
                 removed += 1;
             }
         }
@@ -324,16 +345,19 @@ fn remove_dropped(req: &InstallRequest, dir: &Path, dropped: &[(u32, u64)], kept
 /// After a cancelled update: delete the files of depots it was adding,
 /// except files the depots installed before also have.
 fn remove_added(req: &InstallRequest, dir: &Path, added: &[&depot::Manifest], before: &[(u32, u64)]) {
+    let norm = |s: &str| s.replace('\\', "/").to_lowercase();
     let cache = req.steam_root.join("depotcache");
     let keep: HashSet<String> = before
         .iter()
         .filter_map(|(d, g)| std::fs::read(cache.join(format!("{d}_{g}.manifest"))).ok().and_then(|b| depot::Manifest::parse(&b).ok()))
-        .flat_map(|m| m.files.into_iter().map(|f| f.name.to_lowercase()))
+        .flat_map(|m| m.files.into_iter().map(|f| norm(&f.name)))
         .collect();
     let mut removed = 0;
     for m in added {
-        for f in m.files.iter().filter(|f| !f.directory && !keep.contains(&f.name.to_lowercase())) {
-            if std::fs::remove_file(dir.join(&f.name)).is_ok() {
+        for f in m.files.iter().filter(|f| !f.directory && !keep.contains(&norm(&f.name))) {
+            if let Ok(path) = depot::install::resolve_inside(dir, &f.name)
+                && std::fs::remove_file(path).is_ok()
+            {
                 removed += 1;
             }
         }
@@ -391,7 +415,7 @@ fn dir_size(dir: &Path) -> u64 {
     total
 }
 
-fn write_app_manifest(req: &InstallRequest, app: &OwnedApp, depots: &[(u32, u64, u64, Option<AppId>)], size: u64, owner: u64) -> std::io::Result<()> {
+fn write_app_manifest(req: &InstallRequest, app: &OwnedApp, install_dir: &str, depots: &[(u32, u64, u64, Option<AppId>)], size: u64, owner: u64) -> std::io::Result<()> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let build = app.branches.iter().find(|b| b.name == req.branch).map(|b| b.build_id).unwrap_or(0);
     let mut installed = vdf::Obj::default();
@@ -411,7 +435,7 @@ fn write_app_manifest(req: &InstallRequest, app: &OwnedApp, depots: &[(u32, u64,
         .with("universe", "1")
         .with("name", &app.name)
         .with("StateFlags", "4")
-        .with("installdir", if app.install_dir.is_empty() { &app.name } else { &app.install_dir })
+        .with("installdir", install_dir)
         .with("LastUpdated", now.to_string())
         .with("SizeOnDisk", size.to_string())
         .with("buildid", build.to_string())
@@ -511,5 +535,82 @@ mod cancel_tests {
         remove_unfinished(&req, &other, true);
         assert!(other.exists());
         let _ = std::fs::remove_dir_all(lib);
+    }
+
+    #[test]
+    fn dropped_and_added_cleanup_rejects_traversal() {
+        let root = std::env::temp_dir().join(format!("sir-dl-aur02-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let game = root.join("steamapps").join("common").join("Game");
+        let cache = root.join("depotcache");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        let victim = root.join("steamapps").join("common").join("victim.txt");
+        std::fs::write(&victim, b"precious").unwrap();
+        std::fs::write(game.join("dlc.pak"), b"dlc").unwrap();
+
+        let bad_manifest = depot::Manifest {
+            depot: 77,
+            gid: 1,
+            files: vec![
+                depot::manifest::FileEntry {
+                    name: "../victim.txt".into(),
+                    size: 8,
+                    sha: vec![0; 20],
+                    chunks: vec![],
+                    directory: false,
+                    executable: false,
+                    link: None,
+                },
+                depot::manifest::FileEntry {
+                    name: "dlc.pak".into(),
+                    size: 3,
+                    sha: vec![0; 20],
+                    chunks: vec![],
+                    directory: false,
+                    executable: false,
+                    link: None,
+                },
+            ],
+            ..Default::default()
+        };
+        std::fs::write(cache.join("77_1.manifest"), bad_manifest.to_bytes()).unwrap();
+        let req = InstallRequest {
+            app_id: 1,
+            library: root.clone(),
+            steam_root: root.clone(),
+            branch: "public".into(),
+            language: "english".into(),
+            skip_dlc: vec![],
+            add_dlc: vec![],
+            platform: String::new(),
+        };
+        remove_dropped(&req, &game, &[(77, 1)], &[]);
+        assert!(victim.exists(), "remove_dropped deleted outside install dir!");
+        assert!(!game.join("dlc.pak").exists());
+
+        std::fs::write(game.join("dlc.pak"), b"dlc").unwrap();
+        remove_added(&req, &game, &[&bad_manifest], &[]);
+        assert!(victim.exists(), "remove_added deleted outside install dir!");
+        assert!(!game.join("dlc.pak").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validates_install_folder_name() {
+        let mk = |install_dir: &str, name: &str| OwnedApp {
+            app_id: 1,
+            install_dir: install_dir.into(),
+            name: name.into(),
+            ..Default::default()
+        };
+        for bad in ["..", ".", "../outside", "a/b", r"a\b", "/etc", r"C:\Windows", "CON", "game.sirpart"] {
+            assert!(install_folder_name(&mk(bad, "Good")).is_err(), "accepted {bad:?}");
+        }
+        assert!(install_folder_name(&mk("", "..")).is_err());
+        assert!(install_folder_name(&mk("", "../outside")).is_err());
+        assert!(install_folder_name(&mk("", "NUL")).is_err());
+        assert_eq!(install_folder_name(&mk("Half-Life 2", "HL2")).unwrap(), "Half-Life 2");
+        assert_eq!(install_folder_name(&mk("", "Half-Life: Source")).unwrap(), "Half-Life_ Source");
     }
 }
