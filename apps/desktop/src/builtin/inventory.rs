@@ -536,17 +536,17 @@ impl Inventory {
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if w::button(ui, &t, Some(icons::STOREFRONT), t!("Community Market"), w::Kind::Secondary, w::Size::Sm).on_hover_text(t!("Opens in your browser")).clicked() {
-                    let _ = open::that_detached("https://steamcommunity.com/market/");
+                    crate::links::open_http("https://steamcommunity.com/market/");
                 }
                 if mine {
                     if w::button(ui, &t, Some(icons::SWAP), t!("Trade offers"), w::Kind::Secondary, w::Size::Sm).on_hover_text(t!("Opens in your browser")).clicked() {
-                        let _ = open::that_detached(format!("https://steamcommunity.com/profiles/{owner}/tradeoffers/"));
+                        crate::links::open_http(&format!("https://steamcommunity.com/profiles/{owner}/tradeoffers/"));
                     }
                 } else if ctx.state.friends.get(&owner) == Some(&Relationship::Friend)
                     && w::button(ui, &t, Some(icons::SWAP), t!("Offer a trade"), w::Kind::Secondary, w::Size::Sm).on_hover_text(t!("Opens in your browser")).clicked()
                 {
                     let account = owner & 0xFFFF_FFFF;
-                    let _ = open::that_detached(format!("https://steamcommunity.com/tradeoffer/new/?partner={account}"));
+                    crate::links::open_http(&format!("https://steamcommunity.com/tradeoffer/new/?partner={account}"));
                 }
                 if !mine && w::button(ui, &t, Some(icons::USER_CIRCLE), t!("Profile"), w::Kind::Ghost, w::Size::Sm).clicked() {
                     ctx.navigate("profile", Some(owner.to_string()));

@@ -224,7 +224,7 @@ impl Extension for Profile {
                                     let label = if mine { t!("Edit profile on Steam") } else { t!("View on Steam") };
                                     if w::button(ui, &t, Some(icons::EXTERNAL), label, w::Kind::Secondary, w::Size::Sm).clicked() {
                                         let url = if mine { format!("https://steamcommunity.com/profiles/{id}/edit/info") } else { format!("https://steamcommunity.com/profiles/{id}") };
-                                        let _ = open::that_detached(url);
+                                        crate::links::open_http(&url);
                                     }
                                     if w::button(ui, &t, Some(icons::COPY), t!("Copy SteamID"), w::Kind::Ghost, w::Size::Sm).clicked() {
                                         ui.ctx().copy_text(id.to_string());
@@ -365,7 +365,7 @@ impl Profile {
                         Link::Page(page, arg) => ctx.navigate(page, arg),
                         Link::Section(s) => ctx.navigate("profile", Some(format!("{id}/{}", s.slug()))),
                         Link::Web(url) => {
-                            let _ = open::that_detached(url);
+                            crate::links::open_http(&url);
                         }
                     }
                 }
@@ -849,7 +849,7 @@ fn open_badge(ctx: &mut Ctx, id: SteamId, badge: &model::Badge) {
     match card_set_of(&badge.url) {
         Some((app, foil)) => ctx.navigate("profile", Some(format!("{id}/cards/{app}{}", if foil { "/foil" } else { "" }))),
         None if !badge.url.is_empty() => {
-            let _ = open::that_detached(&badge.url);
+            crate::links::open_http(&badge.url);
         }
         None => {}
     }
