@@ -5,7 +5,7 @@
 //! both from the same definitions); only the loader and the RTTI format
 //! differ. Each object is still checked by class name before it's used.
 
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{CString, c_char, c_void};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -138,30 +138,71 @@ fn steam_root(root: &Path) -> Result<PathBuf, String> {
     Ok(PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s)))
 }
 
+const MAX_CLASS_NAME: usize = 256;
+const EXECUTABLE_READABLE: u32 = 0x20 | 0x40 | 0x80;
+
 /// Committed, readable memory (so reading `len` bytes at `p` can't fault).
 fn readable(p: *const c_void, len: usize) -> bool {
-    if p.is_null() {
+    if p.is_null() || len == 0 {
         return false;
     }
-    let mut info: MemoryInfo = unsafe { std::mem::zeroed() };
-    // SAFETY: VirtualQuery only inspects the address space.
-    if unsafe { VirtualQuery(p, &mut info, size_of::<MemoryInfo>()) } == 0 {
+    let Some(req_end) = (p as usize).checked_add(len) else {
+        return false;
+    };
+    let mut cur = p as usize;
+    while cur < req_end {
+        let mut info: MemoryInfo = unsafe { std::mem::zeroed() };
+        // SAFETY: VirtualQuery only inspects the address space.
+        if unsafe { VirtualQuery(cur as *const c_void, &mut info, size_of::<MemoryInfo>()) } == 0 {
+            return false;
+        }
+        let Some(end) = (info.base as usize).checked_add(info.region_size) else {
+            return false;
+        };
+        if info.state != MEM_COMMIT || info.protect & READABLE == 0 || info.protect & PAGE_GUARD != 0 || end <= cur {
+            return false;
+        }
+        cur = end;
+    }
+    true
+}
+
+/// True if `p` lies inside the loaded steamclient64.dll and `len` bytes are readable.
+fn in_steamclient_range(p: *const c_void, len: usize) -> bool {
+    let base = BASE.load(Ordering::Relaxed);
+    if base == 0 || p.is_null() || len == 0 {
         return false;
     }
-    let end = info.base as usize + info.region_size;
-    info.state == MEM_COMMIT && info.protect & READABLE != 0 && info.protect & PAGE_GUARD == 0 && p as usize + len <= end
+    let Some(last) = (p as usize).checked_add(len - 1) else {
+        return false;
+    };
+    let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    let mut m_start = std::ptr::null_mut();
+    let mut m_end = std::ptr::null_mut();
+    // SAFETY: lookup only; the refcount is left unchanged.
+    unsafe {
+        GetModuleHandleExW(flags, p, &mut m_start) != 0
+            && GetModuleHandleExW(flags, last as *const c_void, &mut m_end) != 0
+            && m_start as usize == base
+            && m_end as usize == base
+            && readable(p, len)
+    }
 }
 
 /// True if `p` lies inside the loaded steamclient64.dll.
 fn in_steamclient(p: *const c_void) -> bool {
-    let base = BASE.load(Ordering::Relaxed);
-    if base == 0 || p.is_null() {
+    in_steamclient_range(p, 8)
+}
+
+fn executable_in_steamclient(p: *const c_void) -> bool {
+    if !in_steamclient_range(p, 1) {
         return false;
     }
-    let mut module = std::ptr::null_mut();
-    let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
-    // SAFETY: lookup only; the refcount is left unchanged.
-    unsafe { GetModuleHandleExW(flags, p, &mut module) != 0 && module as usize == base && readable(p, 8) }
+    let mut info: MemoryInfo = unsafe { std::mem::zeroed() };
+    if unsafe { VirtualQuery(p, &mut info, size_of::<MemoryInfo>()) } == 0 {
+        return false;
+    }
+    info.state == MEM_COMMIT && info.protect & EXECUTABLE_READABLE != 0 && info.protect & PAGE_GUARD == 0
 }
 
 /// The MSVC RTTI class name (`.?AV<name>@@`) of a polymorphic object from
@@ -176,20 +217,78 @@ pub fn class_name(obj: *mut c_void) -> Option<String> {
     // itself, inside steamclient64.dll) before it is read.
     unsafe {
         let vt = *(obj as *const *const *const c_void);
-        if !in_steamclient(vt as *const c_void) || !in_steamclient(vt.offset(-1) as *const c_void) {
+        if (vt as usize) % 8 != 0 || !in_steamclient(vt as *const c_void) || !in_steamclient(vt.offset(-1) as *const c_void) {
             return None;
         }
         let col = *vt.offset(-1) as *const u32;
         // signature 1 = the x64 layout with image-relative offsets.
-        if !in_steamclient(col as *const c_void) || !readable(col as *const c_void, 24) || *col != 1 {
+        if (col as usize) % 4 != 0 || !in_steamclient_range(col as *const c_void, 24) || *col != 1 {
             return None;
         }
-        let name = (base + *col.add(3) as usize + 16) as *const c_char;
-        if !in_steamclient(name as *const c_void) {
-            return None;
+        let name_addr = base.checked_add(*col.add(3) as usize)?.checked_add(16)?;
+        let mut bytes = Vec::new();
+        for i in 0..MAX_CLASS_NAME {
+            let b_addr = name_addr.checked_add(i)?;
+            if !in_steamclient_range(b_addr as *const c_void, 1) {
+                return None;
+            }
+            let b = *(b_addr as *const u8);
+            if b == 0 {
+                return (!bytes.is_empty()).then(|| String::from_utf8_lossy(&bytes).into_owned());
+            }
+            bytes.push(b);
         }
-        Some(CStr::from_ptr(name).to_string_lossy().into_owned())
+        None
     }
+}
+
+/// Verify that `obj`'s vtable slots `0..=max_slot` are non-null readable code
+/// pointers inside the loaded `steamclient64.dll` executable segment.
+pub fn verify_vtable(obj: *mut c_void, max_slot: usize) -> Result<(), String> {
+    let ptr_size = size_of::<usize>();
+    if !readable(obj, ptr_size) || (obj as usize) % align_of::<usize>() != 0 {
+        return Err("unsupported Steam build: interface object pointer is invalid or unreadable".into());
+    }
+    let vt = unsafe { *(obj as *const *const *const c_void) };
+    let table_bytes = max_slot
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(ptr_size))
+        .ok_or_else(|| "unsupported Steam build: vtable size overflow".to_string())?;
+    if vt.is_null() || (vt as usize) % align_of::<usize>() != 0 || !in_steamclient_range(vt as *const c_void, table_bytes) {
+        return Err("unsupported Steam build: vtable is outside readable steamclient memory".into());
+    }
+    for slot in 0..=max_slot {
+        let fp = unsafe { *vt.add(slot) };
+        if fp.is_null() || !executable_in_steamclient(fp) {
+            return Err(format!(
+                "unsupported Steam build: vtable slot {slot} is not an executable steamclient code pointer"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Verify a single vtable slot on `obj` before invoking it.
+pub fn verify_slot(obj: *mut c_void, slot: usize) -> Result<(), String> {
+    let ptr_size = size_of::<usize>();
+    if !readable(obj, ptr_size) || (obj as usize) % align_of::<usize>() != 0 {
+        return Err("unsupported Steam build: interface object pointer is invalid or unreadable".into());
+    }
+    let vt = unsafe { *(obj as *const *const *const c_void) };
+    let slot_addr = slot
+        .checked_mul(ptr_size)
+        .and_then(|off| (vt as usize).checked_add(off))
+        .ok_or_else(|| "unsupported Steam build: vtable slot overflow".to_string())?;
+    if vt.is_null() || (vt as usize) % align_of::<usize>() != 0 || !in_steamclient_range(slot_addr as *const c_void, ptr_size) {
+        return Err(format!("unsupported Steam build: vtable slot {slot} is outside readable steamclient memory"));
+    }
+    let fp = unsafe { *(slot_addr as *const *const c_void) };
+    if fp.is_null() || !executable_in_steamclient(fp) {
+        return Err(format!(
+            "unsupported Steam build: vtable slot {slot} is not an executable steamclient code pointer"
+        ));
+    }
+    Ok(())
 }
 
 /// The official client (or its web helper) is running.
@@ -250,4 +349,28 @@ pub fn quit(status: i32) -> ! {
         TerminateProcess(GetCurrentProcess(), status as u32);
     }
     unreachable!("TerminateProcess returned")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn VirtualAlloc(addr: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
+        fn VirtualFree(addr: *mut c_void, size: usize, kind: u32) -> i32;
+    }
+
+    #[test]
+    fn class_name_and_vtable_reject_unreadable_and_bogus_pointers() {
+        // MEM_COMMIT | MEM_RESERVE (0x3000), PAGE_NOACCESS (0x01)
+        let p = unsafe { VirtualAlloc(std::ptr::null_mut(), 4096, 0x3000, 0x01) };
+        assert!(!p.is_null());
+        assert_eq!(class_name(p), None);
+        assert!(verify_vtable(p, 56).is_err());
+        assert_eq!(class_name(0x1000usize as *mut c_void), None);
+        unsafe {
+            VirtualFree(p, 0, 0x8000);
+        }
+    }
 }
