@@ -58,9 +58,9 @@ fn pkzip(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// A chunk's id is the SHA-1 of its decompressed bytes.
+/// A chunk's id is the 20-byte SHA-1 of its decompressed bytes.
 pub fn verify(data: &[u8], sha: &[u8]) -> bool {
-    sha.is_empty() || Sha1::digest(data).as_slice() == sha
+    sha.len() == 20 && Sha1::digest(data).as_slice() == sha
 }
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -86,5 +86,14 @@ mod tests {
         let out = decode(&enc, &key).unwrap();
         assert_eq!(out, b"chunk payload");
         assert!(verify(&out, Sha1::digest(b"chunk payload").as_slice()));
+    }
+
+    #[test]
+    fn verify_rejects_empty_or_wrong_len_sha() {
+        assert!(!verify(b"chunk payload", &[]));
+        assert!(!verify(b"", &[]));
+        let full = Sha1::digest(b"chunk payload");
+        assert!(!verify(b"chunk payload", &full[..19]));
+        assert!(!verify(b"chunk payload", &[0u8; 20]));
     }
 }
