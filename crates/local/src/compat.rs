@@ -51,7 +51,8 @@ pub fn compat_tools(root: &Path) -> Vec<CompatTool> {
             let Some(state) = m.obj("AppState") else { continue };
             let name = state.str("name").unwrap_or_default();
             let Some(internal) = valve_internal_name(name) else { continue };
-            let dir = apps.join("common").join(state.str("installdir").unwrap_or_default());
+            let Some(installdir) = state.str("installdir").filter(|s| crate::is_valid_folder_name(s)) else { continue };
+            let dir = apps.join("common").join(installdir);
             if dir.join("proton").is_file() {
                 out.push(CompatTool { name: internal, display: name.to_string(), runtime_app: runtime_of(&dir), dir });
             }
@@ -64,12 +65,18 @@ pub fn compat_tools(root: &Path) -> Vec<CompatTool> {
         let Ok(entries) = std::fs::read_dir(&base) else { continue };
         for e in entries.flatten() {
             let folder = e.path();
+            if !folder.file_name().and_then(|n| n.to_str()).is_some_and(crate::is_valid_folder_name) {
+                continue;
+            }
             let Some(m) = read_vdf(&folder.join("compatibilitytool.vdf")) else { continue };
             let Some(tools) = m.obj("compatibilitytools").and_then(|c| c.obj("compat_tools")) else { continue };
             for (name, v) in tools.iter() {
                 let Some(t) = v.as_obj() else { continue };
-                let install = t.str("install_path").unwrap_or(".");
-                let dir = if install == "." { folder.clone() } else { folder.join(install) };
+                let dir = match t.str("install_path") {
+                    None | Some(".") => folder.clone(),
+                    Some(sub) if crate::is_valid_folder_name(sub) => folder.join(sub),
+                    Some(_) => continue,
+                };
                 if !dir.join("proton").is_file() || out.iter().any(|x: &CompatTool| x.name == name) {
                     continue;
                 }
@@ -145,7 +152,8 @@ pub fn app_dir(root: &Path, app: AppId) -> Option<PathBuf> {
     crate::library_folders(root).unwrap_or_default().into_iter().find_map(|lib| {
         let apps = lib.join("steamapps");
         let m = read_vdf(&apps.join(format!("appmanifest_{app}.acf")))?;
-        let dir = apps.join("common").join(m.obj("AppState")?.str("installdir")?);
+        let installdir = m.obj("AppState")?.str("installdir").filter(|s| crate::is_valid_folder_name(s))?;
+        let dir = apps.join("common").join(installdir);
         dir.is_dir().then_some(dir)
     })
 }
@@ -153,7 +161,15 @@ pub fn app_dir(root: &Path, app: AppId) -> Option<PathBuf> {
 /// The game's Proton prefix folder, `<library>/steamapps/compatdata/<app>`
 /// (Steam keeps it in the library the game is installed in).
 pub fn compat_data(install_dir: &Path, app: AppId) -> Option<PathBuf> {
-    let steamapps = install_dir.parent()?.parent()?;
+    let leaf = install_dir.file_name()?.to_str()?;
+    if !crate::is_valid_folder_name(leaf) {
+        return None;
+    }
+    if !install_dir.components().all(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir | std::path::Component::Normal(_))) {
+        return None;
+    }
+    let common = install_dir.parent()?;
+    let steamapps = common.parent()?;
     Some(steamapps.join("compatdata").join(app.to_string()))
 }
 
@@ -177,6 +193,64 @@ mod tests {
         assert_eq!(valve_internal_name("Proton 3.16").as_deref(), Some("proton_316"));
         assert_eq!(valve_internal_name("Proton EasyAntiCheat Runtime"), None);
         assert_eq!(valve_internal_name("Steam Linux Runtime 3.0 (sniper)"), None);
+    }
+
+    #[test]
+    fn rejects_unsafe_installdir_and_install_path() {
+        let root = std::env::temp_dir().join(format!("sir-compat-unsafe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let apps = root.join("steamapps");
+        let common = apps.join("common");
+        std::fs::create_dir_all(&common).unwrap();
+        // Plant `proton` in `steamapps/` so `common/..` would match `dir.join("proton").is_file()`!
+        std::fs::write(apps.join("proton"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(
+            apps.join("appmanifest_1493710.acf"),
+            "\"AppState\"\n{\n\t\"appid\"\t\"1493710\"\n\t\"name\"\t\"Proton - Experimental\"\n\t\"installdir\"\t\"..\"\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            apps.join("appmanifest_1628350.acf"),
+            "\"AppState\"\n{\n\t\"appid\"\t\"1628350\"\n\t\"name\"\t\"SteamLinuxRuntime_sniper\"\n\t\"installdir\"\t\"..\"\n}\n",
+        )
+        .unwrap();
+
+        let custom = root.join("compatibilitytools.d");
+        let escape_tool = custom.join("escape");
+        std::fs::create_dir_all(&escape_tool).unwrap();
+        std::fs::write(custom.join("proton"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(
+            escape_tool.join("compatibilitytool.vdf"),
+            "\"compatibilitytools\"\n{\n\t\"compat_tools\"\n\t{\n\t\t\"EscapeProton\"\n\t\t{\n\t\t\t\"install_path\"\t\"..\"\n\t\t}\n\t}\n}\n",
+        )
+        .unwrap();
+
+        let empty_tool = custom.join("empty-path");
+        std::fs::create_dir_all(&empty_tool).unwrap();
+        std::fs::write(empty_tool.join("proton"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(
+            empty_tool.join("compatibilitytool.vdf"),
+            "\"compatibilitytools\"\n{\n\t\"compat_tools\"\n\t{\n\t\t\"EmptyPathProton\"\n\t\t{\n\t\t\t\"install_path\"\t\"\"\n\t\t}\n\t}\n}\n",
+        )
+        .unwrap();
+
+        let valid_tool = custom.join("ge-proton");
+        std::fs::create_dir_all(&valid_tool).unwrap();
+        std::fs::write(valid_tool.join("proton"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(
+            valid_tool.join("compatibilitytool.vdf"),
+            "\"compatibilitytools\"\n{\n\t\"compat_tools\"\n\t{\n\t\t\"GE-Proton-Test\"\n\t\t{\n\t\t\t\"install_path\"\t\".\"\n\t\t}\n\t}\n}\n",
+        )
+        .unwrap();
+
+        let tools: Vec<_> = compat_tools(&root)
+            .into_iter()
+            .filter(|t| matches!(t.name.as_str(), "proton_experimental" | "EscapeProton" | "EmptyPathProton" | "GE-Proton-Test"))
+            .collect();
+        assert_eq!(tools.len(), 1, "accepted unsafe compat tools: {tools:?}");
+        assert_eq!(tools[0].name, "GE-Proton-Test");
+        assert!(app_dir(&root, 1628350).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Reads this machine's Steam install when there is one (no assertions
