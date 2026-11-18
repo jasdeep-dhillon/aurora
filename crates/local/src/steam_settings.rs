@@ -56,16 +56,77 @@ pub fn get(root: &Path, s: Setting) -> Option<bool> {
 /// Change the setting. `Ok(false)` if it already had that value.
 pub fn set(root: &Path, s: Setting, on: bool) -> Result<bool, String> {
     let path = config(root);
+    let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("{}: refusing to overwrite symlink", path.display()));
+    }
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     if get(root, s) == Some(on) {
         return Ok(false);
     }
     let (section, key) = s.place();
     let new = with_value(&text, section, key, if on { "1" } else { "0" })?;
-    let tmp = path.with_extension("vdf.steaminrust-tmp");
-    std::fs::write(&tmp, new).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    write_vdf_atomic(&path, new.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(true)
+}
+
+fn write_vdf_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::hash::{BuildHasher, Hasher};
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = path.parent().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent directory"))?;
+    if std::fs::symlink_metadata(dir)?.file_type().is_symlink() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "parent directory is a symlink"));
+    }
+    let base_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("config.vdf");
+    let pid = std::process::id();
+
+    let (mut f, tmp) = 'open: {
+        for _ in 0..32 {
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u32(pid);
+            h.write_u64(seq);
+            let tag = h.finish();
+            let candidate = dir.join(format!(".{base_name}.{pid}-{seq}-{tag:016x}.steaminrust-tmp"));
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(&candidate) {
+                Ok(file) => break 'open (file, candidate),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "could not create unique temporary file"));
+    };
+
+    let write_res = (|| -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    drop(f);
+    if let Err(e) = write_res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 fn value(text: &str, section: &[&str], key: &str) -> Option<String> {
@@ -151,5 +212,28 @@ mod tests {
         let twice = FILE.replace("\t\t\t\t\"CurrentCellID\"", "\t\t\t\t\"AllowDownloadsDuringGameplay\"\t\t\"1\"\n\t\t\t\t\"CurrentCellID\"");
         assert!(with_value(&twice, STEAM, KEY, "0").is_err());
         assert!(with_value("\"x\"\n{\n}\n", STEAM, KEY, "0").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_uses_excl_temp_and_never_follows_planted_tmp_symlink() {
+        let dir = std::env::temp_dir().join(format!("sir-steam-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg_dir = dir.join("config");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let vdf_path = cfg_dir.join("config.vdf");
+        std::fs::write(&vdf_path, FILE).unwrap();
+
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "keep-me").unwrap();
+        // Plant the old predictable `.vdf.steaminrust-tmp` symlink!
+        let planted = vdf_path.with_extension("vdf.steaminrust-tmp");
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+        assert_eq!(set(&dir, Setting::DownloadsDuringGameplay, false), Ok(true));
+        assert_eq!(get(&dir, Setting::DownloadsDuringGameplay), Some(false));
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep-me", "planted temp symlink was followed!");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

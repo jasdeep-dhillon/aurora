@@ -10,9 +10,9 @@
 
 use model::SteamId;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SavedAccount {
     pub account_name: String,
     pub steam_id: SteamId,
@@ -29,10 +29,98 @@ pub struct SavedAccount {
     pub guard_data: Option<String>,
 }
 
+impl std::fmt::Debug for SavedAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SavedAccount")
+            .field("account_name", &self.account_name)
+            .field("steam_id", &self.steam_id)
+            .field("persona_name", &self.persona_name)
+            .field("avatar_hash", &self.avatar_hash)
+            .field("refresh_token", &"[REDACTED]")
+            .field("guard_data", &self.guard_data.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+fn fallback_config_dir() -> PathBuf {
+    #[cfg(unix)]
+    {
+        // SAFETY: `getuid()` has no preconditions and never fails.
+        let uid = unsafe { libc::getuid() };
+        PathBuf::from(format!("/tmp/steaminrust-{uid}"))
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .filter(|v| !v.is_empty())
+            .map(|base| PathBuf::from(base).join("SteamInRust"))
+            .unwrap_or_else(|| std::env::temp_dir().join("SteamInRust"))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::env::temp_dir().join("SteamInRust")
+    }
+}
+
+fn resolve_config_dir(primary: Option<PathBuf>) -> PathBuf {
+    let dir = primary.filter(|p| !p.as_os_str().is_empty() && p != Path::new(".")).unwrap_or_else(fallback_config_dir);
+    let _ = ensure_private_dir_at(&dir, None);
+    dir
+}
+
 pub fn config_dir() -> PathBuf {
-    directories::ProjectDirs::from("dev", "SteamInRust", "SteamInRust")
+    resolve_config_dir(directories::ProjectDirs::from("dev", "SteamInRust", "SteamInRust").map(|d| d.config_dir().to_path_buf()))
+}
+
+pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    let base = directories::ProjectDirs::from("dev", "SteamInRust", "SteamInRust")
         .map(|d| d.config_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(fallback_config_dir);
+    ensure_private_dir_at(dir, Some(&base))
+}
+
+fn ensure_private_dir_at(dir: &Path, base: Option<&Path>) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        let mut b = std::fs::DirBuilder::new();
+        b.recursive(true).mode(0o700);
+        b.create(dir)?;
+        let uid = unsafe { libc::getuid() };
+        let tighten = |p: &Path| -> std::io::Result<()> {
+            let meta = std::fs::symlink_metadata(p)?;
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "config directory is a symlink or not a directory"));
+            }
+            if meta.uid() != uid {
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "config directory owned by another user"));
+            }
+            if meta.permissions().mode() & 0o777 != 0o700 {
+                std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(())
+        };
+        if let Some(root) = base.filter(|r| dir.starts_with(r)) {
+            let mut cur = root.to_path_buf();
+            if cur.exists() {
+                tighten(&cur)?;
+            }
+            if let Ok(rel) = dir.strip_prefix(root) {
+                for comp in rel.components() {
+                    cur.push(comp);
+                    tighten(&cur)?;
+                }
+            }
+        } else {
+            tighten(dir)?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = base;
+        std::fs::create_dir_all(dir)
+    }
 }
 
 fn path() -> PathBuf {
@@ -81,9 +169,6 @@ pub fn credentials(account: &str) -> Option<SavedAccount> {
 /// only by the user.
 fn write(list: &[SavedAccount]) {
     let p = path();
-    if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
     match serde_json::to_string_pretty(list) {
         Ok(json) => {
             if let Err(e) = write_private(&p, json.as_bytes()) {
@@ -94,20 +179,49 @@ fn write(list: &[SavedAccount]) {
     }
 }
 
-/// Replace `path` with `bytes`, mode 0600 on Unix (also fixing an older,
-/// world-readable file).
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+fn open_unique_temp(dir: &Path, base_name: &str) -> std::io::Result<(std::fs::File, PathBuf)> {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    for _ in 0..32 {
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u32(pid);
+        h.write_u64(seq);
+        let tag = h.finish();
+        let candidate = dir.join(format!(".{base_name}.{pid}-{seq}-{tag:016x}.tmp"));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&candidate) {
+            Ok(f) => return Ok((f, candidate)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
     }
-    {
-        use std::io::Write;
-        let mut f = opts.open(&tmp)?;
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "could not create unique temporary file"))
+}
+
+/// Replace `path` with `bytes`, mode 0600 on Unix inside a 0700 parent dir,
+/// using a unique `O_EXCL` temporary file.
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent directory"))?;
+    ensure_private_dir(dir)?;
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "refusing to overwrite symlink"));
+        }
+    }
+    let base_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let (mut f, tmp) = open_unique_temp(dir, base_name)?;
+    let res = (|| -> std::io::Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -115,8 +229,52 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
         }
         f.write_all(bytes)?;
         f.sync_all()?;
+        Ok(())
+    })();
+    drop(f);
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    std::fs::rename(&tmp, path)
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Copy `src` to `dst` with mode 0600 on Unix inside 0700 parent directories.
+pub(crate) fn copy_private(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let dir = dst.parent().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent directory"))?;
+    ensure_private_dir(dir)?;
+    if let Ok(meta) = std::fs::symlink_metadata(dst) {
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "refusing to overwrite symlink"));
+        }
+    }
+    let mut reader = std::fs::File::open(src)?;
+    let base_name = dst.file_name().and_then(|n| n.to_str()).unwrap_or("backup");
+    let (mut f, tmp) = open_unique_temp(dir, base_name)?;
+    let res = (|| -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::io::copy(&mut reader, &mut f)?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    drop(f);
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, dst) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 pub fn find(account: &str) -> Option<SavedAccount> {
@@ -212,5 +370,83 @@ mod secrets {
     pub fn delete(account: &str) -> keyring::Result<()> {
         set("refresh-token", account, None)?;
         set("guard-data", account, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_impls_redact_passwords_codes_keys_and_tokens() {
+        let login = crate::Command::LoginPassword { account: "alice".into(), password: "super_secret_pw".into() };
+        let login_dbg = format!("{login:?}");
+        assert!(login_dbg.contains("alice"));
+        assert!(!login_dbg.contains("super_secret_pw"), "password leaked in Command Debug: {login_dbg}");
+
+        let code = crate::Command::SubmitCode("987654".into());
+        assert!(!format!("{code:?}").contains("987654"), "Steam Guard code leaked in Command Debug");
+
+        let key = crate::Command::ActivateKey { key: "AAAAA-BBBBB-CCCCC".into() };
+        assert!(!format!("{key:?}").contains("AAAAA-BBBBB-CCCCC"), "CD key leaked in Command Debug");
+
+        let saved = SavedAccount {
+            account_name: "alice".into(),
+            steam_id: 76561198000000001,
+            persona_name: "Alice".into(),
+            avatar_hash: None,
+            refresh_token: "eyJhbGciOi.secret_refresh".into(),
+            guard_data: Some("guard_machine_secret".into()),
+        };
+        let saved_dbg = format!("{saved:?}");
+        assert!(saved_dbg.contains("alice"));
+        assert!(!saved_dbg.contains("secret_refresh"), "refresh_token leaked in SavedAccount Debug: {saved_dbg}");
+        assert!(!saved_dbg.contains("guard_machine_secret"), "guard_data leaked in SavedAccount Debug: {saved_dbg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_uses_excl_temp_and_0700_0600_perms() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sir-store-sec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sub = dir.join("cfg").join("offline").join("123");
+        std::fs::create_dir_all(&sub).unwrap();
+        // Start with loose 0755 permissions to verify write_private tightens it to 0700!
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let target = sub.join("account.json");
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "untouched").unwrap();
+        // Plant the old predictable `.tmp` symlink (`account.tmp`).
+        std::os::unix::fs::symlink(&victim, target.with_extension("tmp")).unwrap();
+
+        write_private(&target, b"{\"ok\":true}").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched", "predictable .tmp symlink was followed!");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"ok\":true}");
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(&sub).unwrap().permissions().mode() & 0o777, 0o700);
+
+        // Verify copy_private (used by cloud-backups) sets 0600 even from a 0644 source!
+        let src_save = dir.join("save.dat");
+        std::fs::write(&src_save, b"save-bytes").unwrap();
+        std::fs::set_permissions(&src_save, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let bkp = dir.join("cfg").join("cloud-backups").join("570").join("99").join("save.dat");
+        copy_private(&src_save, &bkp).unwrap();
+        assert_eq!(std::fs::metadata(&bkp).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(bkp.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+
+        // Verify offline::write sets 0600!
+        let off = dir.join("cfg").join("offline").join("123").join("playtime.json");
+        crate::offline::write(&off, &vec![1u32, 2, 3]);
+        assert_eq!(std::fs::metadata(&off).unwrap().permissions().mode() & 0o777, 0o600);
+
+        // Verify config_dir fallback never returns "." and enforces 0700 `/tmp/steaminrust-<uid>`!
+        let fb = resolve_config_dir(None);
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(fb, PathBuf::from(format!("/tmp/steaminrust-{uid}")));
+        assert_eq!(std::fs::metadata(&fb).unwrap().permissions().mode() & 0o777, 0o700);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
