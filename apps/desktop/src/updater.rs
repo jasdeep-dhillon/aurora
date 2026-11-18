@@ -34,8 +34,34 @@ pub enum Status {
     UpToDate,
     Available(Release),
     Downloading(Release, f32),
-    Ready(Release, PathBuf),
+    Ready(Release, PathBuf, String),
     Failed(String),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingUpdate {
+    pub version: String,
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
+fn deserialize_pending<'de, D>(deserializer: D) -> Result<Option<PendingUpdate>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Current(PendingUpdate),
+        Tuple3((String, PathBuf, String)),
+        LegacyTuple2((serde::de::IgnoredAny, serde::de::IgnoredAny)),
+    }
+    Ok(match Option::<Repr>::deserialize(deserializer)? {
+        Some(Repr::Current(p)) => Some(p),
+        Some(Repr::Tuple3((version, path, sha256))) => Some(PendingUpdate { version, path, sha256 }),
+        // Legacy entries without an expected SHA-256 are discarded fail-closed.
+        Some(Repr::LegacyTuple2(_)) | None => None,
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -46,7 +72,8 @@ pub struct Settings {
     /// A version the user chose to skip.
     pub skipped: Option<String>,
     /// Downloaded and verified, waiting for the next start.
-    pub pending: Option<(String, PathBuf)>,
+    #[serde(default, deserialize_with = "deserialize_pending")]
+    pub pending: Option<PendingUpdate>,
 }
 
 impl Default for Settings {
@@ -71,14 +98,168 @@ fn settings_path() -> PathBuf {
     client::store::config_dir().join("updater.json")
 }
 
+fn updates_dir() -> PathBuf {
+    client::store::config_dir().join("updates")
+}
+
+pub(crate) fn is_safe_setup_name(name: &str) -> bool {
+    if name.len() <= 4
+        || name.starts_with('.')
+        || name.ends_with(['.', ' '])
+        || name != name.trim()
+        || name.contains(['/', '\\', ':'])
+        || name.contains("..")
+        || name.chars().any(char::is_control)
+    {
+        return false;
+    }
+    if !name.to_ascii_lowercase().ends_with(".exe") {
+        return false;
+    }
+    let mut comps = std::path::Path::new(name).components();
+    matches!((comps.next(), comps.next()), (Some(std::path::Component::Normal(_)), None))
+}
+
+fn is_valid_sha256(h: &str) -> bool {
+    h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn ct_eq_hex(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x.to_ascii_lowercase() ^ y.to_ascii_lowercase())) == 0
+}
+
+fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let mut b = std::fs::DirBuilder::new();
+        b.recursive(true).mode(0o700);
+        b.create(dir)?;
+        let meta = std::fs::symlink_metadata(dir)?;
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "directory is a symlink"));
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+fn write_atomic_private(dir: &std::path::Path, file_name: &str, data: &[u8]) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    ensure_private_dir(dir)?;
+    let dst = dir.join(file_name);
+    if let Ok(meta) = std::fs::symlink_metadata(&dst) {
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "target is a symlink"));
+        }
+    }
+    let hex = client::ipc::os_random_hex(8);
+    let tmp = dir.join(format!(".{file_name}.{}-{hex}.tmp", std::process::id()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let res = (|| -> std::io::Result<()> {
+        let mut f = opts.open(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        f.write_all(data)?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, &dst) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(dst)
+}
+
+fn stage_installer_in(updates_root: &std::path::Path, setup_name: &str, data: &[u8]) -> Result<PathBuf, String> {
+    if !is_safe_setup_name(setup_name) {
+        return Err("unsafe installer filename".into());
+    }
+    if let Some(parent) = updates_root.parent() {
+        ensure_private_dir(parent).map_err(|e| e.to_string())?;
+    }
+    write_atomic_private(updates_root, setup_name, data).map_err(|e| e.to_string())
+}
+
+fn verify_staged_setup_in(updates_root: &std::path::Path, setup: &std::path::Path, expected_sha256: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    if !is_valid_sha256(expected_sha256) {
+        return false;
+    }
+    let Some(name) = setup.file_name().and_then(|n| n.to_str()) else { return false };
+    if !is_safe_setup_name(name) {
+        return false;
+    }
+    let Ok(dir_meta) = std::fs::symlink_metadata(updates_root) else { return false };
+    if !dir_meta.is_dir() || dir_meta.file_type().is_symlink() {
+        return false;
+    }
+    let Ok(file_meta) = std::fs::symlink_metadata(setup) else { return false };
+    if !file_meta.is_file() || file_meta.file_type().is_symlink() {
+        return false;
+    }
+    let (Ok(canon_root), Some(Ok(canon_parent))) = (updates_root.canonicalize(), setup.parent().map(|p| p.canonicalize())) else {
+        return false;
+    };
+    if canon_parent != canon_root {
+        return false;
+    }
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let Ok(mut f) = opts.open(setup) else { return false };
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(_) => return false,
+        }
+    }
+    let got: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    if !ct_eq_hex(&got, expected_sha256) {
+        let _ = std::fs::remove_file(setup);
+        return false;
+    }
+    true
+}
+
 fn load() -> Settings {
     std::fs::read_to_string(settings_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 fn save(s: &Settings) {
-    let _ = std::fs::create_dir_all(client::store::config_dir());
     if let Ok(text) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(settings_path(), text);
+        let _ = write_atomic_private(&client::store::config_dir(), "updater.json", text.as_bytes());
     }
 }
 
@@ -111,16 +292,20 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 /// opens (Steam does the same). Returns true when the app should quit.
 pub fn apply_pending_on_start() -> bool {
     let mut s = load();
-    let Some((version, setup)) = s.pending.take() else { return false };
+    let Some(pending) = s.pending.take() else { return false };
     save(&s);
-    if !is_installed() || !setup.exists() || !is_newer(&version, env!("CARGO_PKG_VERSION")) {
+    if !is_installed() || !is_newer(&pending.version, env!("CARGO_PKG_VERSION")) {
         return false;
     }
-    run_setup(&setup)
+    run_setup(&pending.path, &pending.sha256)
 }
 
-fn run_setup(setup: &std::path::Path) -> bool {
+fn run_setup(setup: &std::path::Path, expected_sha256: &str) -> bool {
     let Some(dir) = install_dir() else { return false };
+    if !verify_staged_setup_in(&updates_dir(), setup, expected_sha256) {
+        tracing::warn!("refusing to run unverified or tampered installer {}", setup.display());
+        return false;
+    }
     std::process::Command::new(setup).args(["--update", "--dir"]).arg(&dir).spawn().is_ok()
 }
 
@@ -145,7 +330,7 @@ pub fn tick(app: &mut SteamApp, ctx: &egui::Context) {
         g = state.lock().unwrap();
     }
     // Ready: offer a restart once per version.
-    if let Status::Ready(r, _) = &g.status {
+    if let Status::Ready(r, _, _) = &g.status {
         if g.prompted.as_deref() != Some(&r.version) {
             g.prompted = Some(r.version.clone());
             g.open = true;
@@ -217,10 +402,10 @@ fn download(ctx: egui::Context, r: Release) {
         let result = block_on(fetch_setup(&r, progress));
         let mut g = state.lock().unwrap();
         g.status = match result {
-            Ok(path) => {
-                g.settings.pending = Some((r.version.clone(), path.clone()));
+            Ok((path, sha256)) => {
+                g.settings.pending = Some(PendingUpdate { version: r.version.clone(), path: path.clone(), sha256: sha256.clone() });
                 save(&g.settings);
-                Status::Ready(r, path)
+                Status::Ready(r, path, sha256)
             }
             Err(e) => Status::Failed(e),
         };
@@ -266,7 +451,7 @@ async fn latest() -> Result<Option<Release>, String> {
         return Ok(None);
     }
     // "SteamInRust-Setup…" is the same setup under its name from before the rename.
-    let setup_named = |prefix: &str| rel.assets.iter().find(|a| a.name.starts_with(prefix) && a.name.ends_with(".exe"));
+    let setup_named = |prefix: &str| rel.assets.iter().find(|a| a.name.starts_with(prefix) && is_safe_setup_name(&a.name));
     let Some(setup) = setup_named("Aurora-Setup").or_else(|| setup_named("SteamInRust-Setup")) else { return Ok(None) };
     Ok(Some(Release {
         version: rel.tag_name.trim_start_matches('v').to_string(),
@@ -278,9 +463,13 @@ async fn latest() -> Result<Option<Release>, String> {
     }))
 }
 
-/// Download the setup into the cache and check it against SHA256SUMS.txt.
-async fn fetch_setup(r: &Release, progress: impl Fn(f32)) -> Result<PathBuf, String> {
+/// Download the setup into the private updates folder and check it against SHA256SUMS.txt.
+async fn fetch_setup(r: &Release, progress: impl Fn(f32)) -> Result<(PathBuf, String), String> {
     use sha2::{Digest, Sha256};
+    const MAX_INSTALLER_BYTES: usize = 512 * 1024 * 1024;
+    if !is_safe_setup_name(&r.setup_name) {
+        return Err("unsafe installer filename".into());
+    }
     let client = http();
     let sums_url = r.sums_url.as_ref().ok_or_else(|| t!("The release has no checksums; not installing it.").to_string())?;
     let sums = client.get(sums_url).send().await.and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())?;
@@ -290,32 +479,36 @@ async fn fetch_setup(r: &Release, progress: impl Fn(f32)) -> Result<PathBuf, Str
             let (hash, name) = l.split_once(char::is_whitespace)?;
             (name.trim().trim_start_matches('*') == r.setup_name).then(|| hash.to_lowercase())
         })
+        .filter(|h| is_valid_sha256(h))
         .ok_or_else(|| t!("The release has no checksums; not installing it.").to_string())?;
     let mut resp = client.get(&r.setup_url).send().await.and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?;
+    if resp.content_length().is_some_and(|len| len > MAX_INSTALLER_BYTES as u64) {
+        return Err(t!("The download was damaged (checksum mismatch). Try again later.").to_string());
+    }
     let total = resp.content_length().unwrap_or(0).max(1);
-    let mut data = Vec::with_capacity(total as usize);
+    let mut data = Vec::with_capacity(total.min(16 * 1024 * 1024) as usize);
     while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if data.len().saturating_add(chunk.len()) > MAX_INSTALLER_BYTES {
+            return Err(t!("The download was damaged (checksum mismatch). Try again later.").to_string());
+        }
         data.extend_from_slice(&chunk);
         progress(data.len() as f32 / total as f32);
     }
     let got: String = Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
-    if got != want {
+    if !ct_eq_hex(&got, &want) {
         return Err(t!("The download was damaged (checksum mismatch). Try again later.").to_string());
     }
-    let dir = std::env::temp_dir().join("Aurora-update");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(&r.setup_name);
-    std::fs::write(&path, &data).map_err(|e| e.to_string())?;
-    Ok(path)
+    let path = stage_installer_in(&updates_dir(), &r.setup_name, &data)?;
+    Ok((path, want))
 }
 
 /// Close the app and let the setup replace it, then it starts again.
-fn restart_to_update(app: &mut SteamApp, ctx: &egui::Context, setup: &std::path::Path) {
+fn restart_to_update(app: &mut SteamApp, ctx: &egui::Context, setup: &std::path::Path, expected_sha256: &str) {
     if let Ok(mut g) = STATE.lock() {
         g.settings.pending = None;
         save(&g.settings);
     }
-    if run_setup(setup) {
+    if run_setup(setup, expected_sha256) {
         app.exiting = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
@@ -327,7 +520,7 @@ fn window(app: &mut SteamApp, ctx: &egui::Context) {
     let status = STATE.lock().unwrap().status.clone();
     let (release, ready) = match &status {
         Status::Available(r) | Status::Downloading(r, _) => (r.clone(), None),
-        Status::Ready(r, p) => (r.clone(), Some(p.clone())),
+        Status::Ready(r, p, sha) => (r.clone(), Some((p.clone(), sha.clone()))),
         Status::Checking | Status::UpToDate | Status::Failed(_) => {
             // The answer to "Check for updates…".
             let mut close = false;
@@ -401,9 +594,9 @@ fn window(app: &mut SteamApp, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 match (&ready, &status) {
-                    (Some(setup), _) => {
+                    (Some((setup, sha)), _) => {
                         if w::button(ui, &t, Some(icons::REFRESH), t!("Restart and update"), w::Kind::Primary, w::Size::Md).clicked() {
-                            restart_to_update(app, ctx, setup);
+                            restart_to_update(app, ctx, setup, sha);
                             close = true;
                         }
                         if w::button(ui, &t, None, t!("On next start"), w::Kind::Ghost, w::Size::Md).on_hover_text(t!("It installs the next time you open Aurora")).clicked() {
@@ -510,7 +703,7 @@ pub fn settings_ui(ui: &mut Ui, t: &Theme) {
             Status::UpToDate => t!("You're up to date ({v})", v = env!("CARGO_PKG_VERSION")),
             Status::Available(r) => t!("Version {v} is available", v = r.version),
             Status::Downloading(r, f) => t!("Downloading {v}… {pct}%", v = r.version, pct = (f * 100.0) as u32),
-            Status::Ready(r, _) => t!("Version {v} is ready to install", v = r.version),
+            Status::Ready(r, _, _) => t!("Version {v} is ready to install", v = r.version),
             Status::Failed(e) => t!("Couldn't check for updates: {error}", error = e),
         };
         ui.label(w::text(line, 13.0, t.text_dim));
@@ -558,5 +751,83 @@ mod tests {
         assert!(super::is_newer("v0.7.1-1", "0.7.1"));
         assert!(super::is_newer("0.7.2", "0.7.1-1"));
         assert!(!super::is_newer("0.7.1-test.5", "0.7.1"));
+    }
+
+    #[test]
+    fn validates_setup_names_private_staging_and_sha256_before_exec() {
+        use sha2::{Digest, Sha256};
+
+        assert!(super::is_safe_setup_name("Aurora-Setup-0.9.1.exe"));
+        assert!(super::is_safe_setup_name("SteamInRust-Setup.EXE"));
+        for bad in [
+            "",
+            ".exe",
+            "..",
+            "../Aurora-Setup.exe",
+            "..\\Aurora-Setup.exe",
+            "sub/Aurora-Setup.exe",
+            "sub\\Aurora-Setup.exe",
+            "C:Aurora-Setup.exe",
+            "Aurora-Setup.bat",
+            "Aurora-Setup.exe ",
+            " Aurora-Setup.exe",
+            "Aurora-Setup.exe.",
+            "Aurora\0Setup.exe",
+        ] {
+            assert!(!super::is_safe_setup_name(bad), "expected unsafe setup_name rejection for {bad:?}");
+        }
+
+        // Updates dir lives under config_dir/updates, never std::env::temp_dir().
+        assert_eq!(super::updates_dir(), client::store::config_dir().join("updates"));
+
+        let base = std::env::temp_dir().join(format!("sir-upd-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let updates = base.join("cfg").join("updates");
+
+        let payload = b"MZ-fake-aurora-installer-binary";
+        let want: String = Sha256::digest(payload).iter().map(|b| format!("{b:02x}")).collect();
+
+        assert!(super::stage_installer_in(&updates, "../evil.exe", payload).is_err());
+        let staged = super::stage_installer_in(&updates, "Aurora-Setup-0.9.1.exe", payload).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let d_mode = std::fs::metadata(&updates).unwrap().permissions().mode() & 0o777;
+            let f_mode = std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777;
+            assert_eq!(d_mode, 0o700, "updates staging dir must be 0700");
+            assert_eq!(f_mode, 0o600, "staged setup file must be 0600");
+        }
+
+        // Settings JSON round-trips SHA-256 and drops legacy unhashed 2-tuples fail-closed.
+        let s = super::Settings {
+            auto: true,
+            skipped: Some("0.8.0".into()),
+            pending: Some(super::PendingUpdate { version: "0.9.1".into(), path: staged.clone(), sha256: want.clone() }),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: super::Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pending.as_ref().unwrap().sha256, want);
+
+        let legacy = r#"{"auto":false,"skipped":"0.8.0","pending":["0.9.1","/tmp/Aurora-Setup.exe"]}"#;
+        let legacy_parsed: super::Settings = serde_json::from_str(legacy).unwrap();
+        assert!(!legacy_parsed.auto);
+        assert_eq!(legacy_parsed.skipped.as_deref(), Some("0.8.0"));
+        assert!(legacy_parsed.pending.is_none(), "legacy pending without SHA-256 must be discarded");
+
+        // Pre-spawn verification succeeds on matching hash inside updates_root...
+        assert!(super::verify_staged_setup_in(&updates, &staged, &want));
+
+        // ...refuses files outside updates_root even with valid hash...
+        let outside = base.join("Aurora-Setup-0.9.1.exe");
+        std::fs::write(&outside, payload).unwrap();
+        assert!(!super::verify_staged_setup_in(&updates, &outside, &want));
+
+        // ...and detects TOCTOU tampering on disk, deleting the tampered installer!
+        std::fs::write(&staged, b"MZ-tampered-by-local-attacker").unwrap();
+        assert!(!super::verify_staged_setup_in(&updates, &staged, &want));
+        assert!(!staged.exists(), "tampered installer must be unlinked");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

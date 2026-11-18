@@ -86,10 +86,11 @@ pub async fn accept_tcp(listener: tokio::net::TcpListener, app_for: impl Fn(&str
     let app_for: Arc<dyn Fn(&str) -> Option<AppId> + Send + Sync> = Arc::new(app_for);
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
+            Ok((stream, peer)) if peer.ip().is_loopback() => {
                 let _ = stream.set_nodelay(true);
                 tokio::spawn(serve(stream, app_for.clone()));
             }
+            Ok(_) => {}
             Err(e) => {
                 tracing::warn!("overlay socket: {e}");
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -98,10 +99,13 @@ pub async fn accept_tcp(listener: tokio::net::TcpListener, app_for: impl Fn(&str
     }
 }
 
-async fn read_message(r: &mut (impl tokio::io::AsyncRead + Unpin)) -> std::io::Result<Vec<u8>> {
+const MAX_HELLO_BYTES: usize = 512;
+const MAX_FROM_GAME_BYTES: usize = 64 * 1024;
+
+async fn read_message(r: &mut (impl tokio::io::AsyncRead + Unpin), max_bytes: usize) -> std::io::Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
     let n = r.read_u32_le().await? as usize;
-    if n == 0 || n > wire::MAX_MESSAGE {
+    if n == 0 || n > max_bytes {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad overlay message"));
     }
     let mut body = vec![0u8; n];
@@ -115,7 +119,7 @@ where
 {
     use tokio::io::AsyncWriteExt;
     let (mut r, mut w) = tokio::io::split(pipe);
-    let hello = tokio::time::timeout(std::time::Duration::from_secs(10), read_message(&mut r)).await;
+    let hello = tokio::time::timeout(std::time::Duration::from_secs(10), read_message(&mut r, MAX_HELLO_BYTES)).await;
     let Ok(Ok(Ok(FromGame::Hello { token, pid, width, height }))) = hello.map(|m| m.map(|b| FromGame::decode(&b))) else { return };
     let Some(app_id) = app_for(&token) else {
         tracing::warn!("overlay: connection with an unknown launch token");
@@ -136,7 +140,7 @@ where
             }
         }
     });
-    while let Ok(body) = read_message(&mut r).await {
+    while let Ok(body) = read_message(&mut r, MAX_FROM_GAME_BYTES).await {
         match FromGame::decode(&body) {
             Ok(m) => {
                 if in_tx.send(m).is_err() {
@@ -151,4 +155,51 @@ where
     // Dropping `in_tx` tells the UI the game is gone.
     drop(in_tx);
     wake();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caps_pre_hello_to_512_and_post_hello_to_64k() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            use tokio::io::AsyncWriteExt;
+
+            // 1. Pre-Hello > 512 bytes must be rejected before decoding/auth.
+            let (mut client, server) = tokio::io::duplex(4096);
+            let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let seen2 = seen.clone();
+            let task = tokio::spawn(serve(server, Arc::new(move |_| {
+                seen2.store(true, std::sync::atomic::Ordering::SeqCst);
+                Some(480)
+            })));
+            let big_hello = FromGame::Hello { token: "t".repeat(600), pid: 1, width: 800, height: 600 }.encode();
+            assert!(big_hello.len() > 512);
+            let mut framed = Vec::new();
+            framed.extend_from_slice(&(big_hello.len() as u32).to_le_bytes());
+            framed.extend_from_slice(&big_hello);
+            let _ = client.write_all(&framed).await;
+            drop(client);
+            task.await.unwrap();
+            assert!(!seen.load(std::sync::atomic::Ordering::SeqCst), "oversized pre-Hello must be rejected before token lookup");
+
+            // 2. Valid Hello (<= 512 bytes) followed by > 64 KiB FromGame frame must fail closed.
+            let (mut client2, server2) = tokio::io::duplex(128 * 1024);
+            let task2 = tokio::spawn(serve(server2, Arc::new(|tok| (tok == "ok-tok").then_some(730))));
+            let ok_hello = FromGame::Hello { token: "ok-tok".into(), pid: 42, width: 1280, height: 720 }.encode();
+            assert!(ok_hello.len() <= 512);
+            let mut framed2 = Vec::new();
+            framed2.extend_from_slice(&(ok_hello.len() as u32).to_le_bytes());
+            framed2.extend_from_slice(&ok_hello);
+            // Post-hello frame claiming 65537 bytes (> 64 KiB) without sending body:
+            // capped reader rejects length header immediately without waiting for 65537 bytes!
+            let too_big = 64 * 1024 + 1usize;
+            framed2.extend_from_slice(&(too_big as u32).to_le_bytes());
+            let _ = client2.write_all(&framed2).await;
+            let finished = tokio::time::timeout(std::time::Duration::from_millis(300), task2).await;
+            assert!(finished.is_ok(), "serve must terminate immediately on >64KiB post-Hello frame");
+        });
+    }
 }

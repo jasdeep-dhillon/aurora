@@ -528,8 +528,13 @@ impl SteamApp {
     fn handle_links(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         use crate::links::Link;
         while let Ok(l) = self.links.try_recv() {
-            self.show_window(ctx);
-            self.pending_links.push(l);
+            let trimmed = l.trim();
+            if trimmed == "show" || crate::links::parse(trimmed).is_some() {
+                self.show_window(ctx);
+                if trimmed != "show" {
+                    self.pending_links.push(trimmed.to_string());
+                }
+            }
         }
         if self.state.phase != Phase::LoggedIn {
             return;
