@@ -590,11 +590,14 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
         return;
     }
     let viewport = overlay_viewport();
-    // Not true fullscreen: Windows turns a window that exactly covers the
-    // screen into exclusive fullscreen, which drops transparency (the game
+    // Not true fullscreen on Windows: Windows turns a window that exactly covers
+    // the screen into exclusive fullscreen, which drops transparency (the game
     // went black). One pixel short keeps it a normal see-through window.
+    // On Linux (especially GNOME Wayland), compositors ignore `with_position`
+    // and clamp undecorated floating windows, so request fullscreen directly so
+    // the fallback overlay fills the screen without needing manual maximize.
     let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1920.0, 1080.0));
-    let builder = egui::ViewportBuilder::default()
+    let mut builder = egui::ViewportBuilder::default()
         .with_title(format!("{} Overlay", i18n::BRAND))
         .with_decorations(false)
         .with_transparent(true)
@@ -603,6 +606,10 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
         .with_inner_size(monitor - egui::vec2(0.0, 1.0))
         .with_mouse_passthrough(!active)
         .with_taskbar(false);
+    #[cfg(target_os = "linux")]
+    {
+        builder = builder.with_fullscreen(true);
+    }
     // Linux: the overlay window draws in its own frames. The main window is
     // behind the game or minimized then, and the compositor (GNOME on
     // Wayland) hardly gives it frames, so an overlay drawn from them
@@ -623,6 +630,7 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
                 app.overlay.passthrough = Some(!active);
             }
             if opened_now {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
                 app.overlay.focused = true;
             }
