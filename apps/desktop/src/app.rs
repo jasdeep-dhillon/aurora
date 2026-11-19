@@ -165,6 +165,7 @@ pub struct SteamApp {
     /// waited).
     pending_size: Option<([f32; 2], bool, u32)>,
     pub tray: crate::tray::Tray,
+    taskbar: crate::taskbar::Taskbar,
     flags: crate::builtin::settings::SharedFlags,
     pub friends_window: crate::friends_window::FriendsWindow,
     links: std::sync::mpsc::Receiver<String>,
@@ -299,6 +300,7 @@ impl SteamApp {
             center_window: None,
             pending_size: None,
             tray: crate::tray::Tray::new(cc),
+            taskbar: crate::taskbar::Taskbar::new(cc),
             flags,
             friends_window: Default::default(),
             links: crate::links::listen(cc.egui_ctx.clone()),
@@ -772,6 +774,7 @@ impl eframe::App for SteamApp {
             }
         }
         self.drain_events(&ctx, &mut actions);
+        self.taskbar.update(&self.state.downloads);
         self.handle_tray(&ctx, &mut actions);
         self.handle_links(&ctx, &mut actions);
 

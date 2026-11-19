@@ -1055,6 +1055,14 @@ impl FamilyRole {
             _ => FamilyRole::Unknown,
         }
     }
+
+    pub fn to_steam(self) -> i32 {
+        match self {
+            FamilyRole::Adult => 1,
+            FamilyRole::Child => 2,
+            FamilyRole::Unknown => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1075,6 +1083,29 @@ pub struct SharedApp {
     pub excluded: bool,
 }
 
+/// An incoming invitation to join another user's Steam Family.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyInvite {
+    pub family_id: u64,
+    pub inviter: SteamId,
+    pub role: FamilyRole,
+    pub awaiting_2fa: bool,
+}
+
+/// Outcome of a Steam Family management action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FamilyActionDone {
+    Created,
+    Renamed,
+    Invited { needs_2fa: bool },
+    InviteCancelled,
+    InviteResent,
+    Joined { needs_2fa: bool },
+    Removed,
+    Left,
+    Deleted,
+}
+
 /// Whether you're in a family, and which.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FamilyStatus {
@@ -1083,8 +1114,8 @@ pub struct FamilyStatus {
     pub role: FamilyRole,
     /// Seconds before you can join a family again.
     pub cooldown: u32,
-    /// Families that invited you: (family id, inviter).
-    pub invites: Vec<(u64, SteamId)>,
+    /// Families that invited you.
+    pub invites: Vec<FamilyInvite>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

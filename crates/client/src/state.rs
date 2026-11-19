@@ -66,6 +66,8 @@ pub struct State {
     pub purchases: Option<Result<model::PurchasePage, String>>,
     pub licenses: Option<Result<Vec<model::License>, String>>,
     pub family: Option<Result<model::FamilyStatus, String>>,
+    /// Sequence number and outcome of the most recent family management action.
+    pub family_action: Option<(u64, Result<model::FamilyActionDone, String>)>,
     pub support_messages: HashMap<String, Result<Vec<model::SupportMessage>, String>>,
     /// Market fee rules for your wallet currency (USD-style until Steam says).
     pub fee_rules: model::fees::Rules,
@@ -264,6 +266,10 @@ impl State {
             },
             Event::LicenseList(r) => self.licenses = Some(r.clone()),
             Event::Family(r) => self.family = Some(r.clone()),
+            Event::FamilyAction(r) => {
+                let seq = self.family_action.as_ref().map_or(1, |(s, _)| s.saturating_add(1));
+                self.family_action = Some((seq, r.clone()));
+            }
             Event::SupportTicket { id, result } => {
                 self.support_messages.insert(id.clone(), result.clone());
             }

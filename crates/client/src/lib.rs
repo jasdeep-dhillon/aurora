@@ -214,6 +214,22 @@ pub enum Command {
     LoadLicenses { language: String },
     /// Your Steam Family and its shared library.
     LoadFamily { language: String },
+    /// Create a new Steam Family with you as its first adult member.
+    CreateFamily { name: String, language: String },
+    /// Rename your Steam Family (adult role required).
+    RenameFamily { family_id: u64, name: String, language: String },
+    /// Invite a Steam user to your family.
+    InviteToFamily { family_id: u64, steam_id: SteamId, role: model::FamilyRole, language: String },
+    /// Cancel a pending outgoing invite, or decline an incoming invite (`steam_id == me`).
+    CancelFamilyInvite { family_id: u64, steam_id: SteamId, language: String },
+    /// Resend a pending family invitation.
+    ResendFamilyInvite { family_id: u64, steam_id: SteamId },
+    /// Accept a pending invitation and join a Steam Family.
+    JoinFamily { family_id: u64, language: String },
+    /// Remove a member from the family, or leave the family (`steam_id == me`).
+    RemoveFromFamily { family_id: u64, steam_id: SteamId, language: String },
+    /// Delete a Steam Family (adult role required).
+    DeleteFamily { family_id: u64, language: String },
     CancelListing { listing_id: u64 },
     CancelBuyOrder { order_id: u64 },
     /// Fetch the games on someone's profile with their playtime.
@@ -363,6 +379,20 @@ impl std::fmt::Debug for Command {
             Command::LoadPurchases { language, cursor } => f.debug_struct("LoadPurchases").field("language", language).field("cursor", cursor).finish(),
             Command::LoadLicenses { language } => f.debug_struct("LoadLicenses").field("language", language).finish(),
             Command::LoadFamily { language } => f.debug_struct("LoadFamily").field("language", language).finish(),
+            Command::CreateFamily { name, language } => f.debug_struct("CreateFamily").field("name", name).field("language", language).finish(),
+            Command::RenameFamily { family_id, name, language } => f.debug_struct("RenameFamily").field("family_id", family_id).field("name", name).field("language", language).finish(),
+            Command::InviteToFamily { family_id, steam_id, role, language } => {
+                f.debug_struct("InviteToFamily").field("family_id", family_id).field("steam_id", steam_id).field("role", role).field("language", language).finish()
+            }
+            Command::CancelFamilyInvite { family_id, steam_id, language } => {
+                f.debug_struct("CancelFamilyInvite").field("family_id", family_id).field("steam_id", steam_id).field("language", language).finish()
+            }
+            Command::ResendFamilyInvite { family_id, steam_id } => f.debug_struct("ResendFamilyInvite").field("family_id", family_id).field("steam_id", steam_id).finish(),
+            Command::JoinFamily { family_id, language } => f.debug_struct("JoinFamily").field("family_id", family_id).field("language", language).finish(),
+            Command::RemoveFromFamily { family_id, steam_id, language } => {
+                f.debug_struct("RemoveFromFamily").field("family_id", family_id).field("steam_id", steam_id).field("language", language).finish()
+            }
+            Command::DeleteFamily { family_id, language } => f.debug_struct("DeleteFamily").field("family_id", family_id).field("language", language).finish(),
             Command::CancelListing { listing_id } => f.debug_struct("CancelListing").field("listing_id", listing_id).finish(),
             Command::CancelBuyOrder { order_id } => f.debug_struct("CancelBuyOrder").field("order_id", order_id).finish(),
             Command::LoadPlayerGames { steam_id, language } => f.debug_struct("LoadPlayerGames").field("steam_id", steam_id).field("language", language).finish(),
@@ -528,6 +558,8 @@ pub enum Event {
     Purchases { more: bool, result: Result<model::PurchasePage, String> },
     LicenseList(Result<Vec<model::License>, String>),
     Family(Result<model::FamilyStatus, String>),
+    /// Outcome of a Steam Family management action.
+    FamilyAction(Result<model::FamilyActionDone, String>),
     /// Community Market fee rules for your wallet currency.
     FeeRules(model::fees::Rules),
     ListingCancelled { listing_id: u64, result: Result<(), String> },
