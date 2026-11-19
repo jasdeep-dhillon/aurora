@@ -149,6 +149,12 @@ impl Server {
         token
     }
 
+    /// Loopback TCP port listening for in-game overlay connections (Linux).
+    #[cfg(not(windows))]
+    pub fn overlay_port(&self) -> Option<u16> {
+        self.name.split_once('/')?.1.parse().ok()
+    }
+
     /// Queue an event for every running copy of `app_id`.
     pub fn push(&self, app_id: AppId, event: GameEvent) {
         for slot in self.tokens.lock().unwrap().values_mut().filter(|s| s.app_id == app_id) {
