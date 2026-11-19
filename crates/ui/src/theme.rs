@@ -3,6 +3,26 @@
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Visuals};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeightPreset {
+    #[default]
+    Heavy,
+    Balanced,
+}
+
+/// Optional custom font bytes provided by a theme package.
+#[derive(Debug, Clone, Default)]
+pub struct CustomFonts {
+    pub regular: Option<Vec<u8>>,
+    pub bold: Option<Vec<u8>>,
+    pub mono: Option<Vec<u8>>,
+}
+
+fn default_font_scale() -> f32 {
+    1.0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Theme {
@@ -33,6 +53,10 @@ pub struct Theme {
     pub danger: Color32,
     pub discount: Color32,
     pub radius: u8,
+    #[serde(default)]
+    pub weight_preset: WeightPreset,
+    #[serde(default = "default_font_scale")]
+    pub font_scale: f32,
 }
 
 impl Default for Theme {
@@ -48,6 +72,10 @@ const fn hex(rgb: u32) -> Color32 {
 impl Theme {
     pub fn presets() -> Vec<Theme> {
         vec![Self::nevko(), Self::midnight(), Self::aurora(), Self::classic(), Self::oled(), Self::daylight()]
+    }
+
+    pub fn preset_by_name(name: &str) -> Option<Theme> {
+        Self::presets().into_iter().find(|p| p.name.eq_ignore_ascii_case(name))
     }
 
     /// After the NEVKO-UI Steam skin (github.com/dotFelixan/NEVKO-UI): one
@@ -76,6 +104,8 @@ impl Theme {
             danger: hex(0xE64A35),
             discount: hex(0x4C6B22),
             radius: 9,
+            weight_preset: WeightPreset::Heavy,
+            font_scale: 1.0,
         }
     }
 
@@ -103,6 +133,8 @@ impl Theme {
             danger: hex(0xF0544F),
             discount: hex(0x4C6B22),
             radius: 12,
+            weight_preset: WeightPreset::Heavy,
+            font_scale: 1.0,
         }
     }
 
@@ -187,16 +219,25 @@ impl Theme {
             danger: hex(0xDC2626),
             discount: hex(0x4D7C0F),
             radius: 12,
+            weight_preset: WeightPreset::Heavy,
+            font_scale: 1.0,
         }
     }
 
-    /// A saved theme with its preset's current colors. Only the accent colors
-    /// and corner roundness can be edited in Settings, so those are kept; the
-    /// rest comes from the preset, so fixes to a preset (such as the status
-    /// colors) reach themes saved before them. Unknown names stay as saved.
+    /// A saved theme with its preset's current colors. Accent colors, corner
+    /// roundness, and typography overrides are kept; the rest comes from the
+    /// preset, so fixes to a preset reach themes saved before them. Unknown or
+    /// custom theme names stay untouched.
     pub fn refreshed(self) -> Self {
         match Self::presets().into_iter().find(|p| p.name == self.name) {
-            Some(preset) => Self { accent: self.accent, accent_2: self.accent_2, radius: self.radius, ..preset },
+            Some(preset) => Self {
+                accent: self.accent,
+                accent_2: self.accent_2,
+                radius: self.radius,
+                weight_preset: self.weight_preset,
+                font_scale: self.font_scale,
+                ..preset
+            },
             None => self,
         }
     }
@@ -260,6 +301,7 @@ impl Theme {
             s.corner_radius = r;
         }
 
+        let fs = self.font_scale.clamp(0.75, 1.5);
         ctx.set_visuals(v);
         ctx.global_style_mut(|s| {
             s.spacing.item_spacing = egui::vec2(8.0, 8.0);
@@ -272,11 +314,11 @@ impl Theme {
             s.interaction.selectable_labels = false;
             use egui::TextStyle::*;
             s.text_styles = [
-                (Heading, FontId::new(24.0, semibold())),
-                (Body, FontId::new(14.0, FontFamily::Proportional)),
-                (Button, FontId::new(14.0, medium())),
-                (Small, FontId::new(12.0, FontFamily::Proportional)),
-                (Monospace, FontId::new(13.0, FontFamily::Monospace)),
+                (Heading, FontId::new(24.0 * fs, semibold())),
+                (Body, FontId::new(14.0 * fs, FontFamily::Proportional)),
+                (Button, FontId::new(14.0 * fs, medium())),
+                (Small, FontId::new(12.0 * fs, FontFamily::Proportional)),
+                (Monospace, FontId::new(13.0 * fs, FontFamily::Monospace)),
             ]
             .into();
         });
@@ -293,10 +335,13 @@ pub fn bold() -> FontFamily {
     FontFamily::Name("bold".into())
 }
 
-// The interface is set in heavy weights, like a desktop using "Inter Bold":
-// body and medium text in Geist Bold, semibold and bold in Geist ExtraBold.
+// Heavy weight preset: body and medium text in Geist Bold, semibold and bold
+// in Geist ExtraBold. Balanced weight preset: Inter Regular/Medium/SemiBold/Bold.
 const GEIST_BOLD: &[u8] = include_bytes!("../assets/fonts/Geist-Bold.ttf");
 const GEIST_EXTRABOLD: &[u8] = include_bytes!("../assets/fonts/Geist-ExtraBold.ttf");
+const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+const INTER_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Inter-Medium.ttf");
+const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
 const INTER_BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-Bold.ttf");
 const PHOSPHOR: &[u8] = include_bytes!("../assets/Phosphor.ttf");
 
@@ -330,7 +375,7 @@ fn map_font(path: &std::path::Path) -> Option<&'static [u8]> {
 /// Install Geist (Bold and ExtraBold, Inter Bold behind it for scripts Geist lacks) plus
 /// the icon font, with grayscale anti-aliasing. Call once at startup.
 pub fn install_fonts(ctx: &egui::Context) {
-    install_fonts_with(ctx, false);
+    install_fonts_for_theme(ctx, false, WeightPreset::Heavy, None);
 }
 
 /// Like [`install_fonts`], but `lcd` renders text and icons with subpixel
@@ -338,16 +383,61 @@ pub fn install_fonts(ctx: &egui::Context) {
 /// by this app's patched glow painter: the in-game overlay hands its meshes
 /// to another renderer and must stay grayscale.
 pub fn install_fonts_with(ctx: &egui::Context, lcd: bool) {
+    install_fonts_for_theme(ctx, lcd, WeightPreset::Heavy, None);
+}
+
+/// Install fonts for a theme's [`WeightPreset`] and optional [`CustomFonts`],
+/// keeping Phosphor icons, Linux LCD subpixel rendering, and system CJK
+/// fallbacks intact.
+pub fn install_fonts_for_theme(
+    ctx: &egui::Context,
+    lcd: bool,
+    weight: WeightPreset,
+    custom: Option<&CustomFonts>,
+) {
     use egui::epaint::text::FontTweak;
     use std::sync::Arc;
     let mut fonts = egui::FontDefinitions::default();
-    for (name, bytes) in [
-        ("geist-bold", GEIST_BOLD),
-        ("geist-extrabold", GEIST_EXTRABOLD),
-        ("inter-bold", INTER_BOLD),
-    ] {
-        fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_static(bytes).tweak(text_tweak()).lcd(lcd)));
+    match weight {
+        WeightPreset::Heavy => {
+            for (name, bytes) in [
+                ("geist-bold", GEIST_BOLD),
+                ("geist-extrabold", GEIST_EXTRABOLD),
+                ("inter-bold", INTER_BOLD),
+            ] {
+                fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_static(bytes).tweak(text_tweak()).lcd(lcd)));
+            }
+        }
+        WeightPreset::Balanced => {
+            for (name, bytes) in [
+                ("inter-regular", INTER_REGULAR),
+                ("inter-medium", INTER_MEDIUM),
+                ("inter-semibold", INTER_SEMIBOLD),
+                ("inter-bold", INTER_BOLD),
+            ] {
+                fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_static(bytes).tweak(text_tweak()).lcd(lcd)));
+            }
+        }
     }
+
+    let mut custom_regular = None;
+    let mut custom_bold = None;
+    let mut custom_mono = None;
+    if let Some(cf) = custom {
+        if let Some(bytes) = cf.regular.as_ref() {
+            fonts.font_data.insert("custom-regular".into(), Arc::new(egui::FontData::from_owned(bytes.clone()).tweak(text_tweak()).lcd(lcd)));
+            custom_regular = Some("custom-regular");
+        }
+        if let Some(bytes) = cf.bold.as_ref() {
+            fonts.font_data.insert("custom-bold".into(), Arc::new(egui::FontData::from_owned(bytes.clone()).tweak(text_tweak()).lcd(lcd)));
+            custom_bold = Some("custom-bold");
+        }
+        if let Some(bytes) = cf.mono.as_ref() {
+            fonts.font_data.insert("custom-mono".into(), Arc::new(egui::FontData::from_owned(bytes.clone()).tweak(text_tweak()).lcd(lcd)));
+            custom_mono = Some("custom-mono");
+        }
+    }
+
     // Icons are drawn from their outlines unhinted, exactly as the SVGs
     // would be: the auto-hinter otherwise bends them onto the pixel grid.
     let icon_tweak = if cfg!(target_os = "linux") { FontTweak { hinting: Some(false), ..Default::default() } } else { FontTweak::default() };
@@ -371,15 +461,78 @@ pub fn install_fonts_with(ctx: &egui::Context, lcd: bool) {
     // Phosphor has only private-use glyphs and Inter none, so the icon font
     // can sit right after the text fonts. (Geist's one private-use glyph,
     // U+F8FF, is outside Phosphor's range.)
-    let family = |geist: &str| {
-        let mut v = vec![geist.to_string(), "inter-bold".to_string(), "phosphor".to_string()];
+    let family = |primary: Option<&str>, base: &[&str]| {
+        let mut v = Vec::new();
+        if let Some(p) = primary {
+            v.push(p.to_string());
+        }
+        for b in base {
+            v.push((*b).to_string());
+        }
+        v.push("phosphor".to_string());
         v.extend(fallbacks.iter().cloned());
         v
     };
-    fonts.families.insert(FontFamily::Proportional, family("geist-bold"));
-    fonts.families.insert(medium(), family("geist-bold"));
-    fonts.families.insert(semibold(), family("geist-extrabold"));
-    fonts.families.insert(bold(), family("geist-extrabold"));
-    fonts.families.entry(FontFamily::Monospace).or_default().push("phosphor".into());
+    let bold_primary = custom_bold.or(custom_regular);
+    match weight {
+        WeightPreset::Heavy => {
+            fonts.families.insert(FontFamily::Proportional, family(custom_regular, &["geist-bold", "inter-bold"]));
+            fonts.families.insert(medium(), family(custom_regular, &["geist-bold", "inter-bold"]));
+            fonts.families.insert(semibold(), family(bold_primary, &["geist-extrabold", "inter-bold"]));
+            fonts.families.insert(bold(), family(bold_primary, &["geist-extrabold", "inter-bold"]));
+        }
+        WeightPreset::Balanced => {
+            fonts.families.insert(FontFamily::Proportional, family(custom_regular, &["inter-regular"]));
+            fonts.families.insert(medium(), family(custom_regular, &["inter-medium"]));
+            fonts.families.insert(semibold(), family(bold_primary, &["inter-semibold"]));
+            fonts.families.insert(bold(), family(bold_primary, &["inter-bold"]));
+        }
+    }
+    let mono = fonts.families.entry(FontFamily::Monospace).or_default();
+    if let Some(cm) = custom_mono {
+        mono.insert(0, cm.to_string());
+    }
+    mono.push("phosphor".into());
     ctx.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preset_by_name_is_case_insensitive() {
+        assert_eq!(Theme::preset_by_name("nevko").map(|t| t.name), Some("NEVKO".into()));
+        assert_eq!(Theme::preset_by_name("OLED").map(|t| t.name), Some("OLED".into()));
+        assert!(Theme::preset_by_name("custom-unknown").is_none());
+    }
+
+    #[test]
+    fn refreshed_keeps_unknown_custom_theme_untouched() {
+        let mut custom = Theme::nevko();
+        custom.name = "My Custom Theme".into();
+        custom.bg = Color32::from_rgb(12, 34, 56);
+        custom.weight_preset = WeightPreset::Balanced;
+        custom.font_scale = 1.1;
+
+        assert_eq!(custom.clone().refreshed(), custom);
+    }
+
+    #[test]
+    fn refreshed_updates_preset_colors_while_preserving_overrides() {
+        let mut saved = Theme::nevko();
+        let accent = Color32::from_rgb(255, 100, 50);
+        saved.bg = Color32::from_rgb(1, 2, 3);
+        saved.accent = accent;
+        saved.radius = 4;
+        saved.weight_preset = WeightPreset::Balanced;
+        saved.font_scale = 0.95;
+
+        let out = saved.refreshed();
+        assert_eq!(out.bg, Theme::nevko().bg);
+        assert_eq!(out.accent, accent);
+        assert_eq!(out.radius, 4);
+        assert_eq!(out.weight_preset, WeightPreset::Balanced);
+        assert_eq!(out.font_scale, 0.95);
+    }
 }

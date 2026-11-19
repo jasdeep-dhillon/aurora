@@ -7,7 +7,7 @@ pub mod native;
 pub mod theme;
 pub mod widgets;
 
-pub use theme::{Theme, install_fonts, install_fonts_with};
+pub use theme::{CustomFonts, Theme, WeightPreset, install_fonts, install_fonts_for_theme, install_fonts_with};
 
 use i18n::t;
 
