@@ -6122,6 +6122,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vk_overlay"
+version = "0.9.1"
+
+[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

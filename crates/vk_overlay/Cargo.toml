@@ -1,0 +1,13 @@
+[package]
+name = "vk_overlay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Linux Vulkan implicit layer for Aurora's in-game overlay (works with Proton anti-cheat and native Vulkan games)"
+
+[lib]
+name = "VkLayer_aurora_overlay"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]

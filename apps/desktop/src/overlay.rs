@@ -4,12 +4,13 @@
 //! can move, resize and pin. A pinned window stays over the game after the
 //! overlay closes, at the opacity you pick, and lets clicks through to it.
 //!
-//! For D3D11 games we start with our steamclient DLL it is drawn inside the
-//! game, like Steam's (see `ingame.rs` and `crates/steamclient/src/overlay`),
-//! so it works in exclusive fullscreen and the game keeps focus. Other games
-//! (other graphics APIs, anti-cheat games real Steam runs) get it as a
-//! separate always-on-top window, which shows over windowed and
-//! borderless-fullscreen games only.
+//! For games we start with our steamclient DLL (D3D11, D3D12, D3D9, OpenGL,
+//! and Vulkan) it is drawn inside the game, like Steam's (see `ingame.rs` and
+//! `crates/steamclient/src/overlay`), so it works in exclusive fullscreen and
+//! the game keeps focus. Other games (games whose API hook isn't active, or
+//! anti-cheat games real Steam runs) automatically fall back to a separate
+//! always-on-top window, which shows over windowed and borderless-fullscreen
+//! games.
 
 use ui::widgets::EditMenu;
 use i18n::t;
@@ -591,11 +592,14 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
         return;
     }
     let viewport = overlay_viewport();
-    // Not true fullscreen: Windows turns a window that exactly covers the
-    // screen into exclusive fullscreen, which drops transparency (the game
+    // Not true fullscreen on Windows: Windows turns a window that exactly covers
+    // the screen into exclusive fullscreen, which drops transparency (the game
     // went black). One pixel short keeps it a normal see-through window.
+    // On Linux (especially GNOME Wayland), compositors ignore `with_position`
+    // and clamp undecorated floating windows, so request fullscreen directly so
+    // the fallback overlay fills the screen without needing manual maximize.
     let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1920.0, 1080.0));
-    let builder = egui::ViewportBuilder::default()
+    let mut builder = egui::ViewportBuilder::default()
         .with_title(format!("{} Overlay", i18n::BRAND))
         .with_decorations(false)
         .with_transparent(true)
@@ -604,6 +608,10 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
         .with_inner_size(monitor - egui::vec2(0.0, 1.0))
         .with_mouse_passthrough(!active)
         .with_taskbar(false);
+    #[cfg(target_os = "linux")]
+    {
+        builder = builder.with_fullscreen(true);
+    }
     // Linux: the overlay window draws in its own frames. The main window is
     // behind the game or minimized then, and the compositor (GNOME on
     // Wayland) hardly gives it frames, so an overlay drawn from them
@@ -624,6 +632,7 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
                 app.overlay.passthrough = Some(!active);
             }
             if opened_now {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
                 app.overlay.focused = true;
             }

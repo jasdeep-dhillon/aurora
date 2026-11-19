@@ -2577,10 +2577,19 @@ impl Online {
                 let (account, token, me) = (self.account.clone(), self.refresh_token.clone(), self.me);
                 self.running.insert(app_id, 0);
                 self.official.insert(app_id, dir.to_path_buf());
+                #[cfg(not(windows))]
+                let overlay = self.ipc.overlay_port().map(|port| {
+                    let tok = self.ipc.register(app_id);
+                    self.launch_tokens.insert(app_id, tok.clone());
+                    (port, tok)
+                });
+                #[cfg(windows)]
+                let overlay: Option<(u16, String)> = None;
                 let (tx, sink, args, dir2) = (exit_tx.clone(), sink.clone(), args.clone(), dir.to_path_buf());
                 tokio::task::spawn_blocking(move || {
                     let started = || sink(Event::GameStarted { app_id });
-                    if let Err(e) = launch::run_through_host(&app, &dir2, &args, &account, &token, me, started) {
+                    let ov = overlay.as_ref().map(|(p, t)| (*p, t.as_str()));
+                    if let Err(e) = launch::run_through_host(&app, &dir2, &args, &account, &token, me, ov, started) {
                         sink(Event::Error(e));
                     }
                     let _ = tx.send(app_id);
