@@ -1060,20 +1060,100 @@ async fn online(
                 }
                 Some(Command::LoadFamily { language }) => {
                     let (conn, sink, me) = (st.conn.clone(), sink.clone(), st.me);
+                    tokio::spawn(async move { reload_family(&conn, &sink, me, &language).await });
+                }
+                Some(Command::CreateFamily { name, language }) => {
+                    let (conn, sink, me) = (st.conn.clone(), sink.clone(), st.me);
                     tokio::spawn(async move {
-                        let r = crate::account::family(&conn, me, &language).await;
-                        // Names and avatars for members who aren't friends.
-                        if let Ok(f) = &r {
-                            let mut ids: Vec<SteamId> = f.invites.iter().map(|i| i.1).collect();
-                            if let Some(g) = &f.family {
-                                ids.extend(g.members.iter().map(|m| m.steam_id).chain(g.invites.iter().map(|i| i.0)));
+                        match crate::account::create_family(&conn, me, &name).await {
+                            Ok(_) => {
+                                sink(Event::FamilyAction(Ok(model::FamilyActionDone::Created)));
+                                reload_family(&conn, &sink, me, &language).await;
                             }
-                            ids.retain(|id| *id != me && *id != 0);
-                            if !ids.is_empty() {
-                                let _ = conn.send(emsg::CLIENT_REQUEST_FRIEND_DATA, &CMsgClientRequestFriendData { persona_state_requested: Some(PERSONA_FLAGS), friends: ids });
-                            }
+                            Err(e) => sink(Event::FamilyAction(Err(e))),
                         }
-                        sink(Event::Family(r));
+                    });
+                }
+                Some(Command::RenameFamily { family_id, name, language }) => {
+                    let (conn, sink, me) = (st.conn.clone(), sink.clone(), st.me);
+                    tokio::spawn(async move {
+                        match crate::account::rename_family(&conn, family_id, &name).await {
+                            Ok(()) => {
+                                sink(Event::FamilyAction(Ok(model::FamilyActionDone::Renamed)));
+                                reload_family(&conn, &sink, me, &language).await;
+                            }
+                            Err(e) => sink(Event::FamilyAction(Err(e))),
+                        }
+                    });
+                }
+                Some(Command::InviteToFamily { family_id, steam_id, role, language }) => {
+                    let (conn, sink, me) = (st.conn.clone(), sink.clone(), st.me);
+                    tokio::spawn(async move {
+                        match crate::account::invite_to_family(&conn, family_id, steam_id, role).await {
+                            Ok(needs_2fa) => {
+                                sink(Event::FamilyAction(Ok(model::FamilyActionDone::Invited { needs_2fa })));
+                                reload_family(&conn, &sink, me, &language).await;
+                            }
+                            Err(e) => sink(Event::FamilyAction(Err(e))),
+                        }
+                    });
+                }
+                Some(Command::CancelFamilyInvite { family_id, steam_id, language }) => {
+                    let (conn, sink, me) = (st.conn.clone(), sink.clone(), st.me);
+                    tokio::spawn(async move {
+                        match crate::account::cancel_family_invite(&conn, family_id, steam_id).await {
+                            Ok(()) => {
+                                sink(Event::FamilyAction(Ok(model::FamilyActionDone::InviteCancelled)));
+                                reload_family(&conn, &sink, me, &language).await;
+                            }
+                            Err(e) => sink(Event::FamilyAction(Err(e))),
+                        }
+                    });
+                }
+                Some(Command::ResendFamilyInvite { family_id, steam_id }) => {
+                    let (conn, sink) = (st.conn.clone(), sink.clone());
+                    tokio::spawn(async move {
+                        match crate::account::resend_family_invite(&conn, family_id, steam_id).await {
+                            Ok(()) => sink(Event::FamilyAction(Ok(model::FamilyActionDone::InviteResent))),
+                            Err(e) => sink(Event::FamilyAction(Err(e))),
+                        }
+                    });
+                }
+                Some(Command::JoinFamily { family_id, language }) => {
+                    let (conn, sink, me) = (st.conn.clone(), sink.clone(), st.me);
+                    tokio::spawn(async move {
+                        match crate::account::join_family(&conn, family_id).await {
+                            Ok(needs_2fa) => {
+                                sink(Event::FamilyAction(Ok(model::FamilyActionDone::Joined { needs_2fa })));
+                                reload_family(&conn, &sink, me, &language).await;
+                            }
+                            Err(e) => sink(Event::FamilyAction(Err(e))),
+                        }
+                    });
+                }
+                Some(Command::RemoveFromFamily { family_id, steam_id, language }) => {
+                    let (conn, sink, me) = (st.conn.clone(), sink.clone(), st.me);
+                    tokio::spawn(async move {
+                        match crate::account::remove_from_family(&conn, family_id, steam_id).await {
+                            Ok(()) => {
+                                let done = if steam_id == me { model::FamilyActionDone::Left } else { model::FamilyActionDone::Removed };
+                                sink(Event::FamilyAction(Ok(done)));
+                                reload_family(&conn, &sink, me, &language).await;
+                            }
+                            Err(e) => sink(Event::FamilyAction(Err(e))),
+                        }
+                    });
+                }
+                Some(Command::DeleteFamily { family_id, language }) => {
+                    let (conn, sink, me) = (st.conn.clone(), sink.clone(), st.me);
+                    tokio::spawn(async move {
+                        match crate::account::delete_family(&conn, family_id).await {
+                            Ok(()) => {
+                                sink(Event::FamilyAction(Ok(model::FamilyActionDone::Deleted)));
+                                reload_family(&conn, &sink, me, &language).await;
+                            }
+                            Err(e) => sink(Event::FamilyAction(Err(e))),
+                        }
                     });
                 }
                 Some(Command::LoadPurchases { language, cursor }) => st.with_web(sink, move |web, sink| async move {
@@ -3307,6 +3387,23 @@ fn invite_link(app_id: AppId, connect: &str) -> String {
         .map(|b| if b.is_ascii_alphanumeric() || b"-_.~+".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
         .collect();
     format!("steam://run/{app_id}//{args}")
+}
+
+/// Fetch the user's Steam Family status, request personas for non-friend
+/// members/inviters, and emit `Event::Family`.
+async fn reload_family(conn: &Connection, sink: &Sink, me: SteamId, language: &str) {
+    let r = crate::account::family(conn, me, language).await;
+    if let Ok(f) = &r {
+        let mut ids: Vec<SteamId> = f.invites.iter().map(|i| i.inviter).collect();
+        if let Some(g) = &f.family {
+            ids.extend(g.members.iter().map(|m| m.steam_id).chain(g.invites.iter().map(|i| i.0)));
+        }
+        ids.retain(|id| *id != me && *id != 0);
+        if !ids.is_empty() {
+            let _ = conn.send(emsg::CLIENT_REQUEST_FRIEND_DATA, &CMsgClientRequestFriendData { persona_state_requested: Some(PERSONA_FLAGS), friends: ids });
+        }
+    }
+    sink(Event::Family(r));
 }
 
 #[cfg(test)]

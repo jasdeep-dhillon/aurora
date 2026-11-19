@@ -1,14 +1,14 @@
 //! Account pages inside Settings, read natively from Steam: account
-//! details, purchase history, licenses and your Steam Family. They only
-//! read; changing something (password, email, family members) still opens
-//! Steam's site, where Steam asks to confirm it.
+//! details, purchase history, licenses and your Steam Family. Sensitive
+//! account changes (password, email, phone, Steam Guard) stay on Steam's
+//! site; Steam Family management runs natively through `FamilyGroups`.
 
 use super::settings::{info_row, web};
 use client::Command;
 use egui::{Color32, Margin, Rect, Sense, Ui, vec2};
 use extensions::Ctx;
 use i18n::t;
-use model::{FamilyRole, art};
+use model::{FamilyActionDone, FamilyRole, Relationship, SteamId, art};
 use ui::{Theme, icons, widgets as w};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -20,7 +20,15 @@ pub enum AccountView {
     Licenses,
 }
 
-#[derive(Default)]
+#[derive(Clone)]
+enum FamilyConfirm {
+    Leave { family_id: u64, family_name: String },
+    RemoveMember { family_id: u64, steam_id: SteamId, name: String },
+    CancelInvite { family_id: u64, steam_id: SteamId, name: String },
+    DeclineInvite { family_id: u64, inviter_name: String },
+    DeleteFamily { family_id: u64, family_name: String },
+}
+
 pub struct AccountPages {
     pub view: AccountView,
     license_filter: String,
@@ -28,6 +36,38 @@ pub struct AccountPages {
     /// Loads already asked for this visit: security, purchases, licenses, family.
     asked: [bool; 4],
     loading_more: bool,
+    family_create_name: String,
+    family_renaming: bool,
+    family_rename_text: String,
+    family_invite_open: bool,
+    family_invite_query: String,
+    family_invite_role: FamilyRole,
+    family_confirm: Option<FamilyConfirm>,
+    family_busy: bool,
+    family_seen_seq: u64,
+    family_notice: Option<(bool, String)>,
+}
+
+impl Default for AccountPages {
+    fn default() -> Self {
+        Self {
+            view: AccountView::Home,
+            license_filter: String::new(),
+            shared_filter: String::new(),
+            asked: [false; 4],
+            loading_more: false,
+            family_create_name: String::new(),
+            family_renaming: false,
+            family_rename_text: String::new(),
+            family_invite_open: false,
+            family_invite_query: String::new(),
+            family_invite_role: FamilyRole::Adult,
+            family_confirm: None,
+            family_busy: false,
+            family_seen_seq: 0,
+            family_notice: None,
+        }
+    }
 }
 
 fn language() -> String {
@@ -303,8 +343,236 @@ impl AccountPages {
         }
     }
 
+    fn sync_family_action(&mut self, ctx: &Ctx) {
+        let Some((seq, result)) = &ctx.state.family_action else { return };
+        if *seq <= self.family_seen_seq {
+            return;
+        }
+        self.family_seen_seq = *seq;
+        self.family_busy = false;
+        self.family_notice = Some(match result {
+            Ok(FamilyActionDone::Created) => {
+                self.family_create_name.clear();
+                (false, t!("Steam Family created.").to_string())
+            }
+            Ok(FamilyActionDone::Renamed) => {
+                self.family_renaming = false;
+                (false, t!("Family name updated.").to_string())
+            }
+            Ok(FamilyActionDone::Invited { needs_2fa: true }) => (false, t!("Invitation sent. Confirm it in your Steam Mobile App if prompted.").to_string()),
+            Ok(FamilyActionDone::Invited { needs_2fa: false }) => (false, t!("Invitation sent.").to_string()),
+            Ok(FamilyActionDone::InviteCancelled) => (false, t!("Invitation cancelled.").to_string()),
+            Ok(FamilyActionDone::InviteResent) => (false, t!("Invitation resent.").to_string()),
+            Ok(FamilyActionDone::Joined { needs_2fa: true }) => (false, t!("Join request sent. Confirm it in your Steam Mobile App if prompted.").to_string()),
+            Ok(FamilyActionDone::Joined { needs_2fa: false }) => (false, t!("You joined the Steam Family.").to_string()),
+            Ok(FamilyActionDone::Removed) => (false, t!("Member removed from the family.").to_string()),
+            Ok(FamilyActionDone::Left) => (false, t!("You left the Steam Family.").to_string()),
+            Ok(FamilyActionDone::Deleted) => (false, t!("Steam Family deleted.").to_string()),
+            Err(e) => (true, t!("Steam didn't accept that: {error}", error = e).to_string()),
+        });
+    }
+
+    fn family_notice_banner(&mut self, ui: &mut Ui, t: &Theme) {
+        let Some((is_err, msg)) = self.family_notice.clone() else { return };
+        let accent = if is_err { t.danger } else { t.accent };
+        egui::Frame::new()
+            .fill(accent.gamma_multiply(0.14))
+            .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.45)))
+            .corner_radius(t.corner_small())
+            .inner_margin(Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    wrapped(ui, w::text(&msg, 13.0, if is_err { t.danger } else { t.text }));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if w::button(ui, t, Some(icons::X), "", w::Kind::Ghost, w::Size::Sm).clicked() {
+                            self.family_notice = None;
+                        }
+                    });
+                });
+            });
+        ui.add_space(10.0);
+    }
+
+    fn family_confirm_modal(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+        let Some(confirm) = self.family_confirm.clone() else { return };
+        let (title, body, action_label) = match &confirm {
+            FamilyConfirm::Leave { family_name, .. } => (
+                t!("Leave {name}?", name = family_name).to_string(),
+                t!("You won't be able to join or create another Steam Family for 1 year after joining your previous family.").to_string(),
+                t!("Leave family").to_string(),
+            ),
+            FamilyConfirm::RemoveMember { name, .. } => (
+                t!("Remove {name}?", name = name).to_string(),
+                t!("They will lose access to shared games, and their slot will be on cooldown for 1 year.").to_string(),
+                t!("Remove").to_string(),
+            ),
+            FamilyConfirm::CancelInvite { name, .. } => (
+                t!("Cancel invitation?").to_string(),
+                t!("Cancel the pending family invitation for {name}?", name = name).to_string(),
+                t!("Cancel invite").to_string(),
+            ),
+            FamilyConfirm::DeclineInvite { inviter_name, .. } => (
+                t!("Decline invitation?").to_string(),
+                t!("Decline the Steam Family invitation from {name}?", name = inviter_name).to_string(),
+                t!("Decline").to_string(),
+            ),
+            FamilyConfirm::DeleteFamily { family_name, .. } => (
+                t!("Delete {name}?", name = family_name).to_string(),
+                t!("This permanently deletes the Steam Family.").to_string(),
+                t!("Delete family").to_string(),
+            ),
+        };
+        let (mut confirmed, mut cancelled) = (false, false);
+        w::modal(ui.ctx(), egui::Id::unique("confirm-family-action")).show(ui.ctx(), |ui| {
+            ui.set_width(460.0);
+            ui.label(w::text_bold(&title, 18.0, t.text));
+            ui.add_space(8.0);
+            wrapped(ui, w::text(&body, 13.5, t.text_dim));
+            ui.add_space(20.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                confirmed = w::button(ui, t, None, &action_label, w::Kind::Danger, w::Size::Md).clicked();
+                cancelled = w::button(ui, t, None, t!("Cancel"), w::Kind::Ghost, w::Size::Md).clicked();
+            });
+        });
+        if confirmed {
+            self.family_confirm = None;
+            self.family_busy = true;
+            let me = ctx.state.steam_id;
+            match confirm {
+                FamilyConfirm::Leave { family_id, .. } => ctx.send(Command::RemoveFromFamily { family_id, steam_id: me, language: language() }),
+                FamilyConfirm::RemoveMember { family_id, steam_id, .. } => ctx.send(Command::RemoveFromFamily { family_id, steam_id, language: language() }),
+                FamilyConfirm::CancelInvite { family_id, steam_id, .. } => ctx.send(Command::CancelFamilyInvite { family_id, steam_id, language: language() }),
+                FamilyConfirm::DeclineInvite { family_id, .. } => ctx.send(Command::CancelFamilyInvite { family_id, steam_id: me, language: language() }),
+                FamilyConfirm::DeleteFamily { family_id, .. } => ctx.send(Command::DeleteFamily { family_id, language: language() }),
+            }
+        } else if cancelled {
+            self.family_confirm = None;
+        }
+    }
+
+    fn family_invite_modal(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, family: &model::Family) {
+        if !self.family_invite_open {
+            return;
+        }
+        let mut close = false;
+        let mut chosen: Option<SteamId> = None;
+        let me = ctx.state.steam_id;
+        let already = |id: SteamId| id == me || family.members.iter().any(|m| m.steam_id == id) || family.invites.iter().any(|(i, _)| *i == id);
+
+        w::modal(ui.ctx(), egui::Id::unique("family-invite-member")).show(ui.ctx(), |ui| {
+            ui.set_width(480.0);
+            ui.horizontal(|ui| {
+                ui.label(w::text_bold(t!("Invite to family"), 18.0, t.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if w::button(ui, t, Some(icons::X), "", w::Kind::Ghost, w::Size::Sm).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(w::text(t!("Role:"), 13.0, t.text_dim));
+                let adult_kind = if self.family_invite_role == FamilyRole::Adult { w::Kind::Primary } else { w::Kind::Secondary };
+                let child_kind = if self.family_invite_role == FamilyRole::Child { w::Kind::Primary } else { w::Kind::Secondary };
+                if w::button(ui, t, None, t!("Adult"), adult_kind, w::Size::Sm).clicked() {
+                    self.family_invite_role = FamilyRole::Adult;
+                }
+                if w::button(ui, t, None, t!("Child"), child_kind, w::Size::Sm).clicked() {
+                    self.family_invite_role = FamilyRole::Child;
+                }
+            });
+            ui.add_space(4.0);
+            let role_note = if self.family_invite_role == FamilyRole::Child {
+                t!("Children can play shared games with parental controls set by adults.")
+            } else {
+                t!("Adults can manage invites, remove members and set parental controls.")
+            };
+            wrapped(ui, w::text(role_note, 12.0, t.text_dim));
+            ui.add_space(10.0);
+            w::search(ui, t, &mut self.family_invite_query, t!("Search friends or enter a SteamID64"), ui.available_width());
+            ui.add_space(8.0);
+
+            let trimmed = self.family_invite_query.trim();
+            if let Ok(parsed_id) = trimmed.parse::<u64>()
+                && parsed_id >= 76_561_197_960_265_728
+                && !already(parsed_id)
+            {
+                ui.horizontal(|ui| {
+                    ui.label(w::text(t!("SteamID: {id}", id = parsed_id), 13.0, t.text));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if w::button(ui, t, Some(icons::USER_PLUS), t!("Invite"), w::Kind::Primary, w::Size::Sm).clicked() {
+                            chosen = Some(parsed_id);
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+            }
+
+            let needle = trimmed.to_lowercase();
+            let mut friends: Vec<(SteamId, String, Option<String>)> = ctx
+                .state
+                .friends
+                .iter()
+                .filter(|(id, rel)| **rel == Relationship::Friend && !already(**id))
+                .map(|(id, _)| {
+                    let p = ctx.state.persona(*id);
+                    let name = if p.display_name().is_empty() { id.to_string() } else { p.display_name() };
+                    (*id, name, p.avatar_hash.clone())
+                })
+                .filter(|(id, name, _)| needle.is_empty() || name.to_lowercase().contains(&needle) || id.to_string().contains(&needle))
+                .collect();
+            friends.sort_by_key(|(_, name, _)| name.to_lowercase());
+
+            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                if friends.is_empty() {
+                    ui.label(w::text(t!("No eligible friends found. You can also paste a 64-bit SteamID above."), 12.5, t.text_dim));
+                } else {
+                    for (id, name, avatar_hash) in friends {
+                        let p = ctx.state.persona(id);
+                        egui::Frame::new().inner_margin(Margin::symmetric(6, 4)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                w::avatar(ui, t, &art::avatar(avatar_hash.as_deref()), 28.0, Some(crate::shell::status_color(t, &p)));
+                                ui.label(w::text_medium(&name, 13.5, t.text));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if w::button(ui, t, Some(icons::USER_PLUS), t!("Invite"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                                        chosen = Some(id);
+                                    }
+                                });
+                            });
+                        });
+                    }
+                }
+            });
+            ui.add_space(12.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if w::button(ui, t, None, t!("Close"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                    close = true;
+                }
+            });
+        });
+
+        if let Some(steam_id) = chosen {
+            self.family_invite_open = false;
+            self.family_invite_query.clear();
+            self.family_busy = true;
+            ctx.send(Command::InviteToFamily {
+                family_id: family.id,
+                steam_id,
+                role: self.family_invite_role,
+                language: language(),
+            });
+        } else if close {
+            self.family_invite_open = false;
+        }
+    }
+
     pub fn family(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+        self.sync_family_action(ctx);
         w::page_title(ui, t, t!("Family"), Some(t!("Steam Families: share your library and set limits for children.")));
+        self.family_notice_banner(ui, t);
         if !self.asked[3] {
             self.asked[3] = true;
             ctx.send(Command::LoadFamily { language: language() });
@@ -314,35 +582,148 @@ impl AccountPages {
             self.asked[3] = false;
         }
         let Some(Ok(status)) = status else { return };
+        let me = ctx.state.steam_id;
+
+        if self.family_busy {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(w::text(t!("Updating Steam Family…"), 13.0, t.text_dim));
+            });
+            ui.add_space(8.0);
+        }
+
         let Some(family) = &status.family else {
+            if !status.invites.is_empty() {
+                section(ui, t, t!("Pending invitations"));
+                for inv in &status.invites {
+                    let p = ctx.state.persona(inv.inviter);
+                    let inviter_name = if p.display_name().is_empty() { inv.inviter.to_string() } else { p.display_name() };
+                    w::panel(t).inner_margin(Margin::symmetric(12, 10)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            w::avatar(ui, t, &art::avatar(p.avatar_hash.as_deref()), 36.0, Some(crate::shell::status_color(t, &p)));
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(w::text_semibold(t!("{name} invited you to their family.", name = &inviter_name), 14.0, t.text));
+                                    let (label, color) = match inv.role {
+                                        FamilyRole::Adult => (t!("Adult"), t.accent),
+                                        FamilyRole::Child => (t!("Child"), t.away),
+                                        FamilyRole::Unknown => (t!("Member"), t.text_dim),
+                                    };
+                                    w::pill(ui, label, color, color.gamma_multiply(0.15));
+                                });
+                                if inv.awaiting_2fa {
+                                    ui.label(w::text(t!("Awaiting Steam Guard confirmation"), 12.0, t.away));
+                                }
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add_enabled_ui(!self.family_busy, |ui| {
+                                    if w::button(ui, t, Some(icons::CHECK), t!("Accept"), w::Kind::Primary, w::Size::Sm).clicked() {
+                                        self.family_busy = true;
+                                        ctx.send(Command::JoinFamily { family_id: inv.family_id, language: language() });
+                                    }
+                                    if w::button(ui, t, Some(icons::X), t!("Decline"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                                        self.family_confirm = Some(FamilyConfirm::DeclineInvite {
+                                            family_id: inv.family_id,
+                                            inviter_name: inviter_name.clone(),
+                                        });
+                                    }
+                                });
+                            });
+                        });
+                    });
+                    ui.add_space(6.0);
+                }
+                ui.add_space(8.0);
+            }
+
             w::panel(t).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(w::text_semibold(t!("You're not in a Steam Family"), 16.0, t.text));
                 ui.add_space(4.0);
-                wrapped(ui, w::text(t!("A family shares games between up to six accounts, with limits for children. Creating or joining one happens on Steam's site."), 13.5, t.text_dim));
+                wrapped(ui, w::text(t!("A Steam Family shares games between up to six accounts, with parental controls for children."), 13.5, t.text_dim));
                 if status.cooldown > 0 {
                     ui.add_space(6.0);
                     ui.label(w::text(t!("You can join a family again in {days} days.", days = status.cooldown.div_ceil(86_400)), 13.0, t.away));
                 }
-                for (_, inviter) in &status.invites {
-                    let p = ctx.state.persona(*inviter);
-                    ui.add_space(6.0);
-                    ui.label(w::text(t!("{name} invited you to their family.", name = p.display_name()), 13.5, t.accent));
-                }
-                ui.add_space(10.0);
-                if w::button(ui, t, Some(icons::USERS_THREE), t!("Create or join a family"), w::Kind::Primary, w::Size::Md).clicked() {
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!self.family_busy && status.cooldown == 0, |ui| {
+                        w::search(ui, t, &mut self.family_create_name, t!("New family name"), 260.0);
+                        let can_create = !self.family_create_name.trim().is_empty();
+                        ui.add_enabled_ui(can_create, |ui| {
+                            if w::button(ui, t, Some(icons::USERS_THREE), t!("Create family"), w::Kind::Primary, w::Size::Md).clicked() {
+                                self.family_busy = true;
+                                ctx.send(Command::CreateFamily { name: self.family_create_name.trim().to_string(), language: language() });
+                            }
+                        });
+                    });
+                });
+                ui.add_space(8.0);
+                if w::button(ui, t, Some(icons::GEAR), t!("Open on Steam"), w::Kind::Ghost, w::Size::Sm)
+                    .on_hover_text(t!("Parental controls and purchase requests open on Steam's site"))
+                    .clicked()
+                {
                     web("https://store.steampowered.com/account/familymanagement");
                 }
             });
+            self.family_confirm_modal(ui, t, ctx);
             return;
         };
 
+        let is_adult = status.role == FamilyRole::Adult;
         ui.horizontal(|ui| {
-            ui.label(w::text_bold(&family.name, 22.0, t.text));
+            if self.family_renaming {
+                w::search(ui, t, &mut self.family_rename_text, t!("Family name"), 240.0);
+                let can_save = !self.family_rename_text.trim().is_empty() && !self.family_busy;
+                ui.add_enabled_ui(can_save, |ui| {
+                    if w::button(ui, t, Some(icons::CHECK), t!("Save"), w::Kind::Primary, w::Size::Sm).clicked() {
+                        self.family_busy = true;
+                        ctx.send(Command::RenameFamily {
+                            family_id: family.id,
+                            name: self.family_rename_text.trim().to_string(),
+                            language: language(),
+                        });
+                    }
+                });
+                if w::button(ui, t, None, t!("Cancel"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                    self.family_renaming = false;
+                }
+            } else {
+                ui.label(w::text_bold(&family.name, 22.0, t.text));
+                if is_adult && w::button(ui, t, None, t!("Rename"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                    self.family_rename_text = family.name.clone();
+                    self.family_renaming = true;
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if w::button(ui, t, Some(icons::GEAR), t!("Manage family"), w::Kind::Secondary, w::Size::Sm).on_hover_text(t!("Invites, removing members and limits open on Steam's site")).clicked() {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if w::button(ui, t, Some(icons::GEAR), t!("Open on Steam"), w::Kind::Ghost, w::Size::Sm)
+                    .on_hover_text(t!("Parental controls and purchase requests open on Steam's site"))
+                    .clicked()
+                {
                     web("https://store.steampowered.com/account/familymanagement");
                 }
+                ui.add_enabled_ui(!self.family_busy, |ui| {
+                    if is_adult && family.members.len() <= 1 {
+                        if w::button(ui, t, Some(icons::TRASH), t!("Delete family"), w::Kind::Danger, w::Size::Sm).clicked() {
+                            self.family_confirm = Some(FamilyConfirm::DeleteFamily {
+                                family_id: family.id,
+                                family_name: family.name.clone(),
+                            });
+                        }
+                    } else if w::button(ui, t, Some(icons::SIGN_OUT), t!("Leave family"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                        self.family_confirm = Some(FamilyConfirm::Leave {
+                            family_id: family.id,
+                            family_name: family.name.clone(),
+                        });
+                    }
+                    if is_adult && family.free_spots > 0 && w::button(ui, t, Some(icons::USER_PLUS), t!("Invite member"), w::Kind::Primary, w::Size::Sm).clicked() {
+                        self.family_invite_query.clear();
+                        self.family_invite_role = FamilyRole::Adult;
+                        self.family_invite_open = true;
+                    }
+                });
             });
         });
         let mut facts = vec![t!("{n} members", n = family.members.len()).to_string(), t!("{n} free spots", n = family.free_spots).to_string()];
@@ -355,17 +736,16 @@ impl AccountPages {
         }
 
         section(ui, t, t!("Members"));
-        let me = ctx.state.steam_id;
         for m in &family.members {
             let p = ctx.state.persona(m.steam_id);
+            let name = if p.display_name().is_empty() { m.steam_id.to_string() } else { p.display_name() };
             w::panel(t).inner_margin(Margin::symmetric(12, 10)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     w::avatar(ui, t, &art::avatar(p.avatar_hash.as_deref()), 40.0, Some(crate::shell::status_color(t, &p)));
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
-                            let name = if p.display_name().is_empty() { m.steam_id.to_string() } else { p.display_name() };
-                            ui.label(w::text_semibold(name, 14.5, t.text));
+                            ui.label(w::text_semibold(&name, 14.5, t.text));
                             if m.steam_id == me {
                                 ui.label(w::text(t!("(you)"), 12.5, t.text_faint));
                             }
@@ -383,6 +763,18 @@ impl AccountPages {
                         ui.label(w::text(line, 12.5, t.text_dim));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        if is_adult && m.steam_id != me {
+                            ui.add_enabled_ui(!self.family_busy, |ui| {
+                                if w::button(ui, t, Some(icons::TRASH), t!("Remove"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                                    self.family_confirm = Some(FamilyConfirm::RemoveMember {
+                                        family_id: family.id,
+                                        steam_id: m.steam_id,
+                                        name: name.clone(),
+                                    });
+                                }
+                            });
+                        }
                         if w::button(ui, t, None, t!("Profile"), w::Kind::Ghost, w::Size::Sm).clicked() {
                             ctx.navigate("profile", Some(m.steam_id.to_string()));
                         }
@@ -393,9 +785,46 @@ impl AccountPages {
         }
         if !family.invites.is_empty() {
             section(ui, t, t!("Invited"));
-            for (id, _) in &family.invites {
+            for (id, role) in &family.invites {
                 let p = ctx.state.persona(*id);
-                info_row(ui, t, &p.display_name(), t!("Hasn't accepted yet"), None);
+                let name = if p.display_name().is_empty() { id.to_string() } else { p.display_name() };
+                w::panel(t).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        w::avatar(ui, t, &art::avatar(p.avatar_hash.as_deref()), 32.0, Some(crate::shell::status_color(t, &p)));
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(w::text_semibold(&name, 14.0, t.text));
+                                let (label, color) = match role {
+                                    FamilyRole::Adult => (t!("Adult"), t.accent),
+                                    FamilyRole::Child => (t!("Child"), t.away),
+                                    FamilyRole::Unknown => (t!("Member"), t.text_dim),
+                                };
+                                w::pill(ui, label, color, color.gamma_multiply(0.15));
+                            });
+                            ui.label(w::text(t!("Hasn't accepted yet"), 12.0, t.text_dim));
+                        });
+                        if is_adult {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.add_enabled_ui(!self.family_busy, |ui| {
+                                    if w::button(ui, t, Some(icons::X), t!("Cancel invite"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                                        self.family_confirm = Some(FamilyConfirm::CancelInvite {
+                                            family_id: family.id,
+                                            steam_id: *id,
+                                            name: name.clone(),
+                                        });
+                                    }
+                                    if w::button(ui, t, Some(icons::REFRESH), t!("Resend"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                                        self.family_busy = true;
+                                        ctx.send(Command::ResendFamilyInvite { family_id: family.id, steam_id: *id });
+                                    }
+                                });
+                            });
+                        }
+                    });
+                });
+                ui.add_space(6.0);
             }
         }
 
@@ -430,5 +859,8 @@ impl AccountPages {
                 ctx.navigate("store", Some(a.app_id.to_string()));
             }
         }
+
+        self.family_invite_modal(ui, t, ctx, family);
+        self.family_confirm_modal(ui, t, ctx);
     }
 }

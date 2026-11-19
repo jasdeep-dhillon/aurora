@@ -1,10 +1,11 @@
 //! Your account: security details and Steam Family through Steam's
 //! services (what Steam's own client calls), and purchase history and
 //! licenses from the store pages Steam's client shows for them (they have
-//! no service). Everything here only reads.
+//! no service). Sensitive account changes stay on Steam's site; Steam
+//! Family management actions run through `FamilyGroups`.
 
 use crate::market::Web;
-use model::{AccountSecurity, Family, FamilyMember, FamilyRole, FamilyStatus, GuardDevice, License, Purchase, PurchasePage, SharedApp, SteamId};
+use model::{AccountSecurity, Family, FamilyInvite, FamilyMember, FamilyRole, FamilyStatus, GuardDevice, License, Purchase, PurchasePage, SharedApp, SteamId};
 use net::Connection;
 use proto::webui::*;
 use proto::*;
@@ -52,7 +53,16 @@ pub async fn family(conn: &Connection, me: SteamId, language: &str) -> Result<Fa
         family: None,
         role: FamilyRole::from_steam(r.role() as i32),
         cooldown: r.cooldown_seconds_remaining(),
-        invites: r.pending_group_invites.iter().map(|i| (i.family_groupid(), i.inviter_steamid())).collect(),
+        invites: r
+            .pending_group_invites
+            .iter()
+            .map(|i| FamilyInvite {
+                family_id: i.family_groupid(),
+                inviter: i.inviter_steamid(),
+                role: FamilyRole::from_steam(i.role()),
+                awaiting_2fa: i.awaiting_2fa(),
+            })
+            .collect(),
     };
     if r.is_not_member_of_any_group() || r.family_groupid() == 0 {
         return Ok(status);
@@ -104,6 +114,129 @@ pub async fn family(conn: &Connection, me: SteamId, language: &str) -> Result<Fa
         shared,
     });
     Ok(status)
+}
+
+/// Validate and trim a Steam Family name before sending it to Steam.
+pub fn validate_family_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Family name cannot be empty".into());
+    }
+    if trimmed.chars().count() > 64 {
+        return Err("Family name is too long (64 characters max)".into());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Create a new Steam Family with this account as its first adult member.
+pub async fn create_family(conn: &Connection, me: SteamId, name: &str) -> Result<u64, String> {
+    let name = validate_family_name(name)?;
+    let r: CFamilyGroupsCreateFamilyGroupResponse = conn
+        .call(
+            "FamilyGroups.CreateFamilyGroup#1",
+            &CFamilyGroupsCreateFamilyGroupRequest { name: Some(name), steamid: Some(me) },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(r.family_groupid())
+}
+
+/// Rename an existing Steam Family (adult role required).
+pub async fn rename_family(conn: &Connection, family_id: u64, name: &str) -> Result<(), String> {
+    let name = validate_family_name(name)?;
+    let _: CFamilyGroupsModifyFamilyGroupDetailsResponse = conn
+        .call(
+            "FamilyGroups.ModifyFamilyGroupDetails#1",
+            &CFamilyGroupsModifyFamilyGroupDetailsRequest { family_groupid: Some(family_id), name: Some(name) },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Invite a Steam user to the family with the given role.
+/// Returns `Ok(true)` if Steam requires 2FA / mobile confirmation.
+pub async fn invite_to_family(conn: &Connection, family_id: u64, receiver: SteamId, role: FamilyRole) -> Result<bool, String> {
+    if receiver == 0 {
+        return Err("Invalid Steam ID".into());
+    }
+    let role_id = role.to_steam();
+    if role_id == 0 {
+        return Err("Invalid family role".into());
+    }
+    let r: CFamilyGroupsInviteToFamilyGroupResponse = conn
+        .call(
+            "FamilyGroups.InviteToFamilyGroup#1",
+            &CFamilyGroupsInviteToFamilyGroupRequest {
+                family_groupid: Some(family_id),
+                receiver_steamid: Some(receiver),
+                receiver_role: Some(role_id),
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(r.two_factor_method() != 0)
+}
+
+/// Cancel a pending outgoing invite (as an adult) or decline an incoming invite (with `steam_id == me`).
+pub async fn cancel_family_invite(conn: &Connection, family_id: u64, steam_id: SteamId) -> Result<(), String> {
+    let _: CFamilyGroupsCancelFamilyGroupInviteResponse = conn
+        .call(
+            "FamilyGroups.CancelFamilyGroupInvite#1",
+            &CFamilyGroupsCancelFamilyGroupInviteRequest { family_groupid: Some(family_id), steamid_to_cancel: Some(steam_id) },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Resend an existing pending invitation to a Steam user.
+pub async fn resend_family_invite(conn: &Connection, family_id: u64, steam_id: SteamId) -> Result<(), String> {
+    let _: CFamilyGroupsResendInvitationToFamilyGroupResponse = conn
+        .call(
+            "FamilyGroups.ResendInvitationToFamilyGroup#1",
+            &CFamilyGroupsResendInvitationToFamilyGroupRequest { family_groupid: Some(family_id), steamid: Some(steam_id) },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Accept a pending invitation and join the Steam Family.
+/// Returns `Ok(true)` if Steam requires 2FA / mobile confirmation.
+pub async fn join_family(conn: &Connection, family_id: u64) -> Result<bool, String> {
+    let r: CFamilyGroupsJoinFamilyGroupResponse = conn
+        .call(
+            "FamilyGroups.JoinFamilyGroup#1",
+            &CFamilyGroupsJoinFamilyGroupRequest { family_groupid: Some(family_id), nonce: None },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(r.two_factor_method() != 0)
+}
+
+/// Remove a member from the family (or leave the family when `steam_id == me`).
+pub async fn remove_from_family(conn: &Connection, family_id: u64, steam_id: SteamId) -> Result<(), String> {
+    let _: CFamilyGroupsRemoveFromFamilyGroupResponse = conn
+        .call(
+            "FamilyGroups.RemoveFromFamilyGroup#1",
+            &CFamilyGroupsRemoveFromFamilyGroupRequest { family_groupid: Some(family_id), steamid_to_remove: Some(steam_id) },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Delete a Steam Family (adult role required).
+pub async fn delete_family(conn: &Connection, family_id: u64) -> Result<(), String> {
+    let _: CFamilyGroupsDeleteFamilyGroupResponse = conn
+        .call(
+            "FamilyGroups.DeleteFamilyGroup#1",
+            &CFamilyGroupsDeleteFamilyGroupRequest { family_groupid: Some(family_id) },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// A signed-in store page (`query` already has its `?`).
@@ -350,5 +483,18 @@ mod tests {
         assert!(store_page_url(".evil.tld/account/", "?l=english").is_err());
         let hist = history_more_url("english&evil=1");
         assert!(!hist.contains("&evil=1"), "language must be percent-encoded: {hist}");
+    }
+
+    #[test]
+    fn family_name_validation_and_role_roundtrip() {
+        assert_eq!(validate_family_name("  My Family  ").unwrap(), "My Family");
+        assert!(validate_family_name("").is_err());
+        assert!(validate_family_name("   ").is_err());
+        assert!(validate_family_name(&"a".repeat(65)).is_err());
+        assert_eq!(validate_family_name(&"a".repeat(64)).unwrap().len(), 64);
+
+        assert_eq!(FamilyRole::from_steam(FamilyRole::Adult.to_steam()), FamilyRole::Adult);
+        assert_eq!(FamilyRole::from_steam(FamilyRole::Child.to_steam()), FamilyRole::Child);
+        assert_eq!(FamilyRole::Unknown.to_steam(), 0);
     }
 }
