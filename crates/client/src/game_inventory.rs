@@ -183,46 +183,182 @@ pub async fn promo_items(conn: &Connection, app_id: AppId, me: u64) -> Reply {
     }
 }
 
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+const MAX_META_BYTES: usize = 64 * 1024;
+const MAX_ARCHIVE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Item definition digests from Steam are hex hashes (e.g. SHA-1 / MD5).
+pub fn is_valid_digest(d: &str) -> bool {
+    !d.is_empty() && d.len() <= 128 && d.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Item definitions: (id, properties), parsed from Steam's item-def archive.
 pub fn defs(json: &str) -> Vec<(i32, Vec<(String, String)>)> {
-    let json = json.trim_end_matches('\0');
-    let list: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
+    let json = json.trim_end_matches('\0').trim();
+    let val: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let list = match &val {
+        serde_json::Value::Array(a) => a.as_slice(),
+        serde_json::Value::Object(o) => o
+            .get("items")
+            .or_else(|| o.get("response").and_then(|r| r.get("items")))
+            .and_then(|v| v.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]),
+        _ => &[],
+    };
     list.iter()
         .filter_map(|v| v.as_object())
         .filter_map(|o| Some((o.get("itemdefid").map(text)?.parse().ok()?, o.iter().map(|(k, v)| (k.clone(), text(v))).collect())))
         .collect()
 }
 
-/// The digest of the game's current item definitions. Steam's client asks
-/// while the game runs; a session that isn't playing it gets "access denied".
-async fn digest(conn: &Connection, app_id: AppId) -> Option<String> {
-    let header = CMsgProtoBufHeader { target_job_name: Some("Inventory.GetItemDefMeta#1".into()), routing_appid: Some(app_id), ..Default::default() };
-    match conn.request_with(net::emsg::SERVICE_METHOD_CALL_FROM_CLIENT, header, &CInventoryGetItemDefMetaRequest { appid: Some(app_id) }).await.and_then(|p| p.check()?.body::<CInventoryGetItemDefMetaResponse>()) {
-        Ok(m) => Some(m.digest().to_string()).filter(|d| !d.is_empty()),
-        Err(e) => {
-            tracing::info!("item definitions of {app_id}: {e}");
-            None
+/// Parse `digest` from `IInventoryService/GetItemDefMeta/v1` JSON response.
+fn parse_web_digest(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let d = v.get("response")?.get("digest")?.as_str()?;
+    is_valid_digest(d).then(|| d.to_string())
+}
+
+async fn read_bounded(mut resp: reqwest::Response, max_bytes: usize) -> Option<String> {
+    if let Some(len) = resp.content_length()
+        && len as usize > max_bytes
+    {
+        return None;
+    }
+    let mut buf = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
+            return None;
         }
+        buf.extend_from_slice(&chunk);
+    }
+    String::from_utf8(buf).ok()
+}
+
+/// The digest of the game's current item definitions. Tries Steam CM first
+/// (with and without `routing_appid`), then falls back to `IInventoryService/GetItemDefMeta/v1`
+/// using a web access token generated for the signed-in account.
+async fn digest(conn: &Connection, app_id: AppId, me: u64, refresh_token: &str) -> Option<String> {
+    let req = CInventoryGetItemDefMetaRequest { appid: Some(app_id) };
+    let header = CMsgProtoBufHeader { target_job_name: Some("Inventory.GetItemDefMeta#1".into()), routing_appid: Some(app_id), ..Default::default() };
+    if let Ok(m) = conn
+        .request_with(net::emsg::SERVICE_METHOD_CALL_FROM_CLIENT, header, &req)
+        .await
+        .and_then(|p| p.check()?.body::<CInventoryGetItemDefMetaResponse>())
+        && is_valid_digest(m.digest())
+    {
+        return Some(m.digest().to_string());
+    }
+    if let Ok(m) = conn.call::<_, CInventoryGetItemDefMetaResponse>("Inventory.GetItemDefMeta#1", &req).await
+        && is_valid_digest(m.digest())
+    {
+        return Some(m.digest().to_string());
+    }
+    if !refresh_token.is_empty() && me != 0 {
+        let token_req = CAuthenticationAccessTokenGenerateForAppRequest {
+            refresh_token: Some(refresh_token.to_string()),
+            steamid: Some(me),
+            ..Default::default()
+        };
+        if let Ok(tok) = conn.call::<_, CAuthenticationAccessTokenGenerateForAppResponse>("Authentication.GenerateAccessTokenForApp#1", &token_req).await
+            && !tok.access_token().is_empty()
+        {
+            let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().ok()?;
+            if let Ok(resp) = client
+                .get("https://api.steampowered.com/IInventoryService/GetItemDefMeta/v1/")
+                .query(&[("access_token", tok.access_token()), ("appid", &app_id.to_string())])
+                .send()
+                .await
+                && resp.status().is_success()
+                && let Some(body) = read_bounded(resp, MAX_META_BYTES).await
+                && let Some(d) = parse_web_digest(&body)
+            {
+                return Some(d);
+            }
+        }
+    }
+    tracing::info!("item definitions of {app_id}: could not obtain item-def digest");
+    None
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedDefs {
+    digest: String,
+    body: String,
+}
+
+fn cache_path(cache_dir: &Path, app_id: AppId) -> PathBuf {
+    cache_dir.join(format!("itemdefs_{app_id}.json"))
+}
+
+fn load_cached_defs(cache_dir: &Path, app_id: AppId) -> Option<CachedDefs> {
+    let path = cache_path(cache_dir, app_id);
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() as usize > MAX_ARCHIVE_BYTES + 1024 {
+        return None;
+    }
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let cached: CachedDefs = serde_json::from_str(&raw).ok()?;
+    is_valid_digest(&cached.digest).then_some(cached)
+}
+
+fn save_cached_defs(cache_dir: &Path, app_id: AppId, digest: &str, body: &str) {
+    if !is_valid_digest(digest) || body.len() > MAX_ARCHIVE_BYTES {
+        return;
+    }
+    let _ = std::fs::create_dir_all(cache_dir);
+    let path = cache_path(cache_dir, app_id);
+    let tmp = cache_dir.join(format!("itemdefs_{app_id}.json.tmp"));
+    if let Ok(json) = serde_json::to_string(&CachedDefs { digest: digest.to_string(), body: body.to_string() })
+        && std::fs::write(&tmp, json).is_ok()
+    {
+        let _ = std::fs::rename(&tmp, &path);
     }
 }
 
-/// The game's item definitions (the archive is public, keyed by its digest).
-pub async fn item_defs(conn: &Connection, app_id: AppId) -> Reply {
+/// The game's item definitions (the archive is public, keyed by its digest,
+/// cached on disk by `(app_id, digest)` so repeated launches and offline mode work).
+pub async fn item_defs(conn: &Connection, app_id: AppId, me: u64, refresh_token: &str, cache_dir: &Path) -> Reply {
     let empty = Reply::ItemDefs { defs: Vec::new() };
-    let Some(digest) = digest(conn, app_id).await else { return empty };
+    let cached = load_cached_defs(cache_dir, app_id);
+    let Some(digest) = digest(conn, app_id, me, refresh_token).await else {
+        return match cached {
+            Some(c) => Reply::ItemDefs { defs: defs(&c.body) },
+            None => empty,
+        };
+    };
+    if let Some(c) = &cached
+        && c.digest == digest
+    {
+        return Reply::ItemDefs { defs: defs(&c.body) };
+    }
     let url = format!("https://api.steampowered.com/IGameInventory/GetItemDefArchive/v0001?appid={app_id}&digest={digest}");
-    match reqwest::get(&url).await {
-        Ok(r) if r.status().is_success() => match r.text().await {
-            Ok(body) => Reply::ItemDefs { defs: defs(&body) },
-            Err(_) => empty,
+    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(15)).build() else {
+        return cached.map(|c| Reply::ItemDefs { defs: defs(&c.body) }).unwrap_or(empty);
+    };
+    match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => match read_bounded(r, MAX_ARCHIVE_BYTES).await {
+            Some(body) => {
+                let parsed = defs(&body);
+                if !parsed.is_empty() {
+                    save_cached_defs(cache_dir, app_id, &digest, &body);
+                }
+                Reply::ItemDefs { defs: parsed }
+            }
+            None => cached.map(|c| Reply::ItemDefs { defs: defs(&c.body) }).unwrap_or(empty),
         },
         Ok(r) => {
             tracing::info!("item definitions of {app_id}: HTTP {}", r.status());
-            empty
+            cached.map(|c| Reply::ItemDefs { defs: defs(&c.body) }).unwrap_or(empty)
         }
         Err(e) => {
             tracing::info!("item definitions of {app_id}: {e}");
-            empty
+            cached.map(|c| Reply::ItemDefs { defs: defs(&c.body) }).unwrap_or(empty)
         }
     }
 }
@@ -241,5 +377,30 @@ mod tests {
         let d = defs("[{\"itemdefid\":10,\"name\":\"Hat\",\"tradable\":true}]\0");
         assert_eq!(d[0].0, 10);
         assert!(d[0].1.contains(&("tradable".to_string(), "true".to_string())));
+        // Also parses wrapped response form.
+        let wrapped = defs(r#"{"response":{"items":[{"itemdefid":"20","name":"Cape"}]}}"#);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0].0, 20);
+    }
+
+    #[test]
+    fn validates_digest_and_caches_defs() {
+        assert!(is_valid_digest("0123456789abcdefABCDEF"));
+        assert!(!is_valid_digest(""));
+        assert!(!is_valid_digest("abc&appid=999"));
+        assert!(!is_valid_digest("../etc/passwd"));
+        assert_eq!(parse_web_digest(r#"{"response":{"modified":1,"digest":"deadbeef"}}"#).as_deref(), Some("deadbeef"));
+        assert_eq!(parse_web_digest(r#"{"response":{"digest":"../bad"}}"#), None);
+
+        let dir = std::env::temp_dir().join(format!("aurora-test-itemdefs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let body = r#"[{"itemdefid":42,"name":"Sword"}]"#;
+        save_cached_defs(&dir, 480, "deadbeef", body);
+        let loaded = load_cached_defs(&dir, 480).unwrap();
+        assert_eq!(loaded.digest, "deadbeef");
+        let parsed = defs(&loaded.body);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, 42);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

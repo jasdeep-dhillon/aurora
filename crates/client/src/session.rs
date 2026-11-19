@@ -2830,14 +2830,32 @@ impl Online {
                     let _ = reply.send(crate::game_ugc::get_vote(&conn, id).await);
                 });
             }
+            Request::UgcCreateItem { consumer_app, file_type } => {
+                tokio::spawn(async move {
+                    let _ = reply.send(crate::game_ugc::create_item(&conn, app_id, consumer_app, file_type).await);
+                });
+            }
+            Request::UgcUpdateItem(upd) => {
+                let cell_id = self.cell_id;
+                tokio::spawn(async move {
+                    let _ = reply.send(crate::game_ugc::update_item(&conn, app_id, cell_id, &upd).await);
+                });
+            }
+            Request::UgcDeleteItem { id } => {
+                tokio::spawn(async move {
+                    let _ = reply.send(Reply::Result { eresult: crate::game_ugc::delete_item(&conn, app_id, id).await });
+                });
+            }
             Request::Inventory(op) => {
                 tokio::spawn(async move {
                     let _ = reply.send(crate::game_inventory::run(&conn, app_id, me, op).await);
                 });
             }
             Request::ItemDefs => {
+                let refresh = self.refresh_token.clone();
+                let cache_dir = crate::store::config_dir().join("itemdefs");
                 tokio::spawn(async move {
-                    let _ = reply.send(crate::game_inventory::item_defs(&conn, app_id).await);
+                    let _ = reply.send(crate::game_inventory::item_defs(&conn, app_id, me, &refresh, &cache_dir).await);
                 });
             }
             Request::InputConfig => {

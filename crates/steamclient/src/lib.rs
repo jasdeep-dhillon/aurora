@@ -28,6 +28,7 @@ pub fn slot_of(version: &str, method: &str) -> Option<usize> {
 }
 
 mod extras;
+mod gameserver;
 mod gns;
 mod ifaces;
 mod input;

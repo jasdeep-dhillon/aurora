@@ -196,19 +196,21 @@ fn string_out(s: &str, buf: *mut c_char, size: *mut u32) -> bool {
     cap >= need
 }
 
-fn property(props: &[(String, String)], name: *const c_char) -> String {
+fn property(props: &[(String, String)], name: *const c_char) -> Option<String> {
     if name.is_null() {
-        return props.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(",");
+        return Some(props.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(","));
     }
     let name = unsafe { text(name) };
-    props.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone()).unwrap_or_default()
+    props.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone())
 }
 
 extern "C" fn result_property(_t: This, h: i32, index: u32, name: *const c_char, buf: *mut c_char, size: *mut u32) -> bool {
-    let value = {
+    let Some(value) = ({
         let i = inv();
         let Some(it) = i.results.get(&h).and_then(|r| r.items.get(index as usize)) else { return false };
         property(&it.props, name)
+    }) else {
+        return false;
     };
     string_out(&value, buf, size)
 }
@@ -226,7 +228,7 @@ extern "C" fn destroy(_t: This, h: i32) {
 }
 
 extern "C" fn all_items(_t: This, out: *mut i32) -> bool {
-    load_defs_once();
+    load_defs_once(false);
     start(out, InventoryOp::All)
 }
 
@@ -309,10 +311,15 @@ extern "C" fn drop(_t: This, out: *mut i32, def: i32) -> bool {
 
 // ------------------------------------------------------------ definitions
 
-fn load_defs_once() {
+fn load_defs_once(retry_if_empty: bool) {
     {
         let mut i = inv();
-        if i.defs.is_some() || i.loading_defs {
+        if i.loading_defs {
+            return;
+        }
+        if let Some(existing) = &i.defs
+            && (!retry_if_empty || !existing.is_empty())
+        {
             return;
         }
         i.loading_defs = true;
@@ -333,12 +340,12 @@ fn load_defs_once() {
 }
 
 extern "C" fn load_defs(_t: This) -> bool {
-    load_defs_once();
+    load_defs_once(true);
     true
 }
 
 extern "C" fn def_ids(_t: This, out: *mut i32, size: *mut u32) -> bool {
-    load_defs_once();
+    load_defs_once(false);
     let i = inv();
     let Some(defs) = i.defs.as_ref() else { return false };
     if size.is_null() {
@@ -357,11 +364,13 @@ extern "C" fn def_ids(_t: This, out: *mut i32, size: *mut u32) -> bool {
 }
 
 extern "C" fn def_property(_t: This, def: i32, name: *const c_char, buf: *mut c_char, size: *mut u32) -> bool {
-    load_defs_once();
-    let value = {
+    load_defs_once(false);
+    let Some(value) = ({
         let i = inv();
         let Some(props) = i.defs.as_ref().and_then(|d| d.iter().find(|(id, _)| *id == def)).map(|(_, p)| p.clone()) else { return false };
         property(&props, name)
+    }) else {
+        return false;
     };
     string_out(&value, buf, size)
 }
