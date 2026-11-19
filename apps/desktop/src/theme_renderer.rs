@@ -950,6 +950,18 @@ fn render_styled_button(ui: &mut Ui, t: &Theme, label: &str, icon: Option<&str>,
     let base_fg = style.color.map(|c| c.resolve(t)).unwrap_or(t.text_dim);
     let hover_fg = style.hover_color.map(|c| c.resolve(t)).unwrap_or(t.text);
     let fg = w::mix(base_fg, hover_fg, hover);
+    if icon == Some("grid") && label.is_empty() {
+        // Draw crisp 2x2 squares directly (Steam Collections icon, never misses a font glyph).
+        let c = rect.center();
+        let s = 5.0;
+        let g = 2.0;
+        for dx in [-s - g * 0.5, g * 0.5] {
+            for dy in [-s - g * 0.5, g * 0.5] {
+                ui.painter().rect_filled(Rect::from_min_size(pos2(c.x + dx, c.y + dy), vec2(s, s)), CornerRadius::same(1), fg);
+            }
+        }
+        return resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
     let text_x = match style.align.unwrap_or(AlignMode::Center) {
         AlignMode::Start => rect.left() + pad.left,
         AlignMode::Center => rect.center().x - galley.size().x * 0.5,

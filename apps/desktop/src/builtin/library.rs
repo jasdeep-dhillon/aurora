@@ -2972,7 +2972,8 @@ impl crate::theme_renderer::LibraryHost for Library {
             return;
         }
         if let Some(hdr) = title {
-            w::section(ui, t, &i18n::tr_dyn(hdr), None);
+            ui.label(w::text_medium(i18n::tr_dyn(hdr), 15.0, t.text));
+            ui.add_space(4.0);
         }
         let radius = CornerRadius::same(card_radius);
         let top_off = if date_above { 18.0 } else { 0.0 };
@@ -3056,7 +3057,8 @@ impl crate::theme_renderer::LibraryHost for Library {
             return;
         }
         if let Some(hdr) = title {
-            w::section(ui, t, &i18n::tr_dyn(hdr), None);
+            ui.label(w::text_medium(i18n::tr_dyn(hdr), 15.0, t.text));
+            ui.add_space(4.0);
         }
         let avail = ui.available_width();
         let radius = CornerRadius::same(card_radius);
@@ -3096,7 +3098,18 @@ impl crate::theme_renderer::LibraryHost for Library {
                     (t.accent, icons::DOWNLOAD, t!("Install"))
                 };
                 ui.painter().rect_filled(btn_rect, CornerRadius::same(2), w::mix(btn_bg, Color32::WHITE, bhover * 0.14));
-                ui.painter().text(btn_rect.center(), Align2::CENTER_CENTER, btn_icon, w::font(22.0), Color32::WHITE);
+                if !fplaying && finstalled.is_some() {
+                    // Crisp filled white play triangle matching Steam's Play button.
+                    let c = btn_rect.center();
+                    let tri = vec![
+                        pos2(c.x - 7.0, c.y - 9.0),
+                        pos2(c.x + 9.0, c.y),
+                        pos2(c.x - 7.0, c.y + 9.0),
+                    ];
+                    ui.painter().add(egui::Shape::convex_polygon(tri, Color32::WHITE, Stroke::NONE));
+                } else {
+                    ui.painter().text(btn_rect.center(), Align2::CENTER_CENTER, btn_icon, w::font(20.0), Color32::WHITE);
+                }
                 if btn_resp.on_hover_text(btn_tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     if fplaying {
                         stop = Some(*fid);

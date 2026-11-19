@@ -5,11 +5,11 @@
 # SHELL
 # ============================================================================
 
-# Top two-row Steam header (66px)
+# Top two-row Steam header (70px)
 [[shell]]
 type = "panel"
 side = "top"
-size = 66
+size = 70
 drag_window = true
 style = { bg = "$chrome", border_bottom = { width = 1, color = "#0E1116" } }
 
@@ -108,11 +108,11 @@ type = "window_controls"
 variant = "windows"
 height = 28
 
-# Row 2 (38px): back/forward arrows + bold uppercase underline navigation tabs
+# Row 2 (42px): back/forward arrows + bold uppercase underline navigation tabs
 [[shell.children]]
 type = "row"
 align = "center"
-style = { height = 38, padding = [0, 12, 0, 12], gap = 8 }
+style = { height = 42, padding = [0, 12, 0, 12], gap = 8 }
 
 [[shell.children.children]]
 type = "back_forward"
@@ -127,7 +127,7 @@ profile_as_username = true
 indicator = "underline"
 indicator_height = 2.5
 tab_gap = 18
-style = { font_size = 18, font_weight = "bold", color = "#B8BCBF", hover_color = "#FFFFFF", active_color = "#1A9FFF" }
+style = { font_size = 17, font_weight = "bold", color = "#B8BCBF", hover_color = "#FFFFFF", active_color = "#1A9FFF" }
 
 # Bottom Steam status bar (32px)
 [[shell]]
@@ -183,12 +183,12 @@ type = "page_content"
 # LIBRARY
 # ============================================================================
 
-# Left compact Steam library sidebar (272px)
+# Left compact Steam library sidebar (276px)
 [[library]]
 type = "panel"
 side = "left"
-size = 272
-style = { bg = "#1F232A", border_right = { width = 1, color = "#12151B" }, padding = [8, 8, 8, 8], gap = 6 }
+size = 276
+style = { bg = "#22252C", border_right = { width = 1, color = "#12151B" }, padding = [8, 8, 8, 8], gap = 6 }
 
 [[library.children]]
 type = "row"
@@ -199,14 +199,14 @@ style = { gap = 6 }
 type = "button"
 label = "Home"
 action = "navigate:library"
-style = { width = "fill", height = 28, bg = "#2E333C", hover_bg = "#383F4B", radius = 2, align = "start", padding = [0, 10, 0, 10], font_size = 13, font_weight = "medium", color = "$text" }
+style = { width = "fill", height = 32, bg = "#323740", hover_bg = "#3D434E", radius = 2, align = "start", padding = [0, 10, 0, 10], font_size = 13.5, font_weight = "medium", color = "$text" }
 
 [[library.children.children]]
 type = "button"
 label = ""
 icon = "grid"
 action = "navigate:library"
-style = { width = 28, height = 28, bg = "#2E333C", hover_bg = "#383F4B", radius = 2, align = "center", font_size = 15, color = "$text_dim", hover_color = "$text" }
+style = { width = 32, height = 32, bg = "#323740", hover_bg = "#3D434E", radius = 2, align = "center", font_size = 15, color = "$text_dim", hover_color = "$text" }
 
 [[library.children]]
 type = "library_filters"
@@ -216,7 +216,7 @@ variant = "dropdown_icons"
 type = "library_search"
 placeholder = "Search"
 show_filter_button = true
-style = { bg = "#171A21", radius = 2, height = 28 }
+style = { bg = "#181B22", radius = 2, height = 28 }
 
 [[library.children]]
 type = "library_list"
@@ -242,32 +242,32 @@ direction = "vertical"
 # Darker What's New band
 [[library.children.children.children]]
 type = "box"
-style = { bg = "#1E222B", border_bottom = { width = 1, color = "#14171D" }, padding = [14, 22, 16, 22] }
+style = { bg = "#1E222B", border_bottom = { width = 1, color = "#14171D" }, padding = [10, 22, 12, 22] }
 
 [[library.children.children.children.children]]
 type = "whats_new_shelf"
 title = "What's New"
-card_width = 260
-card_height = 146
-card_radius = 0
+card_width = 270
+card_height = 148
+card_radius = 4
 date_above = true
 max_items = 5
-gap = 12
+gap = 14
 
 # Main cool-slate gradient shelves area (Recent Games + All Games)
 [[library.children.children.children]]
 type = "box"
-style = { bg_gradient = { from = "#262A33", to = "#1E2229", direction = "vertical" }, padding = [16, 22, 24, 22], gap = 20 }
+style = { bg_gradient = { from = "#262B34", to = "#1E222A", direction = "vertical" }, padding = [16, 22, 24, 22], gap = 22 }
 
 [[library.children.children.children.children]]
 type = "recent_games_shelf"
 title = "Recent Games"
 featured_first = true
-featured_width = 360
-capsule_width = 160
-capsule_height = 240
+featured_width = 385
+capsule_width = 178
+capsule_height = 268
 card_radius = 0
-gap = 12
+gap = 14
 
 [[library.children.children.children.children]]
 type = "all_games_grid"
@@ -275,7 +275,7 @@ title = "All Games"
 show_count = true
 show_sort = true
 card_aspect = "capsule"
-card_width = 160
-card_height = 240
+card_width = 190
+card_height = 285
 card_radius = 0
-gap = 12
+gap = 14
