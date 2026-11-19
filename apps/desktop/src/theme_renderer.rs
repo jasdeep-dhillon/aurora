@@ -576,7 +576,10 @@ fn render_shell_node(rctx: &mut ShellRenderCtx<'_, '_, '_>, ui: &mut Ui, node: &
             let waiting = data.pending_gifts + data.pending_friends + data.confirmations;
             let badge = (data.unread + waiting) as usize;
             let sz = (*size).max(20.0);
-            let w_px = (sz + 6.0).max(26.0);
+            let w_px = match style.width {
+                Some(SizeVal::Px(w)) => w.max(sz),
+                _ => (sz * 1.55).max(32.0),
+            };
             let (rect, resp) = ui.allocate_exact_size(vec2(w_px, sz), Sense::click());
             let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
             let radius = style.radius.map(CornerRadius::same).unwrap_or_else(|| t.corner_small());
@@ -600,8 +603,12 @@ fn render_shell_node(rctx: &mut ShellRenderCtx<'_, '_, '_>, ui: &mut Ui, node: &
 
         Node::FriendsButton { size, style } => {
             let sz = (*size).max(20.0);
+            let w_px = match style.width {
+                Some(SizeVal::Px(w)) => w.max(sz),
+                _ => (sz * 1.55).max(32.0),
+            };
             let unread = rctx.app.state.total_unread();
-            let (rect, resp) = ui.allocate_exact_size(vec2((sz + 6.0).max(26.0), sz), Sense::click());
+            let (rect, resp) = ui.allocate_exact_size(vec2(w_px, sz), Sense::click());
             let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
             let active = rctx.app.prefs.friends_open;
             let radius = style.radius.map(CornerRadius::same).unwrap_or_else(|| t.corner_small());
@@ -611,7 +618,11 @@ fn render_shell_node(rctx: &mut ShellRenderCtx<'_, '_, '_>, ui: &mut Ui, node: &
             } else {
                 w::mix(base_bg, t.surface_hover, hover)
             };
-            let fg = if active { t.accent } else { w::mix(t.text_dim, t.text, hover) };
+            let fg = if active {
+                t.accent
+            } else {
+                w::mix(style.color.map(|c| c.resolve(&t)).unwrap_or(t.text_dim), t.text, hover)
+            };
             ui.painter().rect_filled(rect, radius, bg);
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, icons::USERS, w::font((sz * 0.56).clamp(11.0, 16.0)), fg);
             if unread > 0 {

@@ -2613,22 +2613,16 @@ fn themed_game_tile(
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
     let r = CornerRadius::same(card_radius);
     let img = rect.expand(hover * 2.5);
-    if hover > 0.01 {
-        ui.painter().rect_filled(img.translate(vec2(0.0, 6.0 * hover)), r, Color32::from_black_alpha((90.0 * hover) as u8));
-    }
+    // Subtle resting drop shadow + deeper hover shadow, like Steam's capsules.
+    ui.painter().rect_filled(img.translate(vec2(0.0, 3.0 + 4.0 * hover)), r, Color32::from_black_alpha((55.0 + 60.0 * hover) as u8));
     if !w::paint_cover_first(ui, img, &[url, fallback_url], r) {
         w::placeholder(ui, t, img, title, r);
     }
     if !installed {
-        ui.painter().rect_filled(img, r, Color32::from_black_alpha(90));
+        ui.painter().rect_filled(img, r, Color32::from_black_alpha(55));
     }
     if hover > 0.01 {
         ui.painter().rect_stroke(img, r, Stroke::new(1.5, t.accent.gamma_multiply(hover)), egui::StrokeKind::Outside);
-    }
-    if installed {
-        let c = img.left_bottom() + vec2(12.0, -12.0);
-        ui.painter().circle_filled(c, 6.0, Color32::from_black_alpha(160));
-        ui.painter().circle_filled(c, 3.5, t.play);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -2982,8 +2976,12 @@ impl crate::theme_renderer::LibraryHost for Library {
         }
         let radius = CornerRadius::same(card_radius);
         let top_off = if date_above { 18.0 } else { 0.0 };
-        let card = vec2(card_width, top_off + card_height + 58.0);
         let limit = max_items.max(1);
+        let avail = ui.available_width();
+        let aspect = if card_width > 0.0 { card_height / card_width } else { 9.0 / 16.0 };
+        let actual_w = ((avail - gap * (limit.saturating_sub(1)) as f32) / limit as f32).clamp(card_width * 0.8, card_width * 1.35).floor();
+        let actual_h = (actual_w * aspect).round();
+        let card = vec2(actual_w, top_off + actual_h + 58.0);
         egui::ScrollArea::horizontal().id_salt("whats-new-themed").show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
@@ -3006,7 +3004,7 @@ impl crate::theme_renderer::LibraryHost for Library {
                         };
                         ui.painter().text(r.left_top(), Align2::LEFT_TOP, when, w::font(11.5), t.text_faint);
                     }
-                    let img = Rect::from_min_size(r.min + vec2(0.0, top_off), vec2(card_width, card_height));
+                    let img = Rect::from_min_size(r.min + vec2(0.0, top_off), vec2(actual_w, actual_h));
                     match e.capsule.as_deref().or(e.header.as_deref()) {
                         Some(u) => w::image_or_title(ui, t, img, u, &e.title, radius),
                         None => w::image_or_title(ui, t, img, &art::header(*id), &e.title, radius),
@@ -3015,7 +3013,7 @@ impl crate::theme_renderer::LibraryHost for Library {
                         ui.painter().rect_stroke(img, radius, Stroke::new(1.5, t.accent.gamma_multiply(hover)), egui::StrokeKind::Inside);
                     }
                     let text_rect = Rect::from_min_max(pos2(r.left(), img.bottom() + 6.0), r.max);
-                    let mut job = egui::text::LayoutJob::simple(e.title.clone(), w::font_semibold(12.5), t.text, card_width);
+                    let mut job = egui::text::LayoutJob::simple(e.title.clone(), w::font_semibold(12.5), t.text, actual_w);
                     job.wrap.max_rows = 2;
                     job.wrap.overflow_character = Some('…');
                     let galley = ui.painter().layout_job(job);
@@ -3062,7 +3060,6 @@ impl crate::theme_renderer::LibraryHost for Library {
         }
         let avail = ui.available_width();
         let radius = CornerRadius::same(card_radius);
-        let cap_size = vec2(capsule_width, capsule_height);
         let mut launch: Option<(AppId, PathBuf)> = None;
         let mut stop: Option<AppId> = None;
         let mut install: Option<AppId> = None;
@@ -3082,11 +3079,13 @@ impl crate::theme_renderer::LibraryHost for Library {
                 if hover > 0.01 {
                     ui.painter().rect_stroke(rect, radius, Stroke::new(1.5, t.accent.gamma_multiply(hover)), egui::StrokeKind::Inside);
                 }
-                let bar_h = 62.0;
+                let bar_h = 68.0;
                 let bar_rect = Rect::from_min_max(pos2(rect.left(), rect.bottom() - bar_h), rect.max);
-                ui.painter().rect_filled(bar_rect, CornerRadius { nw: 0, ne: 0, sw: card_radius, se: card_radius }, Color32::from_rgba_unmultiplied(18, 22, 29, 228));
+                // Frosted cool-slate translucent bar matching Steam's featured recent tile.
+                ui.painter().rect_filled(bar_rect, CornerRadius { nw: 0, ne: 0, sw: card_radius, se: card_radius }, Color32::from_rgba_unmultiplied(64, 73, 86, 205));
+                ui.painter().hline(bar_rect.x_range(), bar_rect.top(), Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 24)));
 
-                let btn_rect = Rect::from_min_size(pos2(bar_rect.left() + 12.0, bar_rect.center().y - 20.0), vec2(40.0, 40.0));
+                let btn_rect = Rect::from_min_size(pos2(bar_rect.left() + 12.0, bar_rect.center().y - 23.0), vec2(46.0, 46.0));
                 let btn_resp = ui.interact(btn_rect, ui.scope_id().with(("feat-play", *fid)), Sense::click());
                 let bhover = ui.ctx().animate_bool_with_time(btn_resp.id, btn_resp.hovered(), 0.08);
                 let (btn_bg, btn_icon, btn_tip) = if fplaying {
@@ -3097,7 +3096,7 @@ impl crate::theme_renderer::LibraryHost for Library {
                     (t.accent, icons::DOWNLOAD, t!("Install"))
                 };
                 ui.painter().rect_filled(btn_rect, CornerRadius::same(2), w::mix(btn_bg, Color32::WHITE, bhover * 0.14));
-                ui.painter().text(btn_rect.center(), Align2::CENTER_CENTER, btn_icon, w::font(18.0), Color32::WHITE);
+                ui.painter().text(btn_rect.center(), Align2::CENTER_CENTER, btn_icon, w::font(22.0), Color32::WHITE);
                 if btn_resp.on_hover_text(btn_tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     if fplaying {
                         stop = Some(*fid);
@@ -3117,14 +3116,13 @@ impl crate::theme_renderer::LibraryHost for Library {
                     })
                     .unwrap_or(0);
                 let played_str = if minutes > 0 { ui::playtime(minutes) } else { t!("Never").to_string() };
-                let text_x = btn_rect.right() + 12.0;
+                let text_x = btn_rect.right() + 14.0;
                 let text_w = (bar_rect.right() - text_x - 10.0).max(60.0);
-                let info_rect = Rect::from_min_max(pos2(text_x, bar_rect.top() + 8.0), pos2(text_x + text_w, bar_rect.bottom() - 8.0));
+                let info_rect = Rect::from_min_max(pos2(text_x, bar_rect.top() + 14.0), pos2(text_x + text_w, bar_rect.bottom() - 10.0));
                 let mut info_ui = ui.new_child(egui::UiBuilder::new().max_rect(info_rect).layout(Layout::top_down(Align::Min)));
-                info_ui.spacing_mut().item_spacing.y = 1.0;
-                info_ui.add(egui::Label::new(w::text_semibold(fname, 13.0, Color32::WHITE)).truncate());
-                info_ui.label(w::text_semibold(t!("TIME PLAYED").to_uppercase(), 10.0, t.text_faint));
-                info_ui.label(w::text(played_str, 12.0, t.text_dim));
+                info_ui.spacing_mut().item_spacing.y = 2.0;
+                info_ui.label(w::text_semibold(t!("TIME PLAYED").to_uppercase(), 10.5, Color32::from_rgb(205, 212, 222)));
+                info_ui.label(w::text(format!("Total: {played_str}"), 12.5, Color32::from_rgb(228, 233, 240)));
 
                 self.game_menu(t, ctx, &resp, *fid, finstalled.is_some(), fplaying);
                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -3136,10 +3134,12 @@ impl crate::theme_renderer::LibraryHost for Library {
             };
 
             let rem_w = if featured_first { (avail - featured_width - gap).max(0.0) } else { avail };
-            let cap_count = ((rem_w + gap) / (capsule_width + gap)).floor().max(0.0) as usize;
+            let cap_count = ((rem_w + gap) / (capsule_width + gap)).floor().max(1.0) as usize;
+            let fitted_w = ((rem_w - gap * (cap_count.saturating_sub(1)) as f32) / cap_count as f32).clamp(capsule_width * 0.85, capsule_width * 1.25).floor();
+            let fitted_size = vec2(fitted_w, capsule_height);
             for (id, name, _) in account_recent.iter().skip(skip).take(cap_count) {
                 let installed = ctx.local.games.iter().any(|g| g.app_id == *id);
-                let r = themed_game_tile(ui, t, &art::capsule(*id), &art::header(*id), name, installed, cap_size, card_radius);
+                let r = themed_game_tile(ui, t, &art::capsule(*id), &art::header(*id), name, installed, fitted_size, card_radius);
                 self.game_menu(t, ctx, &r, *id, installed, ctx.state.playing == Some(*id));
                 if r.clicked() {
                     self.selected = Some(*id);
@@ -3175,18 +3175,45 @@ impl crate::theme_renderer::LibraryHost for Library {
         let items = self.filtered(ctx);
         if title.is_some() || show_sort {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
                 if let Some(hdr) = title {
                     let heading = if show_count {
                         format!("{} ({})", i18n::tr_dyn(hdr), items.len())
                     } else {
                         i18n::tr_dyn(hdr)
                     };
-                    ui.label(w::text_bold(heading, 16.0, t.text));
+                    ui.label(w::text_semibold(heading, 15.5, t.text));
                 }
                 if show_sort {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        w::segmented(ui, t, &mut self.sort, &[(Sort::Name, t!("Name")), (Sort::Recent, t!("Recent")), (Sort::Playtime, t!("Hours")), (Sort::Size, t!("Size"))]);
-                        ui.label(w::text(t!("Sort"), 12.5, t.text_faint));
+                    ui.add_space(4.0);
+                    ui.label(w::text_semibold(t!("SORT BY"), 11.0, t.text_faint));
+                    let current_label = match self.sort {
+                        Sort::Name => t!("Alphabetical"),
+                        Sort::Recent => t!("Last Played"),
+                        Sort::Playtime => t!("Hours Played"),
+                        Sort::Size => t!("Size on Disk"),
+                    };
+                    let btn = ui.add(
+                        egui::Button::new(w::text(format!("{current_label}  {}", icons::CARET_DOWN), 12.0, t.text))
+                            .fill(t.raised)
+                            .stroke(Stroke::NONE)
+                            .corner_radius(CornerRadius::same(2))
+                            .min_size(vec2(110.0, 24.0)),
+                    );
+                    egui::Popup::menu(&btn).show(|ui| {
+                        ui.set_min_width(140.0);
+                        for (s, lbl) in [
+                            (Sort::Playtime, t!("Hours Played")),
+                            (Sort::Recent, t!("Last Played")),
+                            (Sort::Name, t!("Alphabetical")),
+                            (Sort::Size, t!("Size on Disk")),
+                        ] {
+                            let mark = if self.sort == s { icons::CHECK } else { "" };
+                            if w::menu_item(ui, t, mark, lbl).clicked() {
+                                self.sort = s;
+                                ui.close();
+                            }
+                        }
                     });
                 }
             });

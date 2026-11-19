@@ -86,11 +86,13 @@ flex = true
 [[shell.children.children]]
 type = "friends_button"
 size = 22
+style = { width = 36, bg = "#24282F", radius = 2 }
 
 [[shell.children.children]]
 type = "notifications"
 size = 22
 highlight_unread_bg = "$play"
+style = { width = 36, bg = "#24282F", radius = 2 }
 
 [[shell.children.children]]
 type = "account"
@@ -110,7 +112,7 @@ height = 28
 [[shell.children]]
 type = "row"
 align = "center"
-style = { height = 38, padding = [0, 12, 0, 12], gap = 10 }
+style = { height = 38, padding = [0, 12, 0, 12], gap = 8 }
 
 [[shell.children.children]]
 type = "back_forward"
@@ -123,9 +125,9 @@ show_icons = false
 uppercase = true
 profile_as_username = true
 indicator = "underline"
-indicator_height = 3
+indicator_height = 2.5
 tab_gap = 18
-style = { font_size = 17, font_weight = "bold", color = "#B8BCBF", hover_color = "#FFFFFF", active_color = "#1A9FFF" }
+style = { font_size = 18, font_weight = "bold", color = "#B8BCBF", hover_color = "#FFFFFF", active_color = "#1A9FFF" }
 
 # Bottom Steam status bar (32px)
 [[shell]]
@@ -201,9 +203,10 @@ style = { width = "fill", height = 28, bg = "#2E333C", hover_bg = "#383F4B", rad
 
 [[library.children.children]]
 type = "button"
-label = "⊞"
+label = ""
+icon = "grid"
 action = "navigate:library"
-style = { width = 28, height = 28, bg = "#2E333C", hover_bg = "#383F4B", radius = 2, align = "center", font_size = 14, color = "$text_dim", hover_color = "$text" }
+style = { width = 28, height = 28, bg = "#2E333C", hover_bg = "#383F4B", radius = 2, align = "center", font_size = 15, color = "$text_dim", hover_color = "$text" }
 
 [[library.children]]
 type = "library_filters"
