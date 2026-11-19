@@ -16,6 +16,7 @@ mod offline_ui;
 mod overlay;
 mod shell;
 mod taskbar;
+mod theme_renderer;
 mod tray;
 #[cfg(target_os = "linux")]
 mod tray_linux;

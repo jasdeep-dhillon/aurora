@@ -5,8 +5,25 @@ use extensions::{Action, Env, Registry};
 use local::LocalState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, mpsc};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, mpsc};
 use ui::Theme;
+
+/// Shared theme manager state between `SteamApp` and `Settings → Appearance`.
+pub struct ThemeState {
+    pub manager: themes::ThemeManager,
+    pub hot_reload: bool,
+    pub last_error: Option<String>,
+    pub dirty: bool,
+    pub revision: u64,
+}
+
+pub type SharedThemeManager = Arc<Mutex<ThemeState>>;
+pub type SharedLibraryLayout = Arc<Mutex<Vec<themes::Node>>>;
+
+fn lcd_subpixel_enabled() -> bool {
+    cfg!(target_os = "linux") && std::env::var("STEAMRS_LCD").as_deref() != Ok("0")
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -73,6 +90,12 @@ pub struct Prefs {
     pub win_pos: Option<[f32; 2]>,
     #[serde(default)]
     pub win_maximized: bool,
+    /// Active installed theme id (`None` = Default Aurora UI).
+    #[serde(default)]
+    pub active_theme_id: Option<String>,
+    /// Watch active theme files on disk and hot-reload on change.
+    #[serde(default)]
+    pub hot_reload_themes: bool,
 }
 
 fn yes() -> bool {
@@ -111,6 +134,8 @@ impl Default for Prefs {
             win_size: None,
             win_pos: None,
             win_maximized: false,
+            active_theme_id: None,
+            hot_reload_themes: false,
         }
     }
 }
@@ -176,6 +201,14 @@ pub struct SteamApp {
     hidden: bool,
     applied_theme: Option<Theme>,
     applied_zoom: f32,
+    pub themes: SharedThemeManager,
+    pub library_layout: SharedLibraryLayout,
+    resolved_snapshot: Option<themes::ResolvedTheme>,
+    synced_revision: u64,
+    applied_fonts_key: Option<String>,
+    bg_tex: Option<(PathBuf, egui::TextureHandle)>,
+    logo_tex: Option<(PathBuf, egui::TextureHandle)>,
+    last_hot_reload_check: f64,
 }
 
 impl SteamApp {
@@ -184,9 +217,37 @@ impl SteamApp {
         // Subpixel text on Linux unless turned off (e.g. for a BGR or rotated
         // screen). Other systems keep grayscale text: only Linux gets the
         // per-channel blending (see vendor/egui_glow).
-        ui::install_fonts_with(&cc.egui_ctx, cfg!(target_os = "linux") && std::env::var("STEAMRS_LCD").as_deref() != Ok("0"));
+        ui::install_fonts_with(&cc.egui_ctx, lcd_subpixel_enabled());
         let mut prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
-        prefs.theme = prefs.theme.refreshed();
+        let cfg_dir = client::store::config_dir();
+        let mut theme_manager = themes::ThemeManager::new(cfg_dir.join("themes"), cfg_dir.join("theme-data"));
+        theme_manager.scan();
+        let mut last_error = None;
+        if let Some(id) = prefs.active_theme_id.as_deref() {
+            if let Err(e) = theme_manager.activate(Some(id)) {
+                tracing::warn!("activate theme '{id}': {e}");
+                last_error = Some(e.to_string());
+            }
+        }
+        let initial_lib_nodes = theme_manager
+            .resolved
+            .as_ref()
+            .map(|r| r.layout.library.clone())
+            .unwrap_or_default();
+        let initial_snapshot = theme_manager.resolved.as_ref().map(snapshot_resolved);
+        prefs.theme = theme_manager
+            .resolved
+            .as_ref()
+            .map(|r| r.theme.clone())
+            .unwrap_or_else(Theme::default);
+        let themes = Arc::new(Mutex::new(ThemeState {
+            manager: theme_manager,
+            hot_reload: prefs.hot_reload_themes,
+            last_error,
+            dirty: true,
+            revision: 1,
+        }));
+        let library_layout = Arc::new(Mutex::new(initial_lib_nodes));
         // `--lang=en` / `--lang=ru` overrides the saved choice (screenshots, testing).
         let lang_flag = std::env::args().find_map(|a| a.strip_prefix("--lang=").map(String::from));
         // The language picked in setup counts until one is chosen in the app.
@@ -247,7 +308,7 @@ impl SteamApp {
         client::set_gameplay_downloads(prefs.gameplay_downloads);
         #[cfg(not(windows))]
         client::shaders::set_precompile(prefs.precompile_shaders);
-        let mut registry = crate::builtin::registry(rt.handle().clone(), cc.egui_ctx.clone(), flags.clone());
+        let mut registry = crate::builtin::registry(rt.handle().clone(), cc.egui_ctx.clone(), flags.clone(), themes.clone(), library_layout.clone());
         for id in &prefs.disabled {
             registry.set_enabled(id, false);
         }
@@ -309,6 +370,14 @@ impl SteamApp {
             hidden: false,
             applied_theme: None,
             applied_zoom: 0.0,
+            themes,
+            library_layout,
+            resolved_snapshot: initial_snapshot,
+            synced_revision: 0,
+            applied_fonts_key: Some(format!("{:?}", ui::theme::WeightPreset::Heavy)),
+            bg_tex: None,
+            logo_tex: None,
+            last_hot_reload_check: 0.0,
         };
         // `--page=inventory --arg=listings`: open a page at startup (handy with --demo).
         let flag = |name: &str| std::env::args().find_map(|a| a.strip_prefix(&format!("--{name}=")).map(String::from));
@@ -550,6 +619,60 @@ impl SteamApp {
                         self.prefs.language = Some(code);
                     }
                 }
+                Action::ActivateTheme(id) => {
+                    let err_msg = if let Ok(mut st) = self.themes.lock() {
+                        match st.manager.activate(id.as_deref()) {
+                            Ok(()) => {
+                                self.prefs.active_theme_id = id.clone();
+                                st.last_error = None;
+                                st.revision = st.revision.wrapping_add(1);
+                                st.dirty = true;
+                                None
+                            }
+                            Err(e) => {
+                                let msg = e.to_string();
+                                st.last_error = Some(msg.clone());
+                                st.dirty = true;
+                                Some(msg)
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(msg) = err_msg {
+                        self.toast(now, "Theme error", msg);
+                    }
+                }
+                Action::ReloadThemes => {
+                    if let Ok(mut st) = self.themes.lock() {
+                        st.manager.scan();
+                        st.last_error = None;
+                        st.revision = st.revision.wrapping_add(1);
+                        st.dirty = true;
+                    }
+                }
+                Action::SetThemeOption { theme_id, key, value } => {
+                    let err_msg = if let Ok(mut st) = self.themes.lock() {
+                        match st.manager.set_option_str(&theme_id, &key, &value) {
+                            Ok(()) => {
+                                st.last_error = None;
+                                st.revision = st.revision.wrapping_add(1);
+                                st.dirty = true;
+                                None
+                            }
+                            Err(e) => {
+                                let msg = e.to_string();
+                                st.last_error = Some(msg.clone());
+                                Some(msg)
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(msg) = err_msg {
+                        self.toast(now, "Theme option error", msg);
+                    }
+                }
             }
         }
         let pages = self.registry.pages();
@@ -560,6 +683,67 @@ impl SteamApp {
 }
 
 impl SteamApp {
+    fn sync_theme_state(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        let (active_theme, fonts_key, custom_fonts, bg_path, logo_path, new_snapshot, new_lib_nodes, rev) = {
+            let mut st = self.themes.lock().unwrap();
+            self.prefs.hot_reload_themes = st.hot_reload;
+            self.prefs.active_theme_id = st.manager.active_id.clone();
+
+            if st.hot_reload && st.manager.active_id.is_some() && (now - self.last_hot_reload_check).abs() >= 0.5 {
+                self.last_hot_reload_check = now;
+                if st.manager.check_hot_reload() {
+                    st.revision = st.revision.wrapping_add(1);
+                    st.dirty = true;
+                }
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            }
+
+            let changed = st.dirty || st.revision != self.synced_revision;
+            st.dirty = false;
+            let rev = st.revision;
+
+            if let Some(res) = st.manager.resolved.as_ref() {
+                let theme = res.theme.clone();
+                let wp = theme.weight_preset;
+                let fonts_key = Some(match res.custom_fonts.as_ref() {
+                    Some(_) => format!("{wp:?}:{}:{rev}", res.meta.id),
+                    None => format!("{wp:?}"),
+                });
+                let custom_fonts = if self.applied_fonts_key != fonts_key { res.custom_fonts.clone() } else { None };
+                let snap = changed.then(|| Some(snapshot_resolved(res)));
+                let lib_nodes = changed.then(|| res.layout.library.clone());
+                (theme, fonts_key, custom_fonts, res.background_path.clone(), res.logo_path.clone(), snap, lib_nodes, rev)
+            } else {
+                let theme = Theme::default();
+                let fonts_key = Some(format!("{:?}", theme.weight_preset));
+                let snap = changed.then_some(None);
+                let lib_nodes = changed.then(Vec::new);
+                (theme, fonts_key, None, None, None, snap, lib_nodes, rev)
+            }
+        };
+
+        if let Some(snap) = new_snapshot {
+            self.resolved_snapshot = snap;
+        }
+        if let Some(nodes) = new_lib_nodes {
+            *self.library_layout.lock().unwrap() = nodes;
+        }
+        self.synced_revision = rev;
+        self.prefs.theme = active_theme;
+
+        if self.applied_theme.as_ref() != Some(&self.prefs.theme) {
+            self.prefs.theme.apply(ctx);
+            self.applied_theme = Some(self.prefs.theme.clone());
+        }
+        if self.applied_fonts_key != fonts_key {
+            ui::install_fonts_for_theme(ctx, lcd_subpixel_enabled(), self.prefs.theme.weight_preset, custom_fonts.as_ref());
+            self.applied_fonts_key = fonts_key;
+        }
+        sync_texture(ctx, &mut self.bg_tex, bg_path.as_deref(), "theme-bg");
+        sync_texture(ctx, &mut self.logo_tex, logo_path.as_deref(), "theme-logo");
+    }
+
     fn show_window(&mut self, ctx: &egui::Context) {
         self.hidden = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -734,10 +918,7 @@ impl eframe::App for SteamApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if self.applied_theme.as_ref() != Some(&self.prefs.theme) {
-            self.prefs.theme.apply(&ctx);
-            self.applied_theme = Some(self.prefs.theme.clone());
-        }
+        self.sync_theme_state(&ctx);
         if self.applied_zoom != self.prefs.zoom {
             ctx.set_zoom_factor(self.prefs.zoom);
             self.applied_zoom = self.prefs.zoom;
@@ -905,7 +1086,55 @@ impl eframe::App for SteamApp {
             });
         }
         if signed_in {
-            crate::shell::show(self, ui, &mut actions);
+            let snapshot = self.resolved_snapshot.take();
+            let bg_tex = self.bg_tex.as_ref().map(|(_, h)| h.clone());
+            let logo_tex = self.logo_tex.as_ref().map(|(_, h)| h.clone());
+            let now = ctx.input(|i| i.time);
+            let active_theme = self.prefs.theme.clone();
+            let (has_bg_script, has_chrome_script) = {
+                let st = self.themes.lock().unwrap();
+                match st.manager.resolved.as_ref().and_then(|r| r.script.as_ref()) {
+                    Some(s) => (s.has_background(), s.has_chrome()),
+                    None => (false, false),
+                }
+            };
+            let themes_bg = self.themes.clone();
+            let theme_for_bg = active_theme.clone();
+            let mut bg_hook = move |painter: &egui::Painter, rect: egui::Rect| {
+                let cmds = {
+                    let mut st = themes_bg.lock().unwrap();
+                    if let Some(script) = st.manager.resolved.as_mut().and_then(|r| r.script.as_mut()) {
+                        script.paint_background(rect.width(), rect.height(), now, &theme_for_bg)
+                    } else {
+                        Vec::new()
+                    }
+                };
+                themes::paint_draw_cmds(painter, rect, &cmds);
+            };
+            let themes_chrome = self.themes.clone();
+            let theme_for_chrome = active_theme;
+            let mut chrome_hook = move |painter: &egui::Painter, rect: egui::Rect| {
+                let cmds = {
+                    let mut st = themes_chrome.lock().unwrap();
+                    if let Some(script) = st.manager.resolved.as_mut().and_then(|r| r.script.as_mut()) {
+                        script.paint_chrome(rect.width(), rect.height(), now, &theme_for_chrome)
+                    } else {
+                        Vec::new()
+                    }
+                };
+                themes::paint_draw_cmds(painter, rect, &cmds);
+            };
+            crate::shell::show_with_theme(
+                self,
+                ui,
+                &mut actions,
+                snapshot.as_ref(),
+                bg_tex.as_ref(),
+                logo_tex.as_ref(),
+                has_bg_script.then_some(&mut bg_hook as &mut dyn FnMut(&egui::Painter, egui::Rect)),
+                has_chrome_script.then_some(&mut chrome_hook as &mut dyn FnMut(&egui::Painter, egui::Rect)),
+            );
+            self.resolved_snapshot = snapshot;
             crate::shell::activate_dialog(self, &ctx);
             crate::shell::friend_dialogs(self, &ctx);
             crate::friends_window::show(self, &ctx, &mut actions);
@@ -950,4 +1179,52 @@ enum WindowMode {
     Splash,
     SignIn,
     Main,
+}
+
+fn snapshot_resolved(res: &themes::ResolvedTheme) -> themes::ResolvedTheme {
+    themes::ResolvedTheme {
+        meta: res.meta.clone(),
+        dir: res.dir.clone(),
+        theme: res.theme.clone(),
+        layout: res.layout.clone(),
+        custom_fonts: None,
+        background_path: res.background_path.clone(),
+        background_fit: res.background_fit,
+        background_opacity: res.background_opacity,
+        background_tint: res.background_tint,
+        logo_path: res.logo_path.clone(),
+        script: None,
+        script_error: res.script_error.clone(),
+    }
+}
+
+fn sync_texture(
+    ctx: &egui::Context,
+    slot: &mut Option<(PathBuf, egui::TextureHandle)>,
+    path: Option<&std::path::Path>,
+    name: &str,
+) {
+    match path {
+        None => {
+            *slot = None;
+        }
+        Some(p) => {
+            if slot.as_ref().is_some_and(|(cached, _)| cached.as_path() == p) {
+                return;
+            }
+            match image::open(p) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    let size = [rgba.width() as usize, rgba.height() as usize];
+                    let color_img = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                    let handle = ctx.load_texture(name, color_img, egui::TextureOptions::LINEAR);
+                    *slot = Some((p.to_path_buf(), handle));
+                }
+                Err(e) => {
+                    tracing::warn!("theme image {}: {e}", p.display());
+                    *slot = None;
+                }
+            }
+        }
+    }
 }
