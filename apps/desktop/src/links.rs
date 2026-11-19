@@ -512,4 +512,13 @@ mod tests {
             assert!(matches!(res, Err(egui::load::LoadError::NoMatchingBytesLoader)), "expected NoMatchingBytesLoader for {uri}, got {:?}", res.err());
         }
     }
+
+    #[test]
+    fn aurora_logo_svg_loads() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        ctx.include_bytes(ui::brand::LOGO_URI, ui::brand::LOGO_SVG);
+        let poll = ctx.try_load_image(ui::brand::LOGO_URI, egui::SizeHint::Size { width: 32, height: 32, maintain_aspect_ratio: true });
+        assert!(matches!(poll, Ok(egui::load::ImagePoll::Ready { .. })), "expected Aurora SVG logo to decode, got {:?}", poll.err());
+    }
 }

@@ -1392,6 +1392,7 @@ dependencies = [
  "itertools 0.15.0",
  "log",
  "profiling",
+ "resvg",
 ]
 
 [[package]]
