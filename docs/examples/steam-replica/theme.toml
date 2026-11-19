@@ -1,0 +1,119 @@
+[meta]
+id = "steam-replica"
+name = "Steam Desktop"
+version = "2.0.0"
+author = "Aurora"
+description = "Declarative replica of the Valve Steam desktop client."
+
+[theme]
+base = "NEVKO"
+dark = true
+
+# Authentic modern Steam desktop neutral-cool dark slate palette
+chrome = "#171D25"
+bg = "#232730"
+surface = "#2B303A"
+surface_hover = "#343B48"
+raised = "#2E333C"
+border = "#14171D"
+
+text = "#DCDEDF"
+text_dim = "#8B929A"
+text_faint = "#626972"
+
+accent = "#1A9FFF"
+accent_2 = "#00BBFF"
+on_accent = "#FFFFFF"
+
+play = "#59BF40"
+online = "#57CBDE"
+in_game = "#A4D007"
+away = "#E8B04B"
+danger = "#D94126"
+discount = "#4C6B22"
+
+radius = 2
+weight_preset = "balanced"
+font_scale = 0.96
+
+# ---------------------------------------------------------------------------
+# User-configurable theme options
+# ---------------------------------------------------------------------------
+
+[options.steam_era]
+kind = "select"
+label = "Steam Era"
+description = "Switch between the modern 2023+ neutral-cool Steam palette, Classic 2018 Blue, and nostalgic VGUI 2010 Olive."
+default = "modern_2023"
+
+[[options.steam_era.choices]]
+value = "modern_2023"
+label = "Modern 2023+"
+[options.steam_era.choices.overrides.theme]
+chrome = "#171D25"
+bg = "#232730"
+surface = "#2B303A"
+surface_hover = "#343B48"
+raised = "#2E333C"
+border = "#14171D"
+text = "#DCDEDF"
+text_dim = "#8B929A"
+text_faint = "#626972"
+accent = "#1A9FFF"
+accent_2 = "#00BBFF"
+on_accent = "#FFFFFF"
+play = "#59BF40"
+online = "#57CBDE"
+in_game = "#A4D007"
+away = "#E8B04B"
+danger = "#D94126"
+discount = "#4C6B22"
+radius = 2
+
+[[options.steam_era.choices]]
+value = "classic_2018"
+label = "Classic 2018 Blue"
+[options.steam_era.choices.overrides.theme]
+chrome = "#171A21"
+bg = "#1B2838"
+surface = "#213245"
+surface_hover = "#2A475E"
+raised = "#24374C"
+border = "#3B5774"
+text = "#E5E9ED"
+text_dim = "#8F98A0"
+text_faint = "#637282"
+accent = "#66C0F4"
+accent_2 = "#417A9B"
+on_accent = "#0E1822"
+play = "#5C7E10"
+online = "#66C0F4"
+in_game = "#90BA3C"
+away = "#E8B04B"
+danger = "#D94126"
+discount = "#4C6B22"
+radius = 2
+
+[[options.steam_era.choices]]
+value = "vgui_2010"
+label = "VGUI 2010 Olive"
+[options.steam_era.choices.overrides.theme]
+chrome = "#1E201D"
+bg = "#262825"
+surface = "#2D302B"
+surface_hover = "#383C35"
+raised = "#323630"
+border = "#464B42"
+text = "#E0E2DC"
+text_dim = "#A3A89E"
+text_faint = "#747A6F"
+accent = "#8B9B64"
+accent_2 = "#6E7F4A"
+on_accent = "#12150E"
+play = "#5C7E10"
+online = "#66C0F4"
+in_game = "#9BC44D"
+away = "#D4A74A"
+danger = "#C94A38"
+discount = "#4C6B22"
+radius = 2

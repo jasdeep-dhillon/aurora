@@ -1,0 +1,278 @@
+# Declarative Steam Desktop Client Layout for Aurora
+# Defines both the global [[shell]] chrome and the [[library]] view tree.
+
+# ============================================================================
+# SHELL
+# ============================================================================
+
+# Top two-row Steam header (66px)
+[[shell]]
+type = "panel"
+side = "top"
+size = 66
+drag_window = true
+style = { bg = "$chrome", border_bottom = { width = 1, color = "#0E1116" } }
+
+# Row 1 (28px): logo + Steam/View/Friends/Games/Help menus + account & window controls
+[[shell.children]]
+type = "row"
+align = "center"
+style = { height = 28, padding = [2, 8, 0, 8], gap = 6 }
+
+[[shell.children.children]]
+type = "logo"
+size = 16
+
+[[shell.children.children]]
+type = "menu"
+label = "Steam"
+style = { font_size = 12, color = "$text_dim", hover_color = "$text" }
+items = [
+    { label = "Settings", action = "navigate:settings" },
+    { label = "Downloads", action = "navigate:downloads" },
+    { label = "Support", action = "open_url:https://help.steampowered.com" },
+    "separator",
+    { label = "Activate a product...", action = "activate_product" },
+    { label = "Check for updates", action = "check_updates" },
+    "separator",
+    { label = "Switch account...", action = "logout" },
+    { label = "Exit", action = "exit" },
+]
+
+[[shell.children.children]]
+type = "menu"
+label = "View"
+style = { font_size = 12, color = "$text_dim", hover_color = "$text" }
+items = [
+    { label = "Library", action = "navigate:library" },
+    { label = "Store", action = "navigate:store" },
+    { label = "Community", action = "navigate:community" },
+    { label = "Downloads", action = "navigate:downloads" },
+    { label = "Settings", action = "navigate:settings" },
+]
+
+[[shell.children.children]]
+type = "menu"
+label = "Friends"
+style = { font_size = 12, color = "$text_dim", hover_color = "$text" }
+items = [
+    { label = "Friends & Chat", action = "open_friends" },
+    { label = "All Friends", action = "navigate:friends" },
+]
+
+[[shell.children.children]]
+type = "menu"
+label = "Games"
+style = { font_size = 12, color = "$text_dim", hover_color = "$text" }
+items = [
+    { label = "View Games Library", action = "navigate:library" },
+    { label = "Activate a Product...", action = "activate_product" },
+    { label = "Add a Non-Steam Game...", action = "add_game" },
+]
+
+[[shell.children.children]]
+type = "menu"
+label = "Help"
+style = { font_size = 12, color = "$text_dim", hover_color = "$text" }
+items = [
+    { label = "Steam Support", action = "open_url:https://help.steampowered.com" },
+    { label = "Check for Updates...", action = "check_updates" },
+]
+
+[[shell.children.children]]
+type = "spacer"
+flex = true
+
+[[shell.children.children]]
+type = "friends_button"
+size = 22
+
+[[shell.children.children]]
+type = "notifications"
+size = 22
+highlight_unread_bg = "$play"
+
+[[shell.children.children]]
+type = "account"
+show_avatar = true
+show_name = true
+show_wallet = true
+show_caret = true
+avatar_size = 20
+style = { bg = "#24282F", radius = 2, padding = [2, 8, 2, 4] }
+
+[[shell.children.children]]
+type = "window_controls"
+variant = "windows"
+height = 28
+
+# Row 2 (38px): back/forward arrows + bold uppercase underline navigation tabs
+[[shell.children]]
+type = "row"
+align = "center"
+style = { height = 38, padding = [0, 12, 0, 12], gap = 10 }
+
+[[shell.children.children]]
+type = "back_forward"
+size = 22
+
+[[shell.children.children]]
+type = "nav_tabs"
+direction = "horizontal"
+show_icons = false
+uppercase = true
+profile_as_username = true
+indicator = "underline"
+indicator_height = 3
+tab_gap = 18
+style = { font_size = 17, font_weight = "bold", color = "#B8BCBF", hover_color = "#FFFFFF", active_color = "#1A9FFF" }
+
+# Bottom Steam status bar (32px)
+[[shell]]
+type = "panel"
+side = "bottom"
+size = 32
+style = { bg = "$chrome", border_top = { width = 1, color = "#0E1116" }, padding = [0, 14, 0, 14] }
+
+[[shell.children]]
+type = "row"
+align = "center"
+style = { height = "fill", gap = 8 }
+
+[[shell.children.children]]
+type = "button"
+label = "+ Add a Game"
+action = "add_game"
+style = { font_size = 12, color = "$text_dim", hover_color = "$text", bg = "transparent", padding = [4, 6, 4, 6] }
+
+[[shell.children.children]]
+type = "spacer"
+flex = true
+
+[[shell.children.children]]
+type = "downloads_bar"
+width = 260
+
+[[shell.children.children]]
+type = "spacer"
+flex = true
+
+[[shell.children.children]]
+type = "button"
+label = "Friends & Chat"
+action = "open_friends"
+style = { font_size = 12, color = "$text_dim", hover_color = "$text", bg = "transparent", padding = [4, 6, 4, 6] }
+
+# Dockable Friends & Chat drawer
+[[shell]]
+type = "friends_drawer"
+width = 290
+
+# Center page host
+[[shell]]
+type = "panel"
+side = "center"
+style = { bg = "$bg" }
+
+[[shell.children]]
+type = "page_content"
+
+# ============================================================================
+# LIBRARY
+# ============================================================================
+
+# Left compact Steam library sidebar (272px)
+[[library]]
+type = "panel"
+side = "left"
+size = 272
+style = { bg = "#1F232A", border_right = { width = 1, color = "#12151B" }, padding = [8, 8, 8, 8], gap = 6 }
+
+[[library.children]]
+type = "row"
+align = "center"
+style = { gap = 6 }
+
+[[library.children.children]]
+type = "button"
+label = "Home"
+action = "navigate:library"
+style = { width = "fill", height = 28, bg = "#2E333C", hover_bg = "#383F4B", radius = 2, align = "start", padding = [0, 10, 0, 10], font_size = 13, font_weight = "medium", color = "$text" }
+
+[[library.children.children]]
+type = "button"
+label = "⊞"
+action = "navigate:library"
+style = { width = 28, height = 28, bg = "#2E333C", hover_bg = "#383F4B", radius = 2, align = "center", font_size = 14, color = "$text_dim", hover_color = "$text" }
+
+[[library.children]]
+type = "library_filters"
+variant = "dropdown_icons"
+
+[[library.children]]
+type = "library_search"
+placeholder = "Search"
+show_filter_button = true
+style = { bg = "#171A21", radius = 2, height = 28 }
+
+[[library.children]]
+type = "library_list"
+row_height = 24
+icon_size = 18
+group_headers = true
+show_counts = true
+style = { font_size = 12.5 }
+
+# Center library home shelves / game detail host
+[[library]]
+type = "panel"
+side = "center"
+style = { bg = "$bg" }
+
+[[library.children]]
+type = "library_home_or_detail"
+
+[[library.children.children]]
+type = "scroll"
+direction = "vertical"
+
+# Darker What's New band
+[[library.children.children.children]]
+type = "box"
+style = { bg = "#1E222B", border_bottom = { width = 1, color = "#14171D" }, padding = [14, 22, 16, 22] }
+
+[[library.children.children.children.children]]
+type = "whats_new_shelf"
+title = "What's New"
+card_width = 260
+card_height = 146
+card_radius = 0
+date_above = true
+max_items = 5
+gap = 12
+
+# Main cool-slate gradient shelves area (Recent Games + All Games)
+[[library.children.children.children]]
+type = "box"
+style = { bg_gradient = { from = "#262A33", to = "#1E2229", direction = "vertical" }, padding = [16, 22, 24, 22], gap = 20 }
+
+[[library.children.children.children.children]]
+type = "recent_games_shelf"
+title = "Recent Games"
+featured_first = true
+featured_width = 360
+capsule_width = 160
+capsule_height = 240
+card_radius = 0
+gap = 12
+
+[[library.children.children.children.children]]
+type = "all_games_grid"
+title = "All Games"
+show_count = true
+show_sort = true
+card_aspect = "capsule"
+card_width = 160
+card_height = 240
+card_radius = 0
+gap = 12
