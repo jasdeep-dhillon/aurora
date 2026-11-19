@@ -1,14 +1,23 @@
 //! The app's end of the in-game overlay pipe (see
 //! `crates/steamclient/src/overlay`).
 //!
-//! A game whose frames go through our steamclient DLL's D3D11 hook connects
-//! to `<ipc pipe>-overlay` with its launch token (on Linux, where Proton
-//! games can't reach a Linux named pipe, to a loopback TCP port instead). Each accepted connection
+//! A game whose frames go through our steamclient DLL's graphics hook
+//! (D3D11, D3D12, D3D9, OpenGL, or Vulkan) connects to `<ipc pipe>-overlay`
+//! with its launch token (on Linux, where Proton games can't reach a Linux
+//! named pipe, to a loopback TCP port instead). Each accepted connection
 //! becomes a [`Conn`] the UI picks up with [`take_new`]: it runs the overlay
 //! UI for that game and sends frames back with [`Conn::send`].
 
 #[path = "../../steamclient/src/overlay/wire.rs"]
 pub mod wire;
+
+#[cfg(test)]
+#[path = "../../steamclient/src/overlay/util.rs"]
+mod util;
+
+#[cfg(test)]
+#[path = "../../steamclient/src/overlay/vulkan.rs"]
+mod overlay_vulkan;
 
 use model::AppId;
 use std::sync::{Arc, Mutex, OnceLock};

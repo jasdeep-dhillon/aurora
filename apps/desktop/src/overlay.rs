@@ -4,12 +4,13 @@
 //! can move, resize and pin. A pinned window stays over the game after the
 //! overlay closes, at the opacity you pick, and lets clicks through to it.
 //!
-//! For D3D11 games we start with our steamclient DLL it is drawn inside the
-//! game, like Steam's (see `ingame.rs` and `crates/steamclient/src/overlay`),
-//! so it works in exclusive fullscreen and the game keeps focus. Other games
-//! (other graphics APIs, anti-cheat games real Steam runs) get it as a
-//! separate always-on-top window, which shows over windowed and
-//! borderless-fullscreen games only.
+//! For games we start with our steamclient DLL (D3D11, D3D12, D3D9, OpenGL,
+//! and Vulkan) it is drawn inside the game, like Steam's (see `ingame.rs` and
+//! `crates/steamclient/src/overlay`), so it works in exclusive fullscreen and
+//! the game keeps focus. Other games (games whose API hook isn't active, or
+//! anti-cheat games real Steam runs) automatically fall back to a separate
+//! always-on-top window, which shows over windowed and borderless-fullscreen
+//! games.
 
 use ui::widgets::EditMenu;
 use i18n::t;

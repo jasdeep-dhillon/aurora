@@ -101,10 +101,13 @@ While developing, the launcher also finds
 - **Friends**: friends list, names, online state, what they're playing.
 - **Rich presence**: what the game sets is sent to Steam, so friends see it.
 - **Playing status and playtime**: Aurora reports the game as played.
-- **In-game overlay**: in D3D11 games our steamclient draws Aurora's
-  Shift+Tab overlay inside the game, like Steam's, and sends the game
-  `GameOverlayActivated_t` when it opens and closes. While it's open the game
-  doesn't get mouse or keyboard input. Other games get a separate overlay
+- **In-game overlay**: in D3D11, D3D12, D3D9/D3D9Ex, OpenGL, and Vulkan games
+  our steamclient draws Aurora's Shift+Tab overlay inside the game, like
+  Steam's, and sends the game `GameOverlayActivated_t` when it opens and
+  closes. While it's open the game doesn't get mouse or keyboard input. Games
+  whose API hook isn't active (including Vulkan loaders that resolve
+  `vkGetInstanceProcAddr` purely via `GetProcAddress` without a separate
+  implicit Vulkan layer JSON) automatically fall back to the separate overlay
   window. Set `STEAMINRUST_NO_INGAME_OVERLAY=1` to turn the in-game one off.
 - **Invites**: the game's lobby and its rich presence `connect` decide what
   the friend menus offer ("Invite to lobby", "Invite to game", or just

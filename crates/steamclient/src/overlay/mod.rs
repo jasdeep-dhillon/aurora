@@ -5,21 +5,39 @@
 //! hid the game. Steam draws its overlay inside the game instead, and so do
 //! we, for games Aurora starts with this DLL:
 //!
-//! - `d3d11`: hooks the game's `Present` and draws the overlay on top of
-//!   each frame (D3D11 games; others keep the app's window overlay).
+//! - `d3d11`: hooks DXGI `Present`/`Present1`/`ResizeBuffers`/`ResizeBuffers1`
+//!   for D3D11 games and hands non-D3D11 DXGI swap chains off to `d3d12`.
+//! - `d3d12`: captures `ID3D12CommandQueue::ExecuteCommandLists` and renders
+//!   directly via a self-contained D3D12 command list (Windows + VKD3D-Proton).
+//! - `d3d9`: hooks `IDirect3DDevice9::Present`/`Reset` and `D3D9Ex`
+//!   `PresentEx`/`ResetEx` with `IDirect3DStateBlock9` save/restore.
+//! - `opengl`: IAT-hooks `wglSwapBuffers` / `SwapBuffers` and draws in a
+//!   saved/restored GL state (Core & Compatibility profiles).
+//! - `vulkan`: IAT-hooks `vulkan-1.dll` (`vkGetInstanceProcAddr`,
+//!   `vkGetDeviceProcAddr`, `vkQueuePresentKHR`, ...) and renders with
+//!   embedded SPIR-V shaders.
 //! - `input`: Shift+Tab, and while the overlay is open, the game's mouse and
 //!   keyboard go to the overlay, the cursor shows and the game can't lock it.
 //! - this file: the pipe to the app. The app runs the overlay's UI (the same
-//!   egui code as before) and sends triangles and textures to draw.
+//!   egui code as before) and sends triangles and textures to draw. If no
+//!   renderer hook observes a frame, the app keeps its window overlay fallback.
 //!
 //! Wire format: `wire.rs`, shared with the app.
 
+pub mod util;
+pub mod vulkan;
 pub mod wire;
 
 #[cfg(windows)]
 mod d3d11;
 #[cfg(windows)]
+mod d3d12;
+#[cfg(windows)]
+mod d3d9;
+#[cfg(windows)]
 mod input;
+#[cfg(windows)]
+mod opengl;
 #[cfg(windows)]
 pub(crate) use input::patch_module;
 
@@ -55,12 +73,24 @@ pub fn start() {
                 return;
             }
             let _ = std::thread::Builder::new().name("sir-overlay".into()).spawn(move || {
-                if d3d11::install() {
-                    shared::run(wire::pipe_name(&pipe), token);
-                }
+                // Install DXGI (D3D11 + D3D12) up front, and probe any already-loaded
+                // D3D9 / D3D12 / OpenGL / Vulkan modules; `shared::run` keeps polling
+                // for late-loaded graphics DLLs until one renderer hooks a frame.
+                let _ = d3d11::install();
+                install_pending_hooks();
+                shared::run(wire::pipe_name(&pipe), token);
             });
         });
     }
+}
+
+/// Probe graphics DLLs that the game may load after `SteamAPI_Init()`.
+#[cfg(windows)]
+fn install_pending_hooks() {
+    let _ = d3d12::install_if_loaded();
+    let _ = d3d9::install_if_loaded();
+    let _ = opengl::install_if_loaded();
+    let _ = vulkan::install_if_loaded();
 }
 
 /// The first game frame came through our hook.
@@ -176,6 +206,7 @@ mod shared {
     pub fn run(pipe: String, token: String) {
         loop {
             if !with(|s| s.hooked) {
+                super::install_pending_hooks();
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
             }

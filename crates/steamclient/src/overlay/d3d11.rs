@@ -1,4 +1,5 @@
-//! Drawing the overlay inside a D3D11 game.
+//! Drawing the overlay inside a D3D11 game (and dispatching D3D12 DXGI swap
+//! chains to `d3d12.rs`).
 //!
 //! We make a throwaway device and swap chain on a hidden window to find
 //! DXGI's swap chain method table, then point `Present` (and `Present1`,
@@ -7,9 +8,11 @@
 //! here: we draw the overlay's triangles on top of the back buffer, put the
 //! game's D3D11 state back exactly as it was, and call the real `Present`.
 //!
-//! A game that isn't D3D11 (D3D9/12, OpenGL, Vulkan) never sends a D3D11
-//! frame through, so the app keeps its window overlay for it.
+//! If a swap chain belongs to a D3D12 device (`GetDevice::<ID3D11Device>()`
+//! fails), we hand it off to `super::d3d12` so D3D12 games get the same
+//! in-process overlay.
 
+use super::util::{self, Backend};
 use super::{Frame, TexOp, shared};
 use crate::overlay::wire::VERTEX_SIZE;
 use std::collections::HashMap;
@@ -47,39 +50,21 @@ pub fn install() -> bool {
     }
     match unsafe { find_vtable() } {
         Some((vtable, has1, has3)) => unsafe {
-            patch(vtable, SLOT_RESIZE, resize as *const () as usize, &REAL_RESIZE);
+            util::patch_vtable(vtable, SLOT_RESIZE, resize as *const () as usize, &REAL_RESIZE);
             if has3 {
-                patch(vtable, SLOT_RESIZE1, resize1 as *const () as usize, &REAL_RESIZE1);
+                util::patch_vtable(vtable, SLOT_RESIZE1, resize1 as *const () as usize, &REAL_RESIZE1);
             }
             if has1 {
-                patch(vtable, SLOT_PRESENT1, present1 as *const () as usize, &REAL_PRESENT1);
+                util::patch_vtable(vtable, SLOT_PRESENT1, present1 as *const () as usize, &REAL_PRESENT1);
             }
-            patch(vtable, SLOT_PRESENT, present as *const () as usize, &REAL_PRESENT);
-            crate::log!("overlay: D3D11 hooks in");
+            util::patch_vtable(vtable, SLOT_PRESENT, present as *const () as usize, &REAL_PRESENT);
+            crate::log!("overlay: DXGI (D3D11/D3D12) hooks in");
             true
         },
         None => {
-            crate::log!("overlay: no D3D11 here, not hooking");
+            crate::log!("overlay: no DXGI/D3D11 here, not hooking");
             false
         }
-    }
-}
-
-unsafe fn patch(vtable: *mut usize, slot: usize, ours: usize, real: &AtomicUsize) {
-    use windows::Win32::System::Memory::{PAGE_PROTECTION_FLAGS, PAGE_READWRITE, VirtualProtect};
-    unsafe {
-        let p = vtable.add(slot);
-        if *p == ours {
-            return;
-        }
-        let mut old = PAGE_PROTECTION_FLAGS(0);
-        if VirtualProtect(p as *const c_void, size_of::<usize>(), PAGE_READWRITE, &mut old).is_err() {
-            crate::log!("overlay: VirtualProtect failed for slot {slot}");
-            return;
-        }
-        real.store(*p, Ordering::Release);
-        *p = ours;
-        let _ = VirtualProtect(p as *const c_void, size_of::<usize>(), old, &mut old);
     }
 }
 
@@ -158,6 +143,7 @@ fn before_resize(this: *mut c_void) {
             r.rtv = None;
         }
     }
+    super::d3d12::before_resize(this);
 }
 
 struct Tex {
@@ -220,20 +206,37 @@ unsafe fn present_inner(this: *mut c_void) {
     }
     if guard.is_none() {
         if NOT_D3D11.lock().map(|l| l.contains(&(this as usize))).unwrap_or(true) {
+            drop(guard);
+            super::d3d12::on_present(this);
+            return;
+        }
+        let active = util::active_backend();
+        if active != Backend::None && active != Backend::D3d11 {
+            drop(guard);
+            if active == Backend::D3d12 {
+                super::d3d12::on_present(this);
+            }
             return;
         }
         match unsafe { Renderer::new(sc, this as usize) } {
             Ok(r) => {
+                if !util::claim_backend(Backend::D3d11) {
+                    return;
+                }
                 crate::log!("overlay: drawing into the game's D3D11 swap chain ({}x{})", r.size.0, r.size.1);
                 super::input::attach(r.hwnd);
                 super::hooked(r.size);
                 *guard = Some(r);
             }
             Err(e) => {
-                crate::log!("overlay: swap chain isn't usable: {e}");
+                // Not a D3D11 swap chain (likely D3D12): mark as non-D3D11 and
+                // hand off to the D3D12 renderer.
+                crate::log!("overlay: swap chain isn't D3D11 ({e}), checking D3D12");
                 if let Ok(mut l) = NOT_D3D11.lock() {
                     l.push(this as usize);
                 }
+                drop(guard);
+                super::d3d12::on_present(this);
                 return;
             }
         }
@@ -263,47 +266,8 @@ unsafe fn present_inner(this: *mut c_void) {
     }
 }
 
-const SHADER: &str = r#"
-cbuffer C : register(b0) { float2 screen; float linear_out; float pad; };
-struct VI { float2 pos : POSITION; float2 uv : TEXCOORD0; float4 col : COLOR0; };
-struct PI { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; float4 col : COLOR0; };
-PI vs(VI i) {
-    PI o;
-    o.pos = float4(2.0 * i.pos.x / screen.x - 1.0, 1.0 - 2.0 * i.pos.y / screen.y, 0.0, 1.0);
-    o.uv = i.uv;
-    o.col = i.col;
-    return o;
-}
-Texture2D t0 : register(t0);
-SamplerState s0 : register(s0);
-float3 to_linear(float3 c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
-float4 ps(PI i) : SV_Target {
-    float4 c = i.col * t0.Sample(s0, i.uv);
-    if (linear_out > 0.5) c.rgb = to_linear(c.rgb);
-    return c;
-}
-"#;
-
-/// Compile one entry point with d3dcompiler_47 (loaded when needed, so
-/// games that never draw the overlay don't load it).
 unsafe fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<Vec<u8>> {
-    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-    type CompileFn = unsafe extern "system" fn(*const c_void, usize, PCSTR, *const c_void, *mut c_void, PCSTR, PCSTR, u32, u32, *mut *mut c_void, *mut *mut c_void) -> HRESULT;
-    unsafe {
-        let module = LoadLibraryW(w!("d3dcompiler_47.dll"))?;
-        let Some(f) = GetProcAddress(module, s!("D3DCompile")) else { return Err(windows::core::Error::from_thread()) };
-        let f: CompileFn = std::mem::transmute(f);
-        let (mut code, mut errors) = (std::ptr::null_mut(), std::ptr::null_mut());
-        let hr = f(SHADER.as_ptr().cast(), SHADER.len(), PCSTR::null(), std::ptr::null(), std::ptr::null_mut(), entry, target, 0, 0, &mut code, &mut errors);
-        if !errors.is_null() {
-            let e = ID3DBlob::from_raw(errors);
-            let text = std::slice::from_raw_parts(e.GetBufferPointer() as *const u8, e.GetBufferSize());
-            crate::log!("overlay: shader: {}", String::from_utf8_lossy(text));
-        }
-        hr.ok()?;
-        let code = ID3DBlob::from_raw(code);
-        Ok(std::slice::from_raw_parts(code.GetBufferPointer() as *const u8, code.GetBufferSize()).to_vec())
-    }
+    unsafe { util::compile_hlsl(util::HLSL_OVERLAY_SHADER, entry, target) }
 }
 
 fn out<T>(slot: Option<T>) -> windows::core::Result<T> {
