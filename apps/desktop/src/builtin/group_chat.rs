@@ -271,10 +271,8 @@ pub fn group_view(
         w::empty(ui, t, icons::USERS_THREE, t!("Group chat closed"), t!("Pick a friend or group chat from the list."));
         return;
     };
-    if ui_state.loaded_groups.insert(group_id) || !g.full_loaded {
-        if ui_state.loaded_groups.insert(group_id) || g.members.is_empty() {
-            client.send(Command::OpenChatGroup { group_id });
-        }
+    if ui_state.loaded_groups.insert(group_id) || (!g.full_loaded && g.members.is_empty()) {
+        client.send(Command::OpenChatGroup { group_id });
     }
     let active_chat_id = ui_state
         .chat_id
@@ -292,27 +290,25 @@ pub fn group_view(
 
     let perms = g.effective_permissions(steam_id_to_account(state.steam_id));
     let total_h = height.max(80.0);
-    let bar_id = ui.scope_id().with(("gc-bar", group_id));
-    let bar_h = ui.data(|d| d.get_temp::<f32>(bar_id)).unwrap_or(34.0);
-
+    let top_y = ui.cursor().top();
     // Channel strip.
-    let bar_resp = channel_bar(ui, t, &g, active_chat_id, perms.can_create_rename_delete_channel, ui_state, client);
-    let measured_bar = bar_resp + 8.0;
-    if (measured_bar - bar_h).abs() > 0.5 {
-        ui.data_mut(|d| d.insert_temp(bar_id, measured_bar));
-        ui.ctx().request_repaint();
-    }
+    channel_bar(ui, t, &g, active_chat_id, perms.can_create_rename_delete_channel, ui_state, client);
     ui.add_space(4.0);
     ui.separator();
     ui.add_space(4.0);
 
-    let body_h = (total_h - bar_h - 10.0).floor().max(60.0);
+    let used_h = (ui.cursor().top() - top_y).max(0.0);
+    let body_h = (total_h - used_h).floor().max(60.0);
     let show_members = !compact && ui_state.show_members && ui.available_width() > 480.0;
     let member_w = if show_members { 200.0 } else { 0.0 };
     let feed_w = (ui.available_width() - if show_members { member_w + 12.0 } else { 0.0 }).max(160.0);
 
     ui.allocate_ui_with_layout(vec2(ui.available_width(), body_h), Layout::left_to_right(Align::Min), |ui| {
+        ui.set_min_height(body_h);
+        ui.set_max_height(body_h);
         ui.allocate_ui_with_layout(vec2(feed_w, body_h), Layout::top_down(Align::Min), |ui| {
+            ui.set_min_height(body_h);
+            ui.set_max_height(body_h);
             message_feed(ui, t, state, client, &g, active_chat_id, &perms, ui_state, actions, body_h);
         });
         if show_members {
@@ -320,6 +316,8 @@ pub fn group_view(
             ui.separator();
             ui.add_space(6.0);
             ui.allocate_ui_with_layout(vec2(member_w - 8.0, body_h), Layout::top_down(Align::Min), |ui| {
+                ui.set_min_height(body_h);
+                ui.set_max_height(body_h);
                 member_list(ui, t, state, client, &g, &perms, ui_state, actions, body_h);
             });
         }
@@ -341,10 +339,11 @@ fn channel_bar(
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             for ch in &rooms {
+                let ch_name = if ch.name.trim().is_empty() { "General" } else { ch.name.as_str() };
                 if !ch.voice_allowed {
                     let selected = ch.id == active_chat_id;
                     let unread = ch.unread_badge();
-                    let label = if unread > 0 { format!("# {} ({unread})", ch.name) } else { format!("# {}", ch.name) };
+                    let label = if unread > 0 { format!("# {ch_name} ({unread})") } else { format!("# {ch_name}") };
                     let resp = w::chip(ui, t, &label, selected);
                     if resp.clicked() {
                         ui_state.chat_id = Some(ch.id);
@@ -352,7 +351,7 @@ fn channel_bar(
                     if can_manage {
                         let gid = g.id;
                         let cid = ch.id;
-                        let cname = ch.name.clone();
+                        let cname = ch_name.to_string();
                         resp.context_menu(|ui| {
                             if ui.button(t!("Rename channel…")).clicked() {
                                 ui_state.modal = Some(GroupModal::RenameChannel { group_id: gid, chat_id: cid, name: cname.clone() });
@@ -366,7 +365,7 @@ fn channel_bar(
                     }
                 } else {
                     let n = ch.members_in_voice.len();
-                    let label = if n > 0 { format!("{} {} ({n})", icons::SPEAKER_HIGH, ch.name) } else { format!("{} {}", icons::SPEAKER_HIGH, ch.name) };
+                    let label = if n > 0 { format!("{} {} ({n})", icons::SPEAKER_HIGH, ch_name) } else { format!("{} {}", icons::SPEAKER_HIGH, ch_name) };
                     let resp = w::tinted_chip(ui, t, &label, (n > 0).then_some(t.online), false);
                     let tip = if n > 0 {
                         t!("{n} in voice channel · Voice chat coming next", n = n)
@@ -407,84 +406,88 @@ fn message_feed(
     let spacing = ui.spacing().item_spacing.y;
     let list_h = (height - composer_h - gap - spacing).floor().max(40.0);
 
-    egui::ScrollArea::vertical()
-        .id_salt(("gc-msgs", g.id, chat_id))
-        .max_height(list_h)
-        .min_scrolled_height(list_h)
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            if state.group_more_history.get(&(g.id, chat_id)) == Some(&true) {
-                if let Some(oldest) = msgs.first() {
-                    ui.horizontal(|ui| {
-                        if ui.link(w::text(t!("Load older messages"), 12.5, t.accent)).clicked() {
-                            client.send(Command::LoadGroupHistory {
-                                group_id: g.id,
-                                chat_id,
-                                before: Some((oldest.time as u32, oldest.ordinal)),
-                            });
-                        }
-                    });
-                    ui.add_space(4.0);
-                }
-            }
-            if msgs.is_empty() {
-                w::empty(ui, t, icons::CHAT, t!("No messages yet"), t!("Start the conversation!"));
-            }
-            let mut last: Option<(SteamId, u64)> = None;
-            for m in msgs {
-                if let Some(srv) = &m.server_msg {
-                    ui.add_space(4.0);
-                    ui.label(w::text(format!("{} · {}", server_message_text(state, m.from, srv), format_time(m.time)), 12.0, t.text_faint).italics());
-                    last = None;
-                    continue;
-                }
-                if m.deleted {
-                    ui.add_space(4.0);
-                    ui.label(w::text(t!("(message deleted)"), 12.5, t.text_faint).italics());
-                    last = None;
-                    continue;
-                }
-                if m.text.is_empty() && m.invite.is_none() && m.group_invite.is_none() {
-                    continue;
-                }
-                let new_group = last.is_none_or(|(from, time)| from != m.from || m.time.saturating_sub(time) > 300);
-                if new_group {
-                    ui.add_space(10.0);
-                    let p = state.persona(m.from);
-                    ui.horizontal_top(|ui| {
-                        w::avatar(ui, t, &art::avatar(p.avatar_hash.as_deref()), 34.0, None);
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            ui.horizontal(|ui| {
-                                let me = m.from == state.steam_id;
-                                let name = if p.name.is_empty() {
-                                    if me { t!("You").to_string() } else { m.from.to_string() }
-                                } else {
-                                    p.display_name()
-                                };
-                                let color = if me {
-                                    t.accent
-                                } else if g.owner_id == m.from {
-                                    t.away
-                                } else {
-                                    t.text
-                                };
-                                ui.label(w::text_semibold(name, 14.0, color));
-                                ui.label(w::text(format_time(m.time), 11.5, t.text_faint));
-                            });
-                            group_message_body(ui, t, state, client, g, chat_id, perms, m, ui_state, actions);
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), list_h), Layout::top_down(Align::Min), |ui| {
+        ui.set_min_height(list_h);
+        ui.set_max_height(list_h);
+        egui::ScrollArea::vertical()
+            .id_salt(("gc-msgs", g.id, chat_id))
+            .max_height(list_h)
+            .min_scrolled_height(list_h)
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                if state.group_more_history.get(&(g.id, chat_id)) == Some(&true) {
+                    if let Some(oldest) = msgs.first() {
+                        ui.horizontal(|ui| {
+                            if ui.link(w::text(t!("Load older messages"), 12.5, t.accent)).clicked() {
+                                client.send(Command::LoadGroupHistory {
+                                    group_id: g.id,
+                                    chat_id,
+                                    before: Some((oldest.time as u32, oldest.ordinal)),
+                                });
+                            }
                         });
-                    });
-                } else {
-                    ui.horizontal_top(|ui| {
-                        ui.add_space(42.0);
-                        ui.vertical(|ui| group_message_body(ui, t, state, client, g, chat_id, perms, m, ui_state, actions));
-                    });
+                        ui.add_space(4.0);
+                    }
                 }
-                last = Some((m.from, m.time));
-            }
-        });
+                if msgs.is_empty() {
+                    w::empty(ui, t, icons::CHAT, t!("No messages yet"), t!("Start the conversation!"));
+                }
+                let mut last: Option<(SteamId, u64)> = None;
+                for m in msgs {
+                    if let Some(srv) = &m.server_msg {
+                        ui.add_space(4.0);
+                        ui.label(w::text(format!("{} · {}", server_message_text(state, m.from, srv), format_time(m.time)), 12.0, t.text_faint).italics());
+                        last = None;
+                        continue;
+                    }
+                    if m.deleted {
+                        ui.add_space(4.0);
+                        ui.label(w::text(t!("(message deleted)"), 12.5, t.text_faint).italics());
+                        last = None;
+                        continue;
+                    }
+                    if m.text.is_empty() && m.invite.is_none() && m.group_invite.is_none() {
+                        continue;
+                    }
+                    let new_group = last.is_none_or(|(from, time)| from != m.from || m.time.saturating_sub(time) > 300);
+                    if new_group {
+                        ui.add_space(10.0);
+                        let p = state.persona(m.from);
+                        ui.horizontal_top(|ui| {
+                            w::avatar(ui, t, &art::avatar(p.avatar_hash.as_deref()), 34.0, None);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.horizontal(|ui| {
+                                    let me = m.from == state.steam_id;
+                                    let name = if p.name.is_empty() {
+                                        if me { t!("You").to_string() } else { m.from.to_string() }
+                                    } else {
+                                        p.display_name()
+                                    };
+                                    let color = if me {
+                                        t.accent
+                                    } else if g.owner_id == m.from {
+                                        t.away
+                                    } else {
+                                        t.text
+                                    };
+                                    ui.label(w::text_semibold(name, 14.0, color));
+                                    ui.label(w::text(format_time(m.time), 11.5, t.text_faint));
+                                });
+                                group_message_body(ui, t, state, client, g, chat_id, perms, m, ui_state, actions);
+                            });
+                        });
+                    } else {
+                        ui.horizontal_top(|ui| {
+                            ui.add_space(42.0);
+                            ui.vertical(|ui| group_message_body(ui, t, state, client, g, chat_id, perms, m, ui_state, actions));
+                        });
+                    }
+                    last = Some((m.from, m.time));
+                }
+            });
+    });
 
     ui.add_space(gap);
     let r = egui::Frame::new()
@@ -495,7 +498,11 @@ fn message_feed(
         .show(ui, |ui| {
             // Inline @mention suggestions while typing "@..."
             mention_suggestions(ui, t, state, g, perms.can_mention_all, &mut ui_state.input);
-            let ch_name = g.channel(chat_id).map(|c| c.name.as_str()).unwrap_or("general");
+            let ch_name = g
+                .channel(chat_id)
+                .map(|c| c.name.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("General");
             let hint = if perms.can_chat {
                 t!("Message #{channel}", channel = ch_name)
             } else {

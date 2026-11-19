@@ -675,13 +675,14 @@ impl GlowWinitRunning<'_> {
             };
             egui_winit::update_viewport_info(&mut viewport.info, &egui_ctx, window, false);
 
+            let wants_paint = viewport
+                .actions_requested
+                .iter()
+                .any(egui_winit::ActionRequested::wants_paint);
             // A hidden window is not painted, since nothing would be shown — unless someone
             // wants the pixels anyway, e.g. to screenshot an app that is in the background:
-            let is_visible = viewport.info.visible().unwrap_or(true)
-                || viewport
-                    .actions_requested
-                    .iter()
-                    .any(egui_winit::ActionRequested::wants_paint);
+            let is_visible = (mode == PassMode::Full && viewport.info.visible().unwrap_or(true))
+                || wants_paint;
 
             let Some(egui_winit) = viewport.egui_winit.as_mut() else {
                 return Ok(EventResult::Wait);
@@ -689,9 +690,17 @@ impl GlowWinitRunning<'_> {
             let mut raw_input = egui_winit.take_egui_input(window);
             let viewport_ui_cb = viewport.viewport_ui_cb.clone();
 
-            let show_ui = mode == PassMode::Full
-                && (is_visible
-                    || is_viewport_or_descendant_visible(&glutin.viewports, viewport_id));
+            // If the root viewport isn't visible (or its Wayland frame callback was withheld
+            // while covered by a maximized child window like Friends & Chat), still run the
+            // full UI pass whenever a child immediate viewport is visible so that child
+            // window keeps painting.
+            let has_visible_descendant = glutin.viewports.values().any(|child| {
+                child.ids.parent == viewport_id
+                    && child.ids.this != viewport_id
+                    && child.viewport_ui_cb.is_none()
+                    && is_viewport_or_descendant_visible(&glutin.viewports, child.ids.this)
+            });
+            let show_ui = is_visible || has_visible_descendant;
 
             self.integration.pre_update();
 

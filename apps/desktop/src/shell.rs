@@ -261,9 +261,13 @@ fn friends_hover(app: &mut SteamApp, ui: &mut Ui, t: &Theme, button: &egui::Resp
     let popup_rect: Option<Rect> = ui.data(|d| d.get_temp(id.with("rect")));
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let over_popup = pointer.zip(popup_rect).is_some_and(|(p, r)| r.expand(6.0).contains(p));
-    if button.hovered() || over_popup {
+    let bridge = Rect::from_min_max(button.rect.left_top(), egui::pos2(button.rect.right(), button.rect.bottom() + 8.0));
+    let over_button = button.hovered() || pointer.is_some_and(|p| bridge.contains(p));
+    if over_button || over_popup {
         since.get_or_insert(now);
         ui.data_mut(|d| d.insert_temp(id.with("left"), now));
+    } else if pointer.is_none() {
+        since = None;
     } else {
         let left: f64 = ui.data(|d| d.get_temp(id.with("left"))).unwrap_or(0.0);
         if now - left > 0.25 {
@@ -339,9 +343,14 @@ fn friends_hover(app: &mut SteamApp, ui: &mut Ui, t: &Theme, button: &egui::Resp
                         }
                         let color = status_color(t, p);
                         ui.painter().circle_filled(av.right_bottom() - vec2(1.0, 1.0), 4.5, color);
-                        ui.painter().text(egui::pos2(av.right() + 10.0, r.top() + 14.0), Align2::LEFT_CENTER, &p.name, w::font_semibold(13.0), if p.in_game() { t.in_game } else { t.text });
-                        ui.painter().text(egui::pos2(av.right() + 10.0, r.top() + 30.0), Align2::LEFT_CENTER, status_text(&app.state, p), w::font(11.5), color);
                         let unread = app.state.unread.get(&p.steam_id).copied().unwrap_or(0);
+                        let text_right = if unread > 0 { r.right() - 26.0 } else { r.right() - 6.0 };
+                        let text_rect = Rect::from_min_max(egui::pos2(av.right() + 10.0, r.top() + 3.0), egui::pos2(text_right, r.bottom() - 3.0));
+                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_rect).layout(Layout::top_down(Align::Min)));
+                        child.spacing_mut().item_spacing.y = 0.0;
+                        child.add(egui::Label::new(w::text_semibold(p.display_name(), 13.0, if p.in_game() { t.in_game } else { t.text })).truncate());
+                        let status = status_text(&app.state, p);
+                        child.add(egui::Label::new(w::text(&status, 11.5, color)).truncate());
                         if unread > 0 {
                             let c = egui::pos2(r.right() - 12.0, r.center().y);
                             ui.painter().circle_filled(c, 8.0, t.accent);
@@ -351,6 +360,7 @@ fn friends_hover(app: &mut SteamApp, ui: &mut Ui, t: &Theme, button: &egui::Resp
                             // Chat in the undocked window, like Steam.
                             app.friends_window.open = true;
                             app.friends_window.chat = Some(crate::builtin::group_chat::ChatTarget::Friend(p.steam_id));
+                            app.client.send(Command::LoadHistory { friend: p.steam_id });
                             actions.push(Action::MarkRead(p.steam_id));
                         }
                     }
@@ -372,8 +382,12 @@ fn friends_hover(app: &mut SteamApp, ui: &mut Ui, t: &Theme, button: &egui::Resp
                                 let init: String = name.chars().filter(|c| c.is_alphanumeric()).take(2).collect();
                                 ui.painter().text(av.center(), Align2::CENTER_CENTER, init.to_uppercase(), w::font_bold(12.0), t.text);
                             }
-                            ui.painter().text(egui::pos2(av.right() + 10.0, r.top() + 13.0), Align2::LEFT_CENTER, &name, w::font_semibold(13.0), t.text);
-                            ui.painter().text(egui::pos2(av.right() + 10.0, r.top() + 28.0), Align2::LEFT_CENTER, t!("{n} members", n = count), w::font(11.5), t.text_dim);
+                            let text_right = if unread > 0 { r.right() - 26.0 } else { r.right() - 6.0 };
+                            let text_rect = Rect::from_min_max(egui::pos2(av.right() + 10.0, r.top() + 3.0), egui::pos2(text_right, r.bottom() - 3.0));
+                            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_rect).layout(Layout::top_down(Align::Min)));
+                            child.spacing_mut().item_spacing.y = 0.0;
+                            child.add(egui::Label::new(w::text_semibold(&name, 13.0, t.text)).truncate());
+                            child.add(egui::Label::new(w::text(t!("{n} members", n = count), 11.5, t.text_dim)).truncate());
                             if unread > 0 {
                                 let c = egui::pos2(r.right() - 12.0, r.center().y);
                                 ui.painter().circle_filled(c, 8.0, t.accent);
@@ -384,6 +398,7 @@ fn friends_hover(app: &mut SteamApp, ui: &mut Ui, t: &Theme, button: &egui::Resp
                                 app.friends_window.chat = Some(crate::builtin::group_chat::ChatTarget::Group(gid));
                                 app.friends_window.group_ui.chat_id = default_ch;
                                 if let Some(cid) = default_ch {
+                                    app.client.send(Command::LoadGroupHistory { group_id: gid, chat_id: cid, before: None });
                                     actions.push(Action::MarkGroupRead { group_id: gid, chat_id: cid });
                                 }
                             }

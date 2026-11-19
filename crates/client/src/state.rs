@@ -379,7 +379,22 @@ impl State {
             }
             Event::GroupMembersUpdated { group_id, members, total, virtualized } => {
                 let entry = self.chat_groups.entry(*group_id).or_insert_with(|| ChatGroup { id: *group_id, ..Default::default() });
-                entry.members = members.clone();
+                if *virtualized {
+                    // Virtualized view updates can arrive as incremental deltas; merge by account_id
+                    // instead of replacing the whole list with a 1-member delta.
+                    for m in members {
+                        if let Some(existing) = entry.members.iter_mut().find(|e| e.account_id == m.account_id) {
+                            existing.state = m.state;
+                        } else {
+                            entry.members.push(m.clone());
+                        }
+                    }
+                    if entry.members.len() > 200 {
+                        entry.members.truncate(200);
+                    }
+                } else {
+                    entry.members = members.clone();
+                }
                 entry.virtualized_members = *virtualized;
                 if let Some(n) = total {
                     entry.active_member_count = *n;
@@ -760,6 +775,9 @@ fn merge_group(dst: &mut ChatGroup, prev: &ChatGroup, summary_only: bool) {
     } else {
         for ch in &mut dst.rooms {
             if let Some(old) = prev.rooms.iter().find(|r| r.id == ch.id) {
+                if (ch.name.trim().is_empty() || ch.name == "General") && !old.name.trim().is_empty() {
+                    ch.name = old.name.clone();
+                }
                 ch.unread = old.unread;
                 if ch.time_last_ack == 0 {
                     ch.time_last_ack = old.time_last_ack;

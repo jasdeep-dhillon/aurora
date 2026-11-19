@@ -212,7 +212,8 @@ impl SteamApp {
             rt.handle(),
             Arc::new(move |e| {
                 let _ = tx.send(e);
-                repaint.request_repaint();
+                repaint.request_repaint_of(egui::ViewportId::ROOT);
+                repaint.request_repaint_of(egui::ViewportId::from_hash_of("friends-window"));
             }),
         );
         // Tell the session the setting before it signs in and would otherwise
@@ -336,7 +337,7 @@ impl SteamApp {
         self.toasts.push(Toast { title: title.into(), body: body.into(), until: now + 5.0 });
     }
 
-    fn drain_events(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+    pub(crate) fn drain_events(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let now = ctx.input(|i| i.time);
         while let Ok(e) = self.events.try_recv() {
             // Toast-worthy things are decided before state changes.
@@ -699,6 +700,11 @@ impl eframe::App for SteamApp {
     /// (minimized or behind a fullscreen game on Wayland): the overlay drawn
     /// inside the game runs here so it stays quick then.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut actions = Vec::new();
+        self.drain_events(ctx, &mut actions);
+        self.handle_tray(ctx, &mut actions);
+        self.handle_links(ctx, &mut actions);
+        self.apply_actions(ctx, actions);
         crate::overlay::logic(self, ctx);
     }
 

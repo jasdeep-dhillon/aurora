@@ -65,7 +65,7 @@ pub fn role_actions_from_proto(a: &CChatRoleActions) -> ChatRoleActions {
 pub fn channel_from_proto(r: &CChatRoomState, user: Option<&CUserChatRoomState>) -> ChatRoomChannel {
     ChatRoomChannel {
         id: r.chat_id(),
-        name: r.chat_name().to_string(),
+        name: if r.chat_name().trim().is_empty() { "General".into() } else { r.chat_name().to_string() },
         voice_allowed: r.voice_allowed(),
         members_in_voice: r.members_in_voice.clone(),
         sort_order: r.sort_order(),
@@ -134,22 +134,38 @@ pub fn apply_header(group: &mut ChatGroup, h: &CChatRoomGroupHeaderState) {
     if h.chat_group_id() != 0 {
         group.id = h.chat_group_id();
     }
-    group.name = h.chat_name().to_string();
-    group.tagline = h.tagline().to_string();
-    group.clan_id = h.clanid();
-    group.app_id = h.appid();
+    if !h.chat_name().trim().is_empty() {
+        group.name = h.chat_name().to_string();
+    }
+    if !h.tagline().trim().is_empty() {
+        group.tagline = h.tagline().to_string();
+    }
+    if h.clanid() != 0 {
+        group.clan_id = h.clanid();
+    }
+    if h.appid() != 0 {
+        group.app_id = h.appid();
+    }
     if h.accountid_owner() != 0 {
         group.owner_id = account_to_steam_id(h.accountid_owner());
     }
-    group.avatar_url = avatar_url(h.avatar_sha(), h.avatar_ugc_url(), h.appid());
-    group.default_role_id = h.default_role_id();
-    group.roles = h
-        .roles
-        .iter()
-        .map(|r| ChatRole { role_id: r.role_id(), name: r.name().to_string(), ordinal: r.ordinal() })
-        .collect();
-    group.roles.sort_by_key(|r| r.ordinal);
-    group.role_actions = h.role_actions.iter().map(role_actions_from_proto).collect();
+    if let Some(url) = avatar_url(h.avatar_sha(), h.avatar_ugc_url(), group.app_id) {
+        group.avatar_url = Some(url);
+    }
+    if h.default_role_id() != 0 {
+        group.default_role_id = h.default_role_id();
+    }
+    if !h.roles.is_empty() {
+        group.roles = h
+            .roles
+            .iter()
+            .map(|r| ChatRole { role_id: r.role_id(), name: r.name().to_string(), ordinal: r.ordinal() })
+            .collect();
+        group.roles.sort_by_key(|r| r.ordinal);
+    }
+    if !h.role_actions.is_empty() {
+        group.role_actions = h.role_actions.iter().map(role_actions_from_proto).collect();
+    }
 }
 
 pub fn apply_rooms(group: &mut ChatGroup, default_chat_id: ChatRoomId, rooms: &[CChatRoomState]) {
@@ -159,6 +175,9 @@ pub fn apply_rooms(group: &mut ChatGroup, default_chat_id: ChatRoomId, rooms: &[
         .map(|r| {
             let mut ch = channel_from_proto(r, None);
             if let Some(prev) = old.iter().find(|p| p.id == ch.id) {
+                if r.chat_name().trim().is_empty() && !prev.name.trim().is_empty() {
+                    ch.name = prev.name.clone();
+                }
                 ch.time_last_ack = prev.time_last_ack;
                 ch.time_first_unread = prev.time_first_unread;
                 ch.time_last_mention = prev.time_last_mention;
@@ -386,6 +405,7 @@ pub async fn activate_groups(conn: Connection, me: SteamId, all_ids: Vec<u64>, d
             }
             for gid in &resp.virtualize_members_chat_group_ids {
                 // Request the first 100 members of virtualized groups (ranked/online first).
+                // Steam expects `client_changenumber >= 1` for an initial view update.
                 let _ = conn.notify_service(
                     "ChatRoom.UpdateMemberListView#1",
                     &CChatRoomUpdateMemberListViewNotification {
@@ -393,7 +413,7 @@ pub async fn activate_groups(conn: Connection, me: SteamId, all_ids: Vec<u64>, d
                         view_id: Some(*gid),
                         start: Some(0),
                         end: Some(100),
-                        client_changenumber: Some(0),
+                        client_changenumber: Some(1),
                         ..Default::default()
                     },
                 );
@@ -407,19 +427,7 @@ pub async fn activate_groups(conn: Connection, me: SteamId, all_ids: Vec<u64>, d
 pub fn load_group_state(conn: Connection, me: SteamId, group_id: GroupChatId, active: ActiveGroups, sink: Sink) {
     tokio::spawn(async move {
         let all_active = active_snapshot(&active, Some(group_id));
-        activate_groups(conn.clone(), me, all_active, vec![group_id], sink.clone()).await;
-        let r: Result<CChatRoomGetChatRoomGroupStateResponse, _> = conn
-            .call("ChatRoom.GetChatRoomGroupState#1", &CChatRoomGetChatRoomGroupStateRequest { chat_group_id: Some(group_id) })
-            .await;
-        if let Ok(r) = r {
-            if let Some(st) = &r.state {
-                let mut g = ChatGroup { id: group_id, ..Default::default() };
-                apply_group_state(&mut g, st, None, me);
-                let ids: Vec<SteamId> = g.members.iter().map(|m| m.steam_id).collect();
-                sink(Event::ChatGroupUpdated(g));
-                request_personas(&conn, me, ids);
-            }
-        }
+        activate_groups(conn, me, all_active, vec![group_id], sink).await;
     });
 }
 
@@ -1037,10 +1045,11 @@ pub fn handle_notification(conn: &Connection, me: SteamId, active: &ActiveGroups
             if let Some(p) = &entry.persona {
                 personas.push(persona_from_proto(p));
             }
+            // In `MemberListViewEntry`, `rank` is the sorted list index (0..N), not EChatRoomGroupRank.
             members.push(ChatGroupMember {
                 steam_id: account_to_steam_id(acct),
                 account_id: acct,
-                rank: entry.rank(),
+                rank: 20,
                 state: 2,
                 time_kick_expire: 0,
                 role_ids: Vec::new(),

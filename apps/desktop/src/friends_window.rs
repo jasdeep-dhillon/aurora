@@ -15,9 +15,22 @@ pub struct FriendsWindow {
     pub chat: Option<ChatTarget>,
     pub group_ui: GroupUiState,
     input: String,
+    pending: Vec<Action>,
+}
+
+struct AppPtr(*mut SteamApp);
+// SAFETY: deferred viewport callbacks run on the UI thread in their own frame,
+// never concurrently with `App::ui`, and `SteamApp` outlives all viewports.
+unsafe impl Send for AppPtr {}
+unsafe impl Sync for AppPtr {}
+impl AppPtr {
+    fn get(&self) -> *mut SteamApp {
+        self.0
+    }
 }
 
 pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) {
+    actions.append(&mut app.friends_window.pending);
     if !app.friends_window.open {
         return;
     }
@@ -26,7 +39,6 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
         Some(ChatTarget::Friend(_)) => 820.0,
         Some(ChatTarget::Group(_)) => if app.friends_window.group_ui.show_members { 960.0 } else { 820.0 },
     };
-    let panel_w = width - 340.0;
     // Our own title bar, like the main window (no Windows frame).
     let builder = egui::ViewportBuilder::default()
         .with_title(t!("Friends & Chat"))
@@ -34,39 +46,78 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
         .with_min_inner_size([300.0, 420.0])
         .with_decorations(false)
         .with_icon(std::sync::Arc::new(ui::brand::window_icon(64)));
-    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("friends-window"), builder, |ui, _| {
-        if ui.input(|i| i.viewport().close_requested()) {
-            app.friends_window.open = false;
-        }
-        let t = app.prefs.theme.clone();
-        // No title bar row, like Steam's friends window: the window buttons
-        // sit in the header (top right), and the header drags the window.
-        if let Some(target) = app.friends_window.chat {
-            egui::Panel::right("fw-chat")
-                .exact_size(panel_w)
-                .resizable(false)
-                .frame(egui::Frame::new().fill(t.bg).inner_margin(Margin { left: 16, right: 0, top: 0, bottom: 16 }))
-                .show(ui, |ui| {
-                    // Window buttons on the top edge of the chat side.
-                    let top = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(ui.max_rect().width(), 30.0));
-                    crate::chrome::drag_area(ui, top, true);
-                    ui.allocate_ui_with_layout(top.size(), Layout::right_to_left(Align::Min), |ui| crate::chrome::window_buttons(ui, &t, 30.0, true));
-                    ui.add_space(4.0);
-                    egui::Frame::new().inner_margin(Margin { left: 0, right: 16, top: 0, bottom: 0 }).show(ui, |ui| match target {
-                        ChatTarget::Friend(id) => chat(app, ui, actions, id),
-                        ChatTarget::Group(gid) => group_panel(app, ui, actions, gid),
-                    });
+    let viewport = egui::ViewportId::from_hash_of("friends-window");
+    if !ctx.embed_viewports() {
+        let ptr = AppPtr(app);
+        ctx.show_viewport_deferred(viewport, builder, move |ui, _| {
+            let app = unsafe { &mut *ptr.get() };
+            let ctx = ui.ctx().clone();
+            let mut local_actions = std::mem::take(&mut app.friends_window.pending);
+            app.drain_events(&ctx, &mut local_actions);
+            viewport_ui(app, ui, &mut local_actions);
+            // Apply chat read marks directly so they don't wait for the main window.
+            let mut deferred_for_root = Vec::new();
+            for act in local_actions {
+                match act {
+                    Action::MarkRead(id) => {
+                        app.state.unread.remove(&id);
+                    }
+                    Action::MarkGroupRead { group_id, chat_id } => {
+                        if let Some(ts) = app.state.mark_group_read(group_id, chat_id) {
+                            app.client.send(client::Command::AckGroupMessage { group_id, chat_id, timestamp: ts });
+                        }
+                    }
+                    other => deferred_for_root.push(other),
+                }
+            }
+            app.friends_window.pending = deferred_for_root;
+            if !app.friends_window.pending.is_empty() || !app.friends_window.open {
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
+        });
+    } else {
+        ctx.show_viewport_immediate(viewport, builder, |ui, _| {
+            viewport_ui(app, ui, actions);
+        });
+    }
+}
+
+fn viewport_ui(app: &mut SteamApp, ui: &mut Ui, actions: &mut Vec<Action>) {
+    if ui.input(|i| i.viewport().close_requested()) {
+        app.friends_window.open = false;
+    }
+    let t = app.prefs.theme.clone();
+    // No title bar row, like Steam's friends window: the window buttons
+    // sit in the header (top right), and the header drags the window.
+    if let Some(target) = app.friends_window.chat {
+        egui::Panel::left("fw-list")
+            .exact_size(340.0)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(t.chrome).inner_margin(Margin { left: 14, right: 10, top: 12, bottom: 8 }))
+            .show(ui, |ui| list(app, ui, actions));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(t.bg).inner_margin(Margin { left: 16, right: 0, top: 0, bottom: 16 }))
+            .show(ui, |ui| {
+                // Window buttons on the top edge of the chat side.
+                let top = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(ui.max_rect().width(), 30.0));
+                crate::chrome::drag_area(ui, top, true);
+                ui.allocate_ui_with_layout(top.size(), Layout::right_to_left(Align::Min), |ui| crate::chrome::window_buttons(ui, &t, 30.0, true));
+                ui.add_space(4.0);
+                egui::Frame::new().inner_margin(Margin { left: 0, right: 16, top: 0, bottom: 0 }).show(ui, |ui| match target {
+                    ChatTarget::Friend(id) => chat(app, ui, actions, id),
+                    ChatTarget::Group(gid) => group_panel(app, ui, actions, gid),
                 });
-        }
+            });
+    } else {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.chrome).inner_margin(Margin { left: 14, right: 10, top: 12, bottom: 8 }))
             .show(ui, |ui| list(app, ui, actions));
-        crate::chrome::resize_edges(ui);
-        let ctx = ui.ctx().clone();
-        crate::chrome::border(&ctx, &t);
-        crate::shell::friend_dialogs(app, &ctx);
-        group_chat::modals(&ctx, &t, &app.state, &app.client, &mut app.friends_window.group_ui);
-    });
+    }
+    crate::chrome::resize_edges(ui);
+    let ctx = ui.ctx().clone();
+    crate::chrome::border(&ctx, &t);
+    crate::shell::friend_dialogs(app, &ctx);
+    group_chat::modals(&ctx, &t, &app.state, &app.client, &mut app.friends_window.group_ui);
 }
 
 fn list(app: &mut SteamApp, ui: &mut Ui, actions: &mut Vec<Action>) {
