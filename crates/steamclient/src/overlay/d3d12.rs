@@ -18,7 +18,7 @@ use crate::overlay::wire::VERTEX_SIZE;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, RECT};
@@ -41,7 +41,7 @@ const SLOT_EXECUTE_COMMAND_LISTS: usize = 10;
 const MAX_SRVS: usize = 256;
 
 /// Captured Direct command queues keyed by `ID3D12Device` raw pointer.
-static QUEUES: Mutex<HashMap<usize, ID3D12CommandQueue>> = Mutex::new(HashMap::new());
+static QUEUES: LazyLock<Mutex<HashMap<usize, ID3D12CommandQueue>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static RENDERER: Mutex<Option<D3d12Renderer>> = Mutex::new(None);
 
 /// Install the `ID3D12CommandQueue::ExecuteCommandLists` vtable hook if
@@ -300,7 +300,8 @@ fn transition_barrier(res: &ID3D12Resource, before: D3D12_RESOURCE_STATES, after
 /// Drop the ManuallyDrop-wrapped resource inside a transition barrier.
 unsafe fn drop_barrier(mut b: D3D12_RESOURCE_BARRIER) {
     unsafe {
-        ManuallyDrop::drop(&mut b.Anonymous.Transition.pResource);
+        let t: &mut D3D12_RESOURCE_TRANSITION_BARRIER = &mut b.Anonymous.Transition;
+        ManuallyDrop::drop(&mut t.pResource);
         ManuallyDrop::drop(&mut b.Anonymous.Transition);
     }
 }
@@ -648,7 +649,7 @@ impl D3d12Renderer {
         garbage: &mut Vec<ID3D12Resource>,
         bytes: usize,
     ) -> windows::core::Result<(u64, *mut u8)> {
-        if let Some((res, ptr, cap)) = slot.as_ref().filter(|(_, _, cap)| *cap >= bytes) {
+        if let Some((res, ptr, _cap)) = slot.as_ref().filter(|(_, _, cap)| *cap >= bytes) {
             return Ok((unsafe { res.GetGPUVirtualAddress() }, *ptr));
         }
         if let Some((old, _, _)) = slot.take() {

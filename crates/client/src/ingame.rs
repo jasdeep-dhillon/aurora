@@ -11,11 +11,11 @@
 #[path = "../../steamclient/src/overlay/wire.rs"]
 pub mod wire;
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 #[path = "../../steamclient/src/overlay/util.rs"]
 mod util;
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 #[path = "../../steamclient/src/overlay/vulkan.rs"]
 mod overlay_vulkan;
 

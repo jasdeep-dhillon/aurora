@@ -763,9 +763,9 @@ mod win_impl {
     unsafe impl Send for VkSwapchainRenderer {}
     unsafe impl Send for DeviceMeta {}
 
-    static SURFACES: Mutex<HashMap<VkSurfaceKHR, isize>> = Mutex::new(HashMap::new());
-    static DEVICES: Mutex<HashMap<usize, DeviceMeta>> = Mutex::new(HashMap::new());
-    static SWAPCHAINS: Mutex<HashMap<VkSwapchainKHR, VkSwapchainRenderer>> = Mutex::new(HashMap::new());
+    static SURFACES: std::sync::LazyLock<Mutex<HashMap<VkSurfaceKHR, isize>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+    static DEVICES: std::sync::LazyLock<Mutex<HashMap<usize, DeviceMeta>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+    static SWAPCHAINS: std::sync::LazyLock<Mutex<HashMap<VkSwapchainKHR, VkSwapchainRenderer>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
     // ---- Hook installation (W^X-safe IAT) -------------------------------
 
@@ -1005,24 +1005,23 @@ mod win_impl {
         if info.is_null() {
             return unsafe { real(queue, info) };
         }
-        let mut modified: Option<(VkPresentInfoKHR, VkSemaphore)> = None;
-        let _ = std::panic::catch_unwind(|| unsafe {
+        let modified = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             let active = util::active_backend();
             if active != Backend::None && active != Backend::Vulkan {
-                return;
+                return None;
             }
             let pi = &*info;
             if pi.swapchain_count == 0 || pi.p_swapchains.is_null() || pi.p_image_indices.is_null() {
-                return;
+                return None;
             }
             let sc = *pi.p_swapchains;
             let img_idx = *pi.p_image_indices as usize;
-            let Ok(mut scs) = SWAPCHAINS.lock() else { return };
-            let Some(r) = scs.get_mut(&sc) else { return };
+            let Ok(mut scs) = SWAPCHAINS.lock() else { return None };
+            let Some(r) = scs.get_mut(&sc) else { return None };
 
             if active == Backend::None {
                 if !util::claim_backend(Backend::Vulkan) {
-                    return;
+                    return None;
                 }
                 crate::log!("overlay: drawing into the game's Vulkan swapchain ({}x{})", r.size.0, r.size.1);
                 if !r.hwnd.is_invalid() {
@@ -1036,7 +1035,7 @@ mod win_impl {
             let (ops, frame) = shared::take_for_present();
             let has_draw = frame.as_ref().is_some_and(|f| !f.meshes.is_empty());
             if ops.is_empty() && !has_draw {
-                return;
+                return None;
             }
             let wait_sems = if pi.wait_semaphore_count > 0 && !pi.p_wait_semaphores.is_null() {
                 std::slice::from_raw_parts(pi.p_wait_semaphores, pi.wait_semaphore_count as usize)
@@ -1046,9 +1045,12 @@ mod win_impl {
             if let Some(done_sem) = r.render(queue, img_idx, wait_sems, ops, frame.as_deref()) {
                 let mut next_pi = *pi;
                 next_pi.wait_semaphore_count = 1;
-                modified = Some((next_pi, done_sem));
+                return Some((next_pi, done_sem));
             }
-        });
+            None
+        }))
+        .ok()
+        .flatten();
         if let Some((mut next_pi, done_sem)) = modified {
             next_pi.p_wait_semaphores = &done_sem;
             return unsafe { real(queue, &next_pi) };
@@ -1751,6 +1753,8 @@ mod win_impl {
                     let vbytes: usize = frame.meshes.iter().map(|m| m.vertices.len()).sum();
                     let ibytes: usize = frame.meshes.iter().map(|m| m.indices.len() * 4).sum();
                     if vbytes > 0 && ibytes > 0 {
+                        let mut vb_opt = self.slots[img_idx].vb.take();
+                        let mut ib_opt = self.slots[img_idx].ib.take();
                         let ensure_buf = |slot: &mut Option<VkBuf>, need: usize, usage: VkFlags| -> Option<(VkBuffer, *mut u8)> {
                             if let Some(b) = slot.as_ref().filter(|b| b.cap >= need) {
                                 return Some((b.buf, b.mapped));
@@ -1765,8 +1769,6 @@ mod win_impl {
                             *slot = Some(b);
                             Some(res)
                         };
-                        let mut vb_opt = self.slots[img_idx].vb.take();
-                        let mut ib_opt = self.slots[img_idx].ib.take();
                         let vb_pair = ensure_buf(&mut vb_opt, vbytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
                         let ib_pair = ensure_buf(&mut ib_opt, ibytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
                         self.slots[img_idx].vb = vb_opt;
