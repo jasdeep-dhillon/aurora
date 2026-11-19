@@ -13,14 +13,41 @@ use ui::{Theme, icons, widgets as w};
 const TOP_BAR: f32 = 56.0;
 const CTRL: f32 = w::CONTROL_LG;
 
+#[allow(dead_code)]
 pub fn show(app: &mut SteamApp, ui: &mut Ui, actions: &mut Vec<Action>) {
+    show_with_theme(app, ui, actions, None, None, None, None, None);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn show_with_theme(
+    app: &mut SteamApp,
+    ui: &mut Ui,
+    actions: &mut Vec<Action>,
+    resolved: Option<&themes::ResolvedTheme>,
+    bg_tex: Option<&egui::TextureHandle>,
+    logo_tex: Option<&egui::TextureHandle>,
+    mut paint_bg: Option<&mut dyn FnMut(&egui::Painter, Rect)>,
+    mut paint_chrome: Option<&mut dyn FnMut(&egui::Painter, Rect)>,
+) {
+    if let Some(res) = resolved {
+        if !res.layout.shell.is_empty() {
+            crate::theme_renderer::render_shell(app, ui, actions, res, bg_tex, logo_tex, paint_bg, paint_chrome);
+            return;
+        }
+    }
+
     let t = app.prefs.theme.clone();
 
     egui::Panel::top("topbar")
         .exact_size(TOP_BAR)
         .resizable(false)
         .frame(egui::Frame::new().fill(t.chrome).inner_margin(Margin { left: 10, right: 0, top: 0, bottom: 0 }))
-        .show(ui, |ui| top_bar(app, ui, &t, actions));
+        .show(ui, |ui| {
+            if let Some(f) = paint_chrome.as_deref_mut() {
+                f(ui.painter(), ui.max_rect());
+            }
+            top_bar(app, ui, &t, actions);
+        });
 
     egui::Panel::bottom("statusbar")
         .exact_size(34.0)
@@ -37,26 +64,37 @@ pub fn show(app: &mut SteamApp, ui: &mut Ui, actions: &mut Vec<Action>) {
     }
 
     egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| {
-        let page = app.prefs.page.clone();
-        // Offline: pages that need Steam say so instead.
-        if crate::offline_ui::page(app, ui, &page) {
-            return;
+        let panel_rect = ui.max_rect();
+        if let (Some(tex), Some(res)) = (bg_tex, resolved) {
+            crate::theme_renderer::paint_background_texture(ui, panel_rect, tex, res.background_fit, res.background_opacity, res.background_tint);
         }
-        if page == "downloads" {
-            crate::offline_ui::downloads_notice(app, ui, &t);
+        if let Some(f) = paint_bg.as_deref_mut() {
+            f(ui.painter(), panel_rect);
         }
-        let env = Env {
-            state: &app.state,
-            local: &app.local,
-            theme: &app.prefs.theme,
-            zoom: app.prefs.zoom,
-            client: &app.client,
-            actions: &mut *actions,
-        };
-        if !app.registry.show_page(&page, ui, env) {
-            w::empty(ui, &t, icons::WARNING, "Page not found", &page);
-        }
+        show_active_page(app, ui, &t, actions);
     });
+}
+
+pub(crate) fn show_active_page(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>) {
+    let page = app.prefs.page.clone();
+    // Offline: pages that need Steam say so instead.
+    if crate::offline_ui::page(app, ui, &page) {
+        return;
+    }
+    if page == "downloads" {
+        crate::offline_ui::downloads_notice(app, ui, t);
+    }
+    let env = Env {
+        state: &app.state,
+        local: &app.local,
+        theme: &app.prefs.theme,
+        zoom: app.prefs.zoom,
+        client: &app.client,
+        actions: &mut *actions,
+    };
+    if !app.registry.show_page(&page, ui, env) {
+        w::empty(ui, t, icons::WARNING, "Page not found", &page);
+    }
 }
 
 fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>) {
@@ -130,11 +168,11 @@ fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
 }
 
 /// One entry of a header tab's hover menu: icon, label, page, page argument.
-type MenuEntry = (&'static str, String, &'static str, Option<String>);
+pub(crate) type MenuEntry = (&'static str, String, &'static str, Option<String>);
 
 /// Shortcuts into a page, like Steam's menus under STORE / LIBRARY /
 /// COMMUNITY / your name. `None` entries are separators.
-fn tab_menu_items(app: &SteamApp, page: &str) -> Vec<Option<MenuEntry>> {
+pub(crate) fn tab_menu_items(app: &SteamApp, page: &str) -> Vec<Option<MenuEntry>> {
     let e = |icon, label: &str, page, arg: Option<String>| Some((icon, label.to_string(), page, arg));
     let me = app.state.steam_id;
     match page {
@@ -171,7 +209,7 @@ fn tab_menu_items(app: &SteamApp, page: &str) -> Vec<Option<MenuEntry>> {
 /// A menu that opens while `anchor` is hovered (after a short delay, so
 /// passing over the tab doesn't open it) and stays open while the pointer
 /// is on the tab or the menu. Returns the entry clicked.
-fn hover_menu(ui: &mut Ui, t: &Theme, id: egui::Id, anchor: &egui::Response, items: &[Option<MenuEntry>]) -> Option<(String, Option<String>)> {
+pub(crate) fn hover_menu(ui: &mut Ui, t: &Theme, id: egui::Id, anchor: &egui::Response, items: &[Option<MenuEntry>]) -> Option<(String, Option<String>)> {
     if items.is_empty() {
         return None;
     }
@@ -254,7 +292,7 @@ fn hover_menu(ui: &mut Ui, t: &Theme, id: egui::Id, anchor: &egui::Response, ite
 
 /// Hovering the friends button shows a quick friends list, like Steam's,
 /// with a way into the undocked Friends & Chat window.
-fn friends_hover(app: &mut SteamApp, ui: &mut Ui, t: &Theme, button: &egui::Response, actions: &mut Vec<Action>) {
+pub(crate) fn friends_hover(app: &mut SteamApp, ui: &mut Ui, t: &Theme, button: &egui::Response, actions: &mut Vec<Action>) {
     let id = egui::Id::unique("friends-hover");
     let now = ui.input(|i| i.time);
     let mut since: Option<f64> = ui.data(|d| d.get_temp(id));
@@ -541,7 +579,11 @@ fn notifications_button(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mu
     let waiting = data.pending_gifts + data.pending_friends + data.confirmations;
     let badge = (data.unread + waiting) as usize;
     let r = w::icon_button_sized(ui, t, icons::BELL, t!("Notifications"), false, badge, CTRL);
-    egui::Popup::from_toggle_button_response(&r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(380.0).show(|ui| {
+    notifications_popup(app, &r, t, &data, actions);
+}
+
+pub(crate) fn notifications_popup(app: &mut SteamApp, r: &egui::Response, t: &Theme, data: &model::Notifications, actions: &mut Vec<Action>) {
+    egui::Popup::from_toggle_button_response(r).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(380.0).show(|ui| {
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
             ui.horizontal(|ui| {
                 ui.label(w::text_bold(t!("Notifications"), 16.0, t.text));
@@ -609,7 +651,7 @@ fn notifications_button(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mu
 }
 
 /// Wallet balance in the top bar; click for pending funds and wallet actions.
-fn wallet_button(ui: &mut Ui, t: &Theme, balance: i64, currency: i32, pending: i64, actions: &mut Vec<Action>) {
+pub(crate) fn wallet_button(ui: &mut Ui, t: &Theme, balance: i64, currency: i32, pending: i64, actions: &mut Vec<Action>) {
     let mut label = model::format_money(balance, currency);
     if pending > 0 {
         label = format!("{label}  ·  +{}", model::format_money(pending, currency));
@@ -766,7 +808,11 @@ fn account_menu(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Ac
     p.galley(egui::pos2(rect.left() + 38.0, rect.center().y - name_g.size().y / 2.0), name_g, name_color);
     p.text(rect.right_center() - vec2(12.0, 0.0), Align2::CENTER_CENTER, icons::CARET_DOWN, w::font(12.0), t.text_faint);
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    egui::Popup::menu(&resp).width(250.0).show(|ui| {
+    account_menu_popup(app, &resp, t, &me, actions);
+}
+
+pub(crate) fn account_menu_popup(app: &mut SteamApp, resp: &egui::Response, t: &Theme, me: &Persona, actions: &mut Vec<Action>) {
+    egui::Popup::menu(resp).width(250.0).show(|ui| {
         // Every row is a full-width menu row: icon column at 18 px, text at
         // 36 px, same height and hover, so nothing sits against the border.
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -837,7 +883,7 @@ fn status_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme) {
 /// Center of the bottom bar, like Steam's "Manage downloads": the game
 /// downloading and a thin progress line, nothing else. Numbers (percent,
 /// queue) are in the tooltip and on the Downloads page.
-fn downloads_control(app: &mut SteamApp, ui: &mut Ui, t: &Theme, bar: Rect) {
+pub(crate) fn downloads_control(app: &mut SteamApp, ui: &mut Ui, t: &Theme, bar: Rect) {
     let active = app.state.downloads.values().find(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)).cloned();
     let waiting = app.state.download_queue.iter().filter(|id| active.as_ref().is_none_or(|d| d.app_id != **id)).count();
     let progress = active.as_ref().map(|d| (d.disk_done as f64 / d.disk_total.max(1) as f64).clamp(0.0, 1.0) as f32);
@@ -974,7 +1020,7 @@ pub fn status_text(state: &client::State, p: &Persona) -> String {
     }
 }
 
-fn friends_drawer(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>) {
+pub(crate) fn friends_drawer(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>) {
     let list = app.state.friend_list();
     let online = list.iter().filter(|p| p.state != PersonaState::Offline).count();
     ui.horizontal(|ui| {

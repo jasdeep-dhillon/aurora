@@ -25,25 +25,173 @@ pub fn toggle_maximized(ctx: &egui::Context) {
 /// Minimize, maximize/restore and close, right to left (call inside a
 /// right-to-left layout). `height` is the bar height.
 pub fn window_buttons(ui: &mut Ui, t: &Theme, height: f32, can_maximize: bool) {
-    // In their own scope: buttons touch, like Windows', with no dead gaps,
-    // and the spacing change doesn't leak into the rest of the bar.
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        let ctx = ui.ctx().clone();
-        if button(ui, t, icons::X, height, true).on_hover_text(i18n::tr_dyn("Close")).clicked() {
-            ctx.send_viewport_cmd(ViewportCommand::Close);
+    window_buttons_variant(ui, t, height, can_maximize, themes::WinCtrlVariant::Windows);
+}
+
+/// Minimize, maximize/restore and close styled by [`themes::WinCtrlVariant`].
+///
+/// Works cleanly in both left-to-right and right-to-left layouts (detects the
+/// layout direction from `ui.layout().main_dir()`).
+pub fn window_buttons_variant(
+    ui: &mut Ui,
+    t: &Theme,
+    height: f32,
+    can_maximize: bool,
+    variant: themes::WinCtrlVariant,
+) {
+    use themes::WinCtrlVariant as V;
+    let ctx = ui.ctx().clone();
+    let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+    let rtl = ui.layout().main_dir() == egui::Direction::RightToLeft;
+    match variant {
+        V::Windows => {
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                if rtl {
+                    if button(ui, t, icons::X, height, true).on_hover_text(i18n::tr_dyn("Close")).clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                    if can_maximize {
+                        let (icon, tip) = if max { (icons::RESTORE, "Restore") } else { (icons::SQUARE, "Maximize") };
+                        if button(ui, t, icon, height, false).on_hover_text(i18n::tr_dyn(tip)).clicked() {
+                            toggle_maximized(&ctx);
+                        }
+                    }
+                    if button(ui, t, icons::MINUS, height, false).on_hover_text(i18n::tr_dyn("Minimize")).clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                    }
+                } else {
+                    if button(ui, t, icons::MINUS, height, false).on_hover_text(i18n::tr_dyn("Minimize")).clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                    }
+                    if can_maximize {
+                        let (icon, tip) = if max { (icons::RESTORE, "Restore") } else { (icons::SQUARE, "Maximize") };
+                        if button(ui, t, icon, height, false).on_hover_text(i18n::tr_dyn(tip)).clicked() {
+                            toggle_maximized(&ctx);
+                        }
+                    }
+                    if button(ui, t, icons::X, height, true).on_hover_text(i18n::tr_dyn("Close")).clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                }
+            });
         }
-        if can_maximize {
-            let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-            let (icon, tip) = if max { (icons::RESTORE, "Restore") } else { (icons::SQUARE, "Maximize") };
-            if button(ui, t, icon, height, false).on_hover_text(i18n::tr_dyn(tip)).clicked() {
-                toggle_maximized(&ctx);
-            }
+        V::Macos => {
+            let group_id = ui.scope_id().with("macos-lights");
+            let show_glyphs: bool = ui.data(|d| d.get_temp(group_id)).unwrap_or(false);
+            let mut any_hovered = false;
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if rtl {
+                    ui.add_space(6.0);
+                    let r = traffic_light(ui, height, Color32::from_rgb(0xFF, 0x5F, 0x56), "×", show_glyphs).on_hover_text(i18n::tr_dyn("Close"));
+                    any_hovered |= r.hovered();
+                    if r.clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                    if can_maximize {
+                        let tip = if max { "Restore" } else { "Maximize" };
+                        let r = traffic_light(ui, height, Color32::from_rgb(0x27, 0xC9, 0x3F), "+", show_glyphs).on_hover_text(i18n::tr_dyn(tip));
+                        any_hovered |= r.hovered();
+                        if r.clicked() {
+                            toggle_maximized(&ctx);
+                        }
+                    }
+                    let r = traffic_light(ui, height, Color32::from_rgb(0xFF, 0xBD, 0x2E), "−", show_glyphs).on_hover_text(i18n::tr_dyn("Minimize"));
+                    any_hovered |= r.hovered();
+                    if r.clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                    }
+                } else {
+                    let r = traffic_light(ui, height, Color32::from_rgb(0xFF, 0x5F, 0x56), "×", show_glyphs).on_hover_text(i18n::tr_dyn("Close"));
+                    any_hovered |= r.hovered();
+                    if r.clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                    let r = traffic_light(ui, height, Color32::from_rgb(0xFF, 0xBD, 0x2E), "−", show_glyphs).on_hover_text(i18n::tr_dyn("Minimize"));
+                    any_hovered |= r.hovered();
+                    if r.clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                    }
+                    if can_maximize {
+                        let tip = if max { "Restore" } else { "Maximize" };
+                        let r = traffic_light(ui, height, Color32::from_rgb(0x27, 0xC9, 0x3F), "+", show_glyphs).on_hover_text(i18n::tr_dyn(tip));
+                        any_hovered |= r.hovered();
+                        if r.clicked() {
+                            toggle_maximized(&ctx);
+                        }
+                    }
+                }
+            });
+            ui.data_mut(|d| d.insert_temp(group_id, any_hovered));
         }
-        if button(ui, t, icons::MINUS, height, false).on_hover_text(i18n::tr_dyn("Minimize")).clicked() {
-            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        V::Minimal => {
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if rtl {
+                    ui.add_space(6.0);
+                    if minimal_button(ui, t, icons::X, height, true).on_hover_text(i18n::tr_dyn("Close")).clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                    if can_maximize {
+                        let (icon, tip) = if max { (icons::RESTORE, "Restore") } else { (icons::SQUARE, "Maximize") };
+                        if minimal_button(ui, t, icon, height, false).on_hover_text(i18n::tr_dyn(tip)).clicked() {
+                            toggle_maximized(&ctx);
+                        }
+                    }
+                    if minimal_button(ui, t, icons::MINUS, height, false).on_hover_text(i18n::tr_dyn("Minimize")).clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                    }
+                } else {
+                    if minimal_button(ui, t, icons::MINUS, height, false).on_hover_text(i18n::tr_dyn("Minimize")).clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                    }
+                    if can_maximize {
+                        let (icon, tip) = if max { (icons::RESTORE, "Restore") } else { (icons::SQUARE, "Maximize") };
+                        if minimal_button(ui, t, icon, height, false).on_hover_text(i18n::tr_dyn(tip)).clicked() {
+                            toggle_maximized(&ctx);
+                        }
+                    }
+                    if minimal_button(ui, t, icons::X, height, true).on_hover_text(i18n::tr_dyn("Close")).clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                }
+            });
         }
-    });
+    }
+}
+
+fn traffic_light(ui: &mut Ui, height: f32, color: Color32, glyph: &str, show_glyph: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(18.0, height), Sense::click());
+    let center = rect.center();
+    let radius = 6.0;
+    let p = ui.painter();
+    p.circle_filled(center, radius, color);
+    p.circle_stroke(center, radius, egui::Stroke::new(0.5, Color32::from_black_alpha(45)));
+    let hover = ui.ctx().animate_bool_with_time(resp.id, show_glyph || resp.hovered(), 0.08);
+    if hover > 0.01 {
+        p.text(
+            center,
+            Align2::CENTER_CENTER,
+            glyph,
+            w::font_bold(10.0),
+            Color32::from_black_alpha((170.0 * hover) as u8),
+        );
+    }
+    resp.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+fn minimal_button(ui: &mut Ui, t: &Theme, icon: &str, height: f32, close: bool) -> egui::Response {
+    let (outer, resp) = ui.allocate_exact_size(vec2(28.0, height), Sense::click());
+    let btn = Rect::from_center_size(outer.center(), vec2(28.0, 28.0));
+    let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.08);
+    let bg = if close { Color32::from_rgb(0xC4, 0x2B, 0x1C) } else { t.surface_hover };
+    if hover > 0.0 {
+        ui.painter().rect_filled(btn, t.corner_small(), bg.gamma_multiply(hover));
+    }
+    let fg = if close && hover > 0.5 { Color32::WHITE } else { w::mix(t.text_dim, t.text, hover) };
+    ui.painter().text(btn.center(), Align2::CENTER_CENTER, icon, w::font(13.0), fg);
+    resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 
 fn button(ui: &mut Ui, t: &Theme, icon: &str, height: f32, close: bool) -> egui::Response {
