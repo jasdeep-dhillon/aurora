@@ -1,0 +1,17 @@
+[package]
+name = "themes"
+description = "Aurora declarative UI tree + box-model theming engine, package importer, and sandboxed Rhai visual hooks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ui.workspace = true
+egui.workspace = true
+rhai.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zip.workspace = true
