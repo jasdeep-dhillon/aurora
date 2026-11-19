@@ -186,6 +186,11 @@ struct X11 {
     XLookupKeysym: unsafe extern "C" fn(*mut XKeyEvent, c_int) -> KeySym,
     XKeysymToKeycode: unsafe extern "C" fn(*mut Display, KeySym) -> u8,
     XQueryKeymap: unsafe extern "C" fn(*mut Display, *mut c_char) -> c_int,
+    XSetErrorHandler: Option<unsafe extern "C" fn(Option<unsafe extern "C" fn(*mut Display, *mut c_void) -> c_int>) -> *mut c_void>,
+}
+
+unsafe extern "C" fn ignore_x11_error(_dpy: *mut Display, _err: *mut c_void) -> c_int {
+    0
 }
 
 impl X11 {
@@ -215,6 +220,7 @@ impl X11 {
                 XLookupKeysym: sym(lib, c"XLookupKeysym")?,
                 XKeysymToKeycode: sym(lib, c"XKeysymToKeycode")?,
                 XQueryKeymap: sym(lib, c"XQueryKeymap")?,
+                XSetErrorHandler: sym(lib, c"XSetErrorHandler"),
             })
         }
     }
@@ -281,6 +287,9 @@ fn input_loop() {
     let Some(x11) = (unsafe { X11::load() }) else {
         return;
     };
+    if let Some(set_err) = x11.XSetErrorHandler {
+        unsafe { set_err(Some(ignore_x11_error)) };
+    }
 
     let dpy = unsafe { (x11.XOpenDisplay)(std::ptr::null()) };
     if dpy.is_null() {
