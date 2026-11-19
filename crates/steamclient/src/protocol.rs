@@ -93,6 +93,12 @@ pub enum Request {
     UgcGetVote { id: u64 },
     /// Download (or update) an item into the game's Workshop folder.
     UgcDownload { id: u64 },
+    /// Create a new Workshop item (`ISteamUGC::CreateItem`): answered with [`Reply::UgcCreated`].
+    UgcCreateItem { consumer_app: u32, file_type: i32 },
+    /// Submit staged updates to a Workshop item (`ISteamUGC::SubmitItemUpdate`): answered with [`Reply::UgcUpdated`].
+    UgcUpdateItem(Box<UgcUpdate>),
+    /// Delete a Workshop item (`ISteamUGC::DeleteItem`): answered with [`Reply::Result`].
+    UgcDeleteItem { id: u64 },
     /// Read or change the player's items for this game (ISteamInventory):
     /// answered with [`Reply::Inventory`].
     Inventory(InventoryOp),
@@ -226,6 +232,25 @@ pub struct UgcQuery {
     pub max_age: u32,
 }
 
+/// What ISteamUGC's item-update builder collected (`StartItemUpdate` → `SubmitItemUpdate`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UgcUpdate {
+    pub consumer_app: u32,
+    pub id: u64,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub language: Option<String>,
+    pub metadata: Option<String>,
+    pub visibility: Option<i32>,
+    pub tags: Option<Vec<String>>,
+    pub content_path: Option<String>,
+    pub preview_path: Option<String>,
+    pub change_note: String,
+    pub clear_kv_tags: bool,
+    pub remove_kv_keys: Vec<String>,
+    pub add_kv_tags: Vec<(String, String)>,
+}
+
 /// One Workshop item, everything SteamUGCDetails_t and the query getters return.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UgcItem {
@@ -345,6 +370,8 @@ pub enum Reply {
     UgcResults { eresult: i32, total: u32, items: Vec<UgcItem>, cursor: String },
     UgcIds { ids: Vec<u64> },
     UgcVote { eresult: i32, up: bool, down: bool, skipped: bool },
+    UgcCreated { eresult: i32, id: u64, needs_agreement: bool },
+    UgcUpdated { eresult: i32, id: u64, needs_agreement: bool },
     Inventory { eresult: i32, items: Vec<InvItem>, ticket: Vec<u8> },
     /// Item definitions: (id, properties).
     ItemDefs { defs: Vec<(i32, Vec<(String, String)>)> },

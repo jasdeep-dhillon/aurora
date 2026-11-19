@@ -2,7 +2,7 @@
 //! subscriptions, votes and item downloads, through Steam's PublishedFile
 //! service. Downloads go through [`crate::workshop`], like the library's.
 
-use crate::ipc::protocol::{Reply, UgcItem, UgcQuery};
+use crate::ipc::protocol::{Reply, UgcItem, UgcQuery, UgcUpdate};
 use model::AppId;
 use net::{Connection, eresult};
 use proto::*;
@@ -299,6 +299,168 @@ pub async fn download(conn: &Connection, app_id: AppId, me: u64, id: u64, instal
     }
 }
 
+/// Maximum size of a Workshop preview image (10 MiB) or single-file content upload (100 MiB).
+const MAX_UGC_PREVIEW_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_UGC_CONTENT_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Read a local file for Workshop upload after verifying it is a regular file
+/// (not a symlink) within `max_bytes`.
+fn read_upload_file(path: &Path, max_bytes: u64) -> Result<(String, Vec<u8>), String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err("refusing to upload symlinked file".into());
+    }
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    if meta.len() > max_bytes {
+        return Err(format!("file exceeds {} byte upload limit", max_bytes));
+    }
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty() && !n.contains('/') && !n.contains('\\') && *n != "." && *n != "..")
+        .ok_or_else(|| "invalid file name".to_string())?
+        .to_string();
+    let data = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if data.len() as u64 > max_bytes {
+        return Err(format!("file exceeds {} byte upload limit", max_bytes));
+    }
+    Ok((name, data))
+}
+
+/// Resolve a Workshop `SetItemContent` path: accepts either a single regular file
+/// or a directory containing a single regular file (legacy cloud-backed UGC).
+fn resolve_content_file(path: &Path) -> Result<(String, Vec<u8>), String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err("refusing to upload symlinked content path".into());
+    }
+    if meta.is_file() {
+        return read_upload_file(path, MAX_UGC_CONTENT_BYTES);
+    }
+    if meta.is_dir() {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(path).map_err(|e| format!("cannot read {}: {e}", path.display()))? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let ft = entry.file_type().map_err(|e| e.to_string())?;
+            if ft.is_symlink() {
+                return Err("refusing to upload symlink inside content folder".into());
+            }
+            if ft.is_file() {
+                files.push(entry.path());
+            } else if ft.is_dir() {
+                return Err("multi-directory Workshop depot uploads are not supported yet".into());
+            }
+        }
+        if files.len() == 1 {
+            return read_upload_file(&files[0], MAX_UGC_CONTENT_BYTES);
+        }
+        return Err(format!("multi-file Workshop depot uploads ({} files) are not supported yet", files.len()));
+    }
+    Err("unsupported Workshop content path".into())
+}
+
+/// Create a new Workshop item (`ISteamUGC::CreateItem`) via `PublishedFile.Publish#1`.
+pub async fn create_item(conn: &Connection, app_id: AppId, consumer_app: AppId, file_type: i32) -> Reply {
+    let consumer = if consumer_app == 0 { app_id } else { consumer_app };
+    let req = CPublishedFilePublishRequest {
+        appid: Some(app_id),
+        consumer_appid: Some(consumer),
+        file_type: Some(file_type.max(0) as u32),
+        // Start private (2) until the game submits title/content/visibility.
+        visibility: Some(2),
+        ..Default::default()
+    };
+    match conn.call::<_, CPublishedFilePublishResponse>("PublishedFile.Publish#1", &req).await {
+        Ok(r) => Reply::UgcCreated {
+            eresult: eresult::OK,
+            id: r.publishedfileid(),
+            needs_agreement: !r.redirect_uri().is_empty(),
+        },
+        Err(e) => {
+            let c = code(&e);
+            tracing::info!("workshop create_item failed: {e}");
+            // EResult 24 = InsufficientPrivilege (often legal agreement not accepted).
+            Reply::UgcCreated { eresult: c, id: 0, needs_agreement: c == 24 }
+        }
+    }
+}
+
+/// Submit staged updates to a Workshop item (`ISteamUGC::SubmitItemUpdate`) via
+/// Steam Cloud shared file upload + `PublishedFile.Update#1`.
+pub async fn update_item(conn: &Connection, app_id: AppId, cell_id: u32, upd: &UgcUpdate) -> Reply {
+    let target_app = if upd.consumer_app == 0 { app_id } else { upd.consumer_app };
+    let mut preview_filename: Option<String> = None;
+    if let Some(p) = &upd.preview_path
+        && !p.is_empty()
+    {
+        match read_upload_file(Path::new(p), MAX_UGC_PREVIEW_BYTES) {
+            Ok((name, data)) => {
+                let cloud_name = format!("ugc_preview_{}_{name}", upd.id);
+                if let Err(e) = crate::cloud::upload_shared_file(conn, target_app, cell_id, &cloud_name, &data).await {
+                    tracing::info!("workshop preview upload failed for {}: {e}", upd.id);
+                    return Reply::UgcUpdated { eresult: eresult::FAIL, id: upd.id, needs_agreement: false };
+                }
+                preview_filename = Some(cloud_name);
+            }
+            Err(e) => {
+                tracing::info!("workshop preview file rejected for {}: {e}", upd.id);
+                return Reply::UgcUpdated { eresult: eresult::FAIL, id: upd.id, needs_agreement: false };
+            }
+        }
+    }
+    let mut content_filename: Option<String> = None;
+    if let Some(p) = &upd.content_path
+        && !p.is_empty()
+    {
+        match resolve_content_file(Path::new(p)) {
+            Ok((name, data)) => {
+                let cloud_name = format!("ugc_content_{}_{name}", upd.id);
+                if let Err(e) = crate::cloud::upload_shared_file(conn, target_app, cell_id, &cloud_name, &data).await {
+                    tracing::info!("workshop content upload failed for {}: {e}", upd.id);
+                    return Reply::UgcUpdated { eresult: eresult::FAIL, id: upd.id, needs_agreement: false };
+                }
+                content_filename = Some(cloud_name);
+            }
+            Err(e) => {
+                tracing::info!("workshop content rejected for {}: {e}", upd.id);
+                return Reply::UgcUpdated { eresult: eresult::FAIL, id: upd.id, needs_agreement: false };
+            }
+        }
+    }
+    let req = CPublishedFileUpdateRequest {
+        appid: Some(target_app),
+        publishedfileid: Some(upd.id),
+        title: upd.title.clone(),
+        file_description: upd.description.clone(),
+        visibility: upd.visibility.map(|v| v.clamp(0, 3) as u32),
+        tags: upd.tags.clone().unwrap_or_default(),
+        update_tags: upd.tags.as_ref().map(|_| true),
+        filename: content_filename,
+        preview_filename,
+        language: upd.language.as_deref().map(crate::hub::language_id),
+        ..Default::default()
+    };
+    match conn.call::<_, CPublishedFileUpdateResponse>("PublishedFile.Update#1", &req).await {
+        Ok(_) => Reply::UgcUpdated { eresult: eresult::OK, id: upd.id, needs_agreement: false },
+        Err(e) => {
+            let c = code(&e);
+            tracing::info!("workshop update_item {} failed: {e}", upd.id);
+            Reply::UgcUpdated { eresult: c, id: upd.id, needs_agreement: c == 24 }
+        }
+    }
+}
+
+/// Delete a Workshop item (`ISteamUGC::DeleteItem`) via `PublishedFile.Delete#1`.
+pub async fn delete_item(conn: &Connection, app_id: AppId, id: u64) -> i32 {
+    let req = CPublishedFileDeleteRequest { publishedfileid: Some(id), appid: Some(app_id) };
+    conn.call::<_, CPublishedFileDeleteResponse>("PublishedFile.Delete#1", &req)
+        .await
+        .map(|_| eresult::OK)
+        .unwrap_or_else(|e| code(&e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,5 +475,27 @@ mod tests {
         let d = PublishedFileDetails { publishedfileid: Some(5), title: Some("Map".into()), short_description: Some("short".into()), ..Default::default() };
         let i = item(&d);
         assert_eq!((i.id, i.title.as_str(), i.description.as_str()), (5, "Map", "short"));
+    }
+
+    #[test]
+    fn validates_upload_files_and_folders() {
+        let dir = std::env::temp_dir().join(format!("aurora-test-ugc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("mod.pak");
+        std::fs::write(&file, b"hello workshop").unwrap();
+        let (name, data) = read_upload_file(&file, 1024).unwrap();
+        assert_eq!(name, "mod.pak");
+        assert_eq!(data, b"hello workshop");
+        // Rejects oversized file.
+        assert!(read_upload_file(&file, 4).is_err());
+        // Single-file folder works.
+        let (fname, fdata) = resolve_content_file(&dir).unwrap();
+        assert_eq!(fname, "mod.pak");
+        assert_eq!(fdata, b"hello workshop");
+        // Multi-file folder fails cleanly.
+        std::fs::write(dir.join("extra.bin"), b"x").unwrap();
+        assert!(resolve_content_file(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

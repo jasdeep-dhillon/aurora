@@ -2,7 +2,10 @@
 //! without signing in. Handy for UI work and for testing extensions.
 
 use client::Event;
-use model::{ChatMessage, OwnedApp, Persona, PersonaState, Relationship};
+use model::{
+    ChatGroup, ChatGroupMember, ChatMessage, ChatRole, ChatRoleActions, ChatRoomChannel, GroupInviteInfo, GroupInviteLink, GroupInviteRef, GroupMessage,
+    GroupServerMessage, MessageReaction, OwnedApp, Persona, PersonaState, Relationship, steam_id_to_account,
+};
 
 pub fn events(local: &local::LocalState) -> Vec<Event> {
     const BASE: u64 = 76561197960265728;
@@ -60,10 +63,26 @@ pub fn events(local: &local::LocalState) -> Vec<Event> {
         Event::Friends((0..friends.len()).map(|i| (BASE + 100 + i as u64, Relationship::Friend)).collect()),
         Event::Personas(personas),
     ];
-    events.push(Event::History {
+    let mut history: Vec<ChatMessage> = chat
+        .iter()
+        .map(|(from, text, ago)| ChatMessage {
+            friend: ferris,
+            from: *from,
+            text: (*text).into(),
+            time: now - ago,
+            invite: None,
+            group_invite: None,
+        })
+        .collect();
+    history.push(ChatMessage {
         friend: ferris,
-        messages: chat.iter().map(|(from, text, ago)| ChatMessage { friend: ferris, from: *from, text: (*text).into(), time: now - ago, invite: None }).collect(),
+        from: ferris,
+        text: "hop into our weekend squad group:".into(),
+        time: now - 420,
+        invite: None,
+        group_invite: Some(GroupInviteRef::Link { code: "DEMO99".into() }),
     });
+    events.push(Event::History { friend: ferris, messages: history });
     events.push(Event::Profile(model::ProfileInfo {
         steam_id: me,
         background: Some(model::art::hero(1145360)),
@@ -74,10 +93,215 @@ pub fn events(local: &local::LocalState) -> Vec<Event> {
         ..Default::default()
     }));
     events.push(Event::Wallet { balance: 1234, currency: 1, pending: 250 });
-    events.push(Event::Message(ChatMessage { friend: BASE + 101, from: BASE + 101, text: "gg! one more?".into(), time: now - 30, invite: None }));
+    events.push(Event::Message(ChatMessage {
+        friend: BASE + 101,
+        from: BASE + 101,
+        text: "gg! one more?".into(),
+        time: now - 30,
+        invite: None,
+        group_invite: None,
+    }));
+    events.extend(group_chats(me, now));
     events.extend(inventory(me, now));
     events.extend(crate::builtin::hub::demo::events());
     events
+}
+
+fn group_chats(me: u64, now: u64) -> Vec<Event> {
+    const BASE: u64 = 76561197960265728;
+    let ferris = BASE + 100;
+    let nova = BASE + 101;
+    let pixel = BASE + 102;
+    let quartz = BASE + 103;
+    let juniper = BASE + 104;
+
+    let gid1 = 900_001;
+    let gid2 = 900_002;
+    let my_acc = steam_id_to_account(me);
+    let members = vec![
+        ChatGroupMember { steam_id: me, account_id: my_acc, rank: 50, state: 2, time_kick_expire: 0, role_ids: vec![1] },
+        ChatGroupMember { steam_id: ferris, account_id: steam_id_to_account(ferris), rank: 40, state: 2, time_kick_expire: 0, role_ids: vec![2] },
+        ChatGroupMember { steam_id: nova, account_id: steam_id_to_account(nova), rank: 30, state: 2, time_kick_expire: 0, role_ids: vec![3] },
+        ChatGroupMember { steam_id: pixel, account_id: steam_id_to_account(pixel), rank: 20, state: 2, time_kick_expire: 0, role_ids: vec![4] },
+        ChatGroupMember { steam_id: quartz, account_id: steam_id_to_account(quartz), rank: 20, state: 2, time_kick_expire: 0, role_ids: vec![4] },
+        ChatGroupMember { steam_id: juniper, account_id: steam_id_to_account(juniper), rank: 20, state: 2, time_kick_expire: 0, role_ids: vec![4] },
+    ];
+    let squad = ChatGroup {
+        id: gid1,
+        name: "Aurora Co-op Squad".into(),
+        tagline: "Weekend co-op nights & speedruns".into(),
+        avatar_url: Some(model::art::hero(620)),
+        owner_id: me,
+        default_chat_id: 1,
+        rooms: vec![
+            ChatRoomChannel {
+                id: 1,
+                name: "General".into(),
+                sort_order: 1,
+                time_last_message: (now - 90) as u32,
+                time_last_ack: (now - 90) as u32,
+                ..Default::default()
+            },
+            ChatRoomChannel {
+                id: 2,
+                name: "LFG & Invites".into(),
+                sort_order: 2,
+                time_last_message: (now - 45) as u32,
+                time_last_ack: (now - 300) as u32,
+                unread: 1,
+                ..Default::default()
+            },
+            ChatRoomChannel {
+                id: 3,
+                name: "Lobby Voice".into(),
+                voice_allowed: true,
+                members_in_voice: vec![steam_id_to_account(ferris), steam_id_to_account(quartz)],
+                sort_order: 3,
+                ..Default::default()
+            },
+        ],
+        members,
+        top_members: vec![me, ferris, nova, pixel, quartz],
+        active_member_count: 6,
+        active_voice_member_count: 2,
+        my_rank: 50,
+        my_role_ids: vec![1],
+        roles: vec![
+            ChatRole { role_id: 1, name: "Owner".into(), ordinal: 1 },
+            ChatRole { role_id: 2, name: "Officer".into(), ordinal: 2 },
+            ChatRole { role_id: 3, name: "Moderator".into(), ordinal: 3 },
+            ChatRole { role_id: 4, name: "Member".into(), ordinal: 4 },
+        ],
+        role_actions: vec![ChatRoleActions { role_id: 1, ..ChatRoleActions::all() }],
+        default_role_id: 4,
+        time_joined: (now - 86_400) as u32,
+        full_loaded: true,
+        ..Default::default()
+    };
+
+    let party = ChatGroup {
+        id: gid2,
+        default_chat_id: 1,
+        rooms: vec![ChatRoomChannel {
+            id: 1,
+            name: "Chat".into(),
+            sort_order: 1,
+            time_last_message: (now - 240) as u32,
+            time_last_ack: (now - 240) as u32,
+            ..Default::default()
+        }],
+        members: vec![
+            ChatGroupMember { steam_id: me, account_id: my_acc, rank: 50, state: 2, ..Default::default() },
+            ChatGroupMember { steam_id: ferris, account_id: steam_id_to_account(ferris), rank: 20, state: 2, ..Default::default() },
+            ChatGroupMember { steam_id: nova, account_id: steam_id_to_account(nova), rank: 20, state: 2, ..Default::default() },
+        ],
+        top_members: vec![ferris, nova],
+        active_member_count: 3,
+        my_rank: 50,
+        full_loaded: true,
+        ..Default::default()
+    };
+
+    vec![
+        Event::ChatGroups(vec![squad, party]),
+        Event::GroupHistory {
+            group_id: gid1,
+            chat_id: 1,
+            prepend: false,
+            more: false,
+            messages: vec![
+                GroupMessage {
+                    group_id: gid1,
+                    chat_id: 1,
+                    from: quartz,
+                    text: String::new(),
+                    time: now - 900,
+                    ordinal: 1,
+                    invite: None,
+                    group_invite: None,
+                    deleted: false,
+                    server_msg: Some(GroupServerMessage { kind: 4, string_param: String::new(), account_id_param: steam_id_to_account(quartz) }),
+                    reactions: vec![],
+                    mentioned_me: false,
+                },
+                GroupMessage {
+                    group_id: gid1,
+                    chat_id: 1,
+                    from: ferris,
+                    text: "Ready for Portal 2 custom chambers tonight? @You bring snacks!".into(),
+                    time: now - 320,
+                    ordinal: 1,
+                    invite: None,
+                    group_invite: None,
+                    deleted: false,
+                    server_msg: None,
+                    reactions: vec![
+                        MessageReaction { reaction_type: 1, reaction: "👍".into(), count: 3, reacted: true },
+                        MessageReaction { reaction_type: 1, reaction: "🎉".into(), count: 2, reacted: false },
+                    ],
+                    mentioned_me: true,
+                },
+                GroupMessage {
+                    group_id: gid1,
+                    chat_id: 1,
+                    from: me,
+                    text: "On my way once shaders finish compiling!".into(),
+                    time: now - 90,
+                    ordinal: 1,
+                    invite: None,
+                    group_invite: None,
+                    deleted: false,
+                    server_msg: None,
+                    reactions: vec![MessageReaction { reaction_type: 1, reaction: "🔥".into(), count: 1, reacted: false }],
+                    mentioned_me: false,
+                },
+            ],
+        },
+        Event::GroupHistory {
+            group_id: gid1,
+            chat_id: 2,
+            prepend: false,
+            more: false,
+            messages: vec![GroupMessage {
+                group_id: gid1,
+                chat_id: 2,
+                from: nova,
+                text: "Need 1 more for ranked queue — lobby open!".into(),
+                time: now - 45,
+                ordinal: 1,
+                invite: None,
+                group_invite: None,
+                deleted: false,
+                server_msg: None,
+                reactions: vec![],
+                mentioned_me: false,
+            }],
+        },
+        Event::GroupInviteLinks {
+            group_id: gid1,
+            result: Ok(vec![GroupInviteLink {
+                code: "AURO99".into(),
+                creator: me,
+                expires: (now + 86_400) as u32,
+                chat_id: 1,
+            }]),
+        },
+        Event::GroupInviteResolved {
+            key: "link:DEMO99".into(),
+            result: Ok(GroupInviteInfo {
+                key: "link:DEMO99".into(),
+                group_id: 900_999,
+                chat_id: 1,
+                name: "Weekend Indie Club".into(),
+                avatar_url: Some(model::art::hero(1145360)),
+                member_count: 14,
+                banned: false,
+                kick_expires: 0,
+                expires: 0,
+                already_member: false,
+            }),
+        },
+    ]
 }
 
 /// Sample inventory, market and support data (public Dota 2 items).

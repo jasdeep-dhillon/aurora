@@ -63,7 +63,13 @@ mod imp {
         button: unsafe extern "C" fn(Gp, i32) -> bool,
         axis: unsafe extern "C" fn(Gp, i32) -> i16,
         rumble: unsafe extern "C" fn(Gp, u16, u16, u32) -> bool,
+        has_sensor: Option<unsafe extern "C" fn(Gp, i32) -> bool>,
+        set_sensor_enabled: Option<unsafe extern "C" fn(Gp, i32, bool) -> bool>,
+        get_sensor_data: Option<unsafe extern "C" fn(Gp, i32, *mut f32, i32) -> bool>,
     }
+
+    const SDL_SENSOR_ACCEL: i32 = 1;
+    const SDL_SENSOR_GYRO: i32 = 2;
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain([0]).collect()
@@ -90,6 +96,12 @@ mod imp {
                 unsafe { std::mem::transmute::<*mut c_void, _>(p) }
             }};
         }
+        macro_rules! opt {
+            ($name:literal) => {{
+                let p = unsafe { GetProcAddress(m, concat!($name, "\0").as_ptr().cast()) };
+                if p.is_null() { None } else { Some(unsafe { std::mem::transmute::<*mut c_void, _>(p) }) }
+            }};
+        }
         Some(Sdl {
             set_hint: f!("SDL_SetHint"),
             init: f!("SDL_Init"),
@@ -109,6 +121,9 @@ mod imp {
             button: f!("SDL_GetGamepadButton"),
             axis: f!("SDL_GetGamepadAxis"),
             rumble: f!("SDL_RumbleGamepad"),
+            has_sensor: opt!("SDL_GamepadHasSensor"),
+            set_sensor_enabled: opt!("SDL_SetGamepadSensorEnabled"),
+            get_sensor_data: opt!("SDL_GetGamepadSensorData"),
         })
     }
 
@@ -202,7 +217,7 @@ mod imp {
     fn state(sdl: &Sdl, gp: Gp) -> State {
         let b = |i| unsafe { (sdl.button)(gp, i) };
         let a = |i| unsafe { (sdl.axis)(gp, i) };
-        State {
+        let mut s = State {
             packet: 0,
             buttons: BUTTONS.iter().filter(|(i, _)| b(*i)).fold(0, |acc, (_, bit)| acc | bit),
             lx: a(0),
@@ -211,7 +226,18 @@ mod imp {
             ry: flip(a(3)),
             lt: trigger(a(4)),
             rt: trigger(a(5)),
+            ..Default::default()
+        };
+        if let Some(get_data) = sdl.get_sensor_data {
+            let mut accel = [0.0f32; 3];
+            let mut gyro = [0.0f32; 3];
+            let has_a = unsafe { get_data(gp, SDL_SENSOR_ACCEL, accel.as_mut_ptr(), 3) };
+            let has_g = unsafe { get_data(gp, SDL_SENSOR_GYRO, gyro.as_mut_ptr(), 3) };
+            if has_a || has_g {
+                s.set_motion(accel, gyro);
+            }
         }
+        s
     }
 
     /// Xbox pads are XInput's; the game reads those itself.
@@ -277,6 +303,16 @@ mod imp {
                         let gp = unsafe { (sdl.open)(id) };
                         if gp.is_null() {
                             continue;
+                        }
+                        if let (Some(has), Some(enable)) = (sdl.has_sensor, sdl.set_sensor_enabled) {
+                            unsafe {
+                                if has(gp, SDL_SENSOR_ACCEL) {
+                                    let _ = enable(gp, SDL_SENSOR_ACCEL, true);
+                                }
+                                if has(gp, SDL_SENSOR_GYRO) {
+                                    let _ = enable(gp, SDL_SENSOR_GYRO, true);
+                                }
+                            }
                         }
                         tracing::info!("controllers: {} → game pad {}", name(sdl, id), slot + 1);
                         shared.slots[slot].set_rumble(0, 0);

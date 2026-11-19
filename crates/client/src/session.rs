@@ -383,6 +383,7 @@ struct Online {
     /// The offline cache needs writing; when it was last written.
     cache_dirty: bool,
     cache_saved: std::time::Instant,
+    active_groups: crate::chat_groups::ActiveGroups,
     /// Games whose pending Steam Cloud upload is running.
     cloud_flushing: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AppId>>>,
     /// Games compiling their shaders before launch; set to skip the rest.
@@ -496,6 +497,7 @@ async fn online(
         auto_downloads: true,
         cache_dirty: false,
         cache_saved: std::time::Instant::now(),
+        active_groups: Default::default(),
         cloud_flushing: Default::default(),
         shader_jobs: Default::default(),
         prefix_setups: Default::default(),
@@ -703,8 +705,12 @@ async fn online(
                 None => lost!("the server closed the connection"),
             },
             cmd = cmds.recv() => match cmd {
-                None => return Ok("Shutting down".into()),
+                None => {
+                    st.record_active_unconnected_play();
+                    return Ok("Shutting down".into());
+                }
                 Some(Command::LogOut) => {
+                    st.record_active_unconnected_play();
                     let _ = conn.send(emsg::CLIENT_LOG_OFF, &CMsgClientLogOff {});
                     return Ok("Logged out".into());
                 }
@@ -874,6 +880,36 @@ async fn online(
                 }
                 Some(Command::ForgetAccount { account }) => store::remove(&account),
                 Some(Command::SendMessage { to, text }) => st.send_message(to, text, sink),
+                Some(Command::LoadChatGroups) => crate::chat_groups::load_my_groups(st.conn.clone(), st.me, st.active_groups.clone(), sink.clone()),
+                Some(Command::OpenChatGroup { group_id }) => crate::chat_groups::load_group_state(st.conn.clone(), st.me, group_id, st.active_groups.clone(), sink.clone()),
+                Some(Command::LoadGroupHistory { group_id, chat_id, before }) => crate::chat_groups::load_history(st.conn.clone(), st.me, group_id, chat_id, before, sink.clone()),
+                Some(Command::SendGroupMessage { group_id, chat_id, text }) => crate::chat_groups::send_message(st.conn.clone(), st.me, group_id, chat_id, text, sink.clone()),
+                Some(Command::AckGroupMessage { group_id, chat_id, timestamp }) => crate::chat_groups::ack_message(&st.conn, group_id, chat_id, timestamp),
+                Some(Command::CreateChatGroup { name, invitees }) => crate::chat_groups::create_group(st.conn.clone(), st.me, st.active_groups.clone(), name, invitees, sink.clone()),
+                Some(Command::InviteToChatGroup { group_id, chat_id, friend }) => crate::chat_groups::invite_friend(st.conn.clone(), group_id, chat_id, friend, sink.clone()),
+                Some(Command::JoinChatGroup { group_id, chat_id, invite_code }) => crate::chat_groups::join_group(st.conn.clone(), st.me, st.active_groups.clone(), group_id, chat_id, invite_code, sink.clone()),
+                Some(Command::LeaveChatGroup { group_id }) => crate::chat_groups::leave_group(st.conn.clone(), st.active_groups.clone(), group_id, sink.clone()),
+                Some(Command::SaveChatGroup { group_id, name }) => crate::chat_groups::save_group(st.conn.clone(), st.me, st.active_groups.clone(), group_id, name, sink.clone()),
+                Some(Command::RenameChatGroup { group_id, name }) => crate::chat_groups::rename_group(st.conn.clone(), st.me, st.active_groups.clone(), group_id, name, sink.clone()),
+                Some(Command::SetChatGroupTagline { group_id, tagline }) => crate::chat_groups::set_tagline(st.conn.clone(), st.me, st.active_groups.clone(), group_id, tagline, sink.clone()),
+                Some(Command::CreateChatChannel { group_id, name, allow_voice }) => crate::chat_groups::create_channel(st.conn.clone(), st.me, st.active_groups.clone(), group_id, name, allow_voice, sink.clone()),
+                Some(Command::RenameChatChannel { group_id, chat_id, name }) => crate::chat_groups::rename_channel(st.conn.clone(), st.me, st.active_groups.clone(), group_id, chat_id, name, sink.clone()),
+                Some(Command::DeleteChatChannel { group_id, chat_id }) => crate::chat_groups::delete_channel(st.conn.clone(), st.me, st.active_groups.clone(), group_id, chat_id, sink.clone()),
+                Some(Command::CreateGroupInviteLink { group_id, chat_id, seconds_valid }) => crate::chat_groups::create_invite_link(st.conn.clone(), group_id, chat_id, seconds_valid, sink.clone()),
+                Some(Command::LoadGroupInviteLinks { group_id }) => crate::chat_groups::load_invite_links(st.conn.clone(), group_id, sink.clone()),
+                Some(Command::DeleteGroupInviteLink { group_id, code }) => crate::chat_groups::delete_invite_link(st.conn.clone(), group_id, code, sink.clone()),
+                Some(Command::ResolveGroupInvite { invite }) => crate::chat_groups::resolve_invite(st.conn.clone(), st.me, invite, sink.clone()),
+                Some(Command::KickGroupMember { group_id, steam_id, expiration_secs }) => crate::chat_groups::kick_member(st.conn.clone(), group_id, steam_id, expiration_secs, sink.clone()),
+                Some(Command::BanGroupMember { group_id, steam_id, ban }) => crate::chat_groups::ban_member(st.conn.clone(), group_id, steam_id, ban, sink.clone()),
+                Some(Command::LoadGroupBanList { group_id }) => crate::chat_groups::load_ban_list(st.conn.clone(), group_id, sink.clone()),
+                Some(Command::UpdateGroupReaction { group_id, chat_id, timestamp, ordinal, reaction_type, reaction, add }) => {
+                    crate::chat_groups::update_reaction(st.conn.clone(), st.me, group_id, chat_id, timestamp, ordinal, reaction_type, reaction, add, sink.clone());
+                }
+                Some(Command::DeleteGroupMessages { group_id, chat_id, messages }) => crate::chat_groups::delete_messages(st.conn.clone(), group_id, chat_id, messages, sink.clone()),
+                Some(Command::SetGroupNotificationPrefs { group_id, unread_muted, desktop_level }) => {
+                    crate::chat_groups::set_preferences(st.conn.clone(), st.me, st.active_groups.clone(), group_id, unread_muted, desktop_level, sink.clone());
+                }
+                Some(Command::SearchGroupMembers { group_id, query }) => crate::chat_groups::search_members(st.conn.clone(), group_id, query, sink.clone()),
                 Some(Command::InviteToLobby { app_id, lobby, friend }) => {
                     // Steam's own lobby invite: it lets them in (private and
                     // friends-only lobbies) and Steam writes the [lobbyinvite]
@@ -1700,20 +1736,27 @@ impl Online {
                     let n: CFriendMessagesIncomingMessageNotification = p.body()?;
                     match n.chat_entry_type() {
                         1 => {
-                            // The markup keeps invites (game, lobby); the plain text loses them.
-                            let (text, invite) = model::chat::parse(n.message());
-                            let text = if text.is_empty() && invite.is_none() { n.message_no_bbcode().to_string() } else { text };
+                            // The markup keeps invites (game, lobby, group); the plain text loses them.
+                            let parsed = model::chat::parse_message(n.message());
+                            let text = if parsed.text.is_empty() && parsed.invite.is_none() && parsed.group_invite.is_none() {
+                                n.message_no_bbcode().to_string()
+                            } else {
+                                parsed.text
+                            };
                             sink(Event::Message(model::ChatMessage {
                                 friend: n.steamid_friend(),
                                 from: if n.local_echo() { self.me } else { n.steamid_friend() },
                                 text,
                                 time: n.rtime32_server_timestamp() as u64,
-                                invite,
+                                invite: parsed.invite,
+                                group_invite: parsed.group_invite,
                             }))
                         }
                         2 => sink(Event::Typing { from: n.steamid_friend() }),
                         _ => {}
                     }
+                } else if name.starts_with("ChatRoomClient.") {
+                    crate::chat_groups::handle_notification(&self.conn, self.me, &self.active_groups, &name, &p, sink)?;
                 } else {
                     sink(Event::Unhandled { emsg: p.emsg, name });
                 }
@@ -1761,8 +1804,15 @@ impl Online {
                 .await;
             match r {
                 Ok(r) => {
-                    let (text, invite) = model::chat::parse(if r.modified_message().is_empty() { &text } else { r.modified_message() });
-                    sink(Event::Message(model::ChatMessage { friend: to, from: me, text, time: r.server_timestamp() as u64, invite }))
+                    let parsed = model::chat::parse_message(if r.modified_message().is_empty() { &text } else { r.modified_message() });
+                    sink(Event::Message(model::ChatMessage {
+                        friend: to,
+                        from: me,
+                        text: parsed.text,
+                        time: r.server_timestamp() as u64,
+                        invite: parsed.invite,
+                        group_invite: parsed.group_invite,
+                    }))
                 }
                 Err(e) => sink(Event::Error(format!("Message not sent: {e}"))),
             }
@@ -2446,8 +2496,15 @@ impl Online {
                         .messages
                         .iter()
                         .map(|m| {
-                            let (text, invite) = model::chat::parse(m.message());
-                            model::ChatMessage { friend, from: base | m.accountid() as u64, text, time: m.timestamp() as u64, invite }
+                            let parsed = model::chat::parse_message(m.message());
+                            model::ChatMessage {
+                                friend,
+                                from: base | m.accountid() as u64,
+                                text: parsed.text,
+                                time: m.timestamp() as u64,
+                                invite: parsed.invite,
+                                group_invite: parsed.group_invite,
+                            }
                         })
                         .collect();
                     messages.sort_by_key(|m| m.time);
@@ -2853,14 +2910,32 @@ impl Online {
                     let _ = reply.send(crate::game_ugc::get_vote(&conn, id).await);
                 });
             }
+            Request::UgcCreateItem { consumer_app, file_type } => {
+                tokio::spawn(async move {
+                    let _ = reply.send(crate::game_ugc::create_item(&conn, app_id, consumer_app, file_type).await);
+                });
+            }
+            Request::UgcUpdateItem(upd) => {
+                let cell_id = self.cell_id;
+                tokio::spawn(async move {
+                    let _ = reply.send(crate::game_ugc::update_item(&conn, app_id, cell_id, &upd).await);
+                });
+            }
+            Request::UgcDeleteItem { id } => {
+                tokio::spawn(async move {
+                    let _ = reply.send(Reply::Result { eresult: crate::game_ugc::delete_item(&conn, app_id, id).await });
+                });
+            }
             Request::Inventory(op) => {
                 tokio::spawn(async move {
                     let _ = reply.send(crate::game_inventory::run(&conn, app_id, me, op).await);
                 });
             }
             Request::ItemDefs => {
+                let refresh = self.refresh_token.clone();
+                let cache_dir = crate::store::config_dir().join("itemdefs");
                 tokio::spawn(async move {
-                    let _ = reply.send(crate::game_inventory::item_defs(&conn, app_id).await);
+                    let _ = reply.send(crate::game_inventory::item_defs(&conn, app_id, me, &refresh, &cache_dir).await);
                 });
             }
             Request::InputConfig => {
@@ -3025,10 +3100,7 @@ impl Online {
         self.cell_id = info.cell_id;
         self.auth = crate::ipc::Auth::new(info.public_ip);
         self.web = Default::default();
-        let now = unix_now();
-        for (app_id, (start, offline_mode)) in std::mem::take(&mut self.unconnected_play) {
-            offline::record_play(self.me, offline::PlaySession { app_id, start, seconds: now.saturating_sub(start), offline: offline_mode, reported: false });
-        }
+        self.record_active_unconnected_play();
         self.set_link(Link::Online, sink);
         sink(Event::LoggedIn { steam_id: self.me, account: self.account.clone() });
         self.connected(sink);
@@ -3058,6 +3130,7 @@ impl Online {
             }
         });
         self.load_notifications(sink);
+        crate::chat_groups::load_my_groups(self.conn.clone(), self.me, self.active_groups.clone(), sink.clone());
     }
 
     /// Offline mode: the library and friends as they were at the last sign-in.
@@ -3163,33 +3236,32 @@ impl Online {
         }
     }
 
+    /// Flush any currently running offline/disconnected game sessions into
+    /// `playtime.json` (used on reconnect, logout, and shutdown).
+    fn record_active_unconnected_play(&mut self) {
+        let now = unix_now();
+        for (app_id, (start, offline_mode)) in std::mem::take(&mut self.unconnected_play) {
+            offline::record_play(self.me, offline::PlaySession { app_id, start, seconds: now.saturating_sub(start), offline: offline_mode, reported: false });
+        }
+    }
+
     /// Back online: send play time and game stats recorded while offline.
     fn flush_offline(&self, sink: &Sink) {
         let (conn, sink, me) = (self.conn.clone(), sink.clone(), self.me);
         tokio::spawn(async move {
-            let unsent: Vec<offline::PlaySession> = offline::play_sessions(me).into_iter().filter(|s| !s.reported).collect();
-            if !unsent.is_empty() && offline::SEND_TO_STEAM {
-                // What Steam's own client sends for time played while disconnected.
-                let req = CPlayerRecordDisconnectedPlaytimeRequest {
-                    play_sessions: unsent
-                        .iter()
-                        .map(|s| c_player_record_disconnected_playtime_request::PlayHistory {
-                            appid: Some(s.app_id),
-                            session_time_start: Some(s.start as u32),
-                            seconds: Some(s.seconds.min(u32::MAX as u64) as u32),
-                            offline: Some(s.offline),
-                            owner: Some(model::account_id(me)),
-                        })
-                        .collect(),
-                };
-                match conn.call::<_, CPlayerRecordDisconnectedPlaytimeResponse>("Player.RecordDisconnectedPlaytime#1", &req).await {
-                    Ok(_) => {
-                        tracing::info!("sent {} offline play session(s) to Steam", unsent.len());
-                        offline::mark_reported(me, &unsent);
+            let sessions = offline::play_sessions(me);
+            if offline::SEND_TO_STEAM {
+                if let Some((req, unsent)) = build_disconnected_playtime_request(me, &sessions) {
+                    // What Steam's own client sends for time played while disconnected.
+                    match conn.call::<_, CPlayerRecordDisconnectedPlaytimeResponse>("Player.RecordDisconnectedPlaytime#1", &req).await {
+                        Ok(_) => {
+                            tracing::info!("sent {} offline play session(s) to Steam", unsent.len());
+                            offline::mark_reported(me, &unsent);
+                        }
+                        Err(e) => tracing::warn!("offline play time not sent: {e}"),
                     }
-                    Err(e) => tracing::warn!("offline play time not sent: {e}"),
+                    sink(Event::OfflinePlaytime(offline::playtime_totals(&offline::play_sessions(me))));
                 }
-                sink(Event::OfflinePlaytime(offline::playtime_totals(&offline::play_sessions(me))));
             }
             if offline::SEND_TO_STEAM {
                 for app_id in offline::stats_pending(me) {
@@ -3198,6 +3270,32 @@ impl Online {
             }
         });
     }
+}
+
+/// Build a `Player.RecordDisconnectedPlaytime#1` request from unreported,
+/// non-zero play sessions, returning `None` if nothing needs sending.
+fn build_disconnected_playtime_request(
+    me: SteamId,
+    sessions: &[offline::PlaySession],
+) -> Option<(CPlayerRecordDisconnectedPlaytimeRequest, Vec<offline::PlaySession>)> {
+    let unsent: Vec<offline::PlaySession> = sessions.iter().filter(|s| !s.reported && s.seconds > 0).cloned().collect();
+    if unsent.is_empty() {
+        return None;
+    }
+    let owner = model::account_id(me);
+    let req = CPlayerRecordDisconnectedPlaytimeRequest {
+        play_sessions: unsent
+            .iter()
+            .map(|s| c_player_record_disconnected_playtime_request::PlayHistory {
+                appid: Some(s.app_id),
+                session_time_start: Some(s.start.min(u32::MAX as u64) as u32),
+                seconds: Some(s.seconds.min(u32::MAX as u64) as u32),
+                offline: Some(s.offline),
+                owner: Some(owner),
+            })
+            .collect(),
+    };
+    Some((req, unsent))
 }
 
 /// Send stats and achievements a game stored while offline.
@@ -3479,5 +3577,40 @@ mod reorder_tests {
             assert!(super::validate_support_ticket_url(bad).is_err(), "must reject {bad}");
         }
         assert!(super::validate_support_ticket_url("https://help.steampowered.com/en/wizard/HelpRequest/HT-1234").is_ok());
+    }
+
+    #[test]
+    fn disconnected_playtime_request_filters_and_maps_fields() {
+        let steam_id: model::SteamId = 76561198000000123;
+        let expected_owner = model::account_id(steam_id);
+        let sessions = vec![
+            crate::offline::PlaySession { app_id: 440, start: 1_700_000_000, seconds: 300, offline: true, reported: false },
+            // Already reported: must be skipped.
+            crate::offline::PlaySession { app_id: 570, start: 1_700_000_500, seconds: 600, offline: true, reported: true },
+            // Zero seconds: must be skipped.
+            crate::offline::PlaySession { app_id: 730, start: 1_700_000_900, seconds: 0, offline: false, reported: false },
+            // Disconnected (not offline mode) with large seconds clamped to u32::MAX.
+            crate::offline::PlaySession { app_id: 730, start: 1_700_001_000, seconds: u64::from(u32::MAX) + 50, offline: false, reported: false },
+        ];
+
+        let (req, unsent) = super::build_disconnected_playtime_request(steam_id, &sessions).expect("should build request");
+        assert_eq!(unsent.len(), 2);
+        assert_eq!(req.play_sessions.len(), 2);
+
+        assert_eq!(req.play_sessions[0].appid, Some(440));
+        assert_eq!(req.play_sessions[0].session_time_start, Some(1_700_000_000));
+        assert_eq!(req.play_sessions[0].seconds, Some(300));
+        assert_eq!(req.play_sessions[0].offline, Some(true));
+        assert_eq!(req.play_sessions[0].owner, Some(expected_owner));
+
+        assert_eq!(req.play_sessions[1].appid, Some(730));
+        assert_eq!(req.play_sessions[1].session_time_start, Some(1_700_001_000));
+        assert_eq!(req.play_sessions[1].seconds, Some(u32::MAX));
+        assert_eq!(req.play_sessions[1].offline, Some(false));
+        assert_eq!(req.play_sessions[1].owner, Some(expected_owner));
+
+        // When all sessions are already reported or zero-second, returns None.
+        let none = super::build_disconnected_playtime_request(steam_id, &sessions[1..3]);
+        assert!(none.is_none());
     }
 }

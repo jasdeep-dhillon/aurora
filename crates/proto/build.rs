@@ -14,6 +14,7 @@ const FILES: &[&str] = &[
     "steammessages_clientserver_appinfo.proto",
     "steammessages_auth.steamclient.proto",
     "steammessages_friendmessages.steamclient.proto",
+    "steammessages_chat.steamclient.proto",
     "steammessages_player.steamclient.proto",
     "content_manifest.proto",
     "steammessages_store.steamclient.proto",

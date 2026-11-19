@@ -1,20 +1,22 @@
-//! Community: friends and 1:1 chat.
+//! Community: friends, 1:1 chat, and group chats.
 
+use super::group_chat::{self, ChatTarget, GroupUiState};
 use ui::widgets::EditMenu;
 use i18n::t;
-use client::{Client, Command, State};
+use client::{Client, Command, Event, State};
 use egui::{Align, Align2, CornerRadius, Key, Layout, Margin, Rect, Sense, Stroke, Ui, pos2, vec2};
 use extensions::{Action, Ctx, Extension, Manifest, PageSpec};
-use model::{PersonaState, SteamId, art};
+use model::{GroupChatId, PersonaState, SteamId, art};
 use std::collections::HashSet;
 use ui::{Theme, icons, widgets as w};
 
 #[derive(Default)]
 pub struct Community {
-    selected: Option<SteamId>,
+    selected: Option<ChatTarget>,
     filter: String,
     input: String,
     loaded: HashSet<SteamId>,
+    group_ui: GroupUiState,
     /// Friends page: which section, its search, the "add a friend" box.
     tab: FriendsTab,
     search: String,
@@ -26,6 +28,7 @@ pub struct Community {
 enum FriendsTab {
     #[default]
     Friends,
+    Groups,
     Add,
     Invites,
     Blocked,
@@ -48,14 +51,37 @@ impl Extension for Community {
     }
 
     fn on_navigate(&mut self, _page: &str, arg: Option<&str>) {
-        if let Some(id) = arg.and_then(|a| a.parse().ok()) {
-            self.selected = Some(id);
+        if let Some(arg) = arg {
+            if let Some(rest) = arg.strip_prefix("group:") {
+                let (gid_s, cid_s) = rest.split_once(':').unwrap_or((rest, ""));
+                if let Ok(gid) = gid_s.parse::<GroupChatId>() {
+                    self.selected = Some(ChatTarget::Group(gid));
+                    self.group_ui.chat_id = cid_s.parse().ok();
+                    return;
+                }
+            }
+            if let Ok(id) = arg.parse::<SteamId>() {
+                self.selected = Some(ChatTarget::Friend(id));
+            }
+        }
+    }
+
+    fn on_event(&mut self, event: &Event, _ctx: &mut Ctx) {
+        match event {
+            Event::GroupJoined(gid) => {
+                self.selected = Some(ChatTarget::Group(*gid));
+                self.group_ui.chat_id = None;
+            }
+            Event::ChatGroupRemoved(gid) if self.selected == Some(ChatTarget::Group(*gid)) => {
+                self.selected = None;
+            }
+            _ => {}
         }
     }
 
     fn page(&mut self, _page: &str, ui: &mut Ui, ctx: &mut Ctx) {
         let t = ctx.theme.clone();
-        if let Some(id) = self.selected {
+        if let Some(ChatTarget::Friend(id)) = self.selected {
             if self.loaded.insert(id) {
                 ctx.send(Command::LoadHistory { friend: id });
             }
@@ -64,6 +90,7 @@ impl Extension for Community {
             }
         }
 
+        let mut actions = Vec::new();
         egui::Panel::left("community-friends")
             .exact_size(300.0)
             .resizable(false)
@@ -76,21 +103,79 @@ impl Extension for Community {
                 });
                 ui.add_space(8.0);
                 let width = ui.available_width() - 4.0;
-                w::search(ui, &t, &mut self.filter, t!("Search friends"), width);
-                ui.add_space(10.0);
-                if let Some(id) = friend_list(ui, &t, ctx.state, &self.filter, self.selected) {
-                    self.selected = Some(id);
+                w::search(ui, &t, &mut self.filter, t!("Search friends & groups"), width);
+                ui.add_space(8.0);
+                let sel_group = match self.selected {
+                    Some(ChatTarget::Group(gid)) => Some(gid),
+                    _ => None,
+                };
+                let sender = client_of(ctx);
+                if let Some(gid) = group_chat::group_list_section(ui, &t, ctx.state, &self.filter, sel_group, &mut self.group_ui, &sender, &mut actions) {
+                    self.selected = Some(ChatTarget::Group(gid));
+                    self.group_ui.chat_id = None;
+                }
+                ui.add_space(6.0);
+                w::caption(ui, &t, &format!("{} · {}", t!("Friends"), ctx.state.friend_list().len()));
+                let sel_friend = match self.selected {
+                    Some(ChatTarget::Friend(id)) => Some(id),
+                    _ => None,
+                };
+                if let Some(id) = friend_list(ui, &t, ctx.state, &self.filter, sel_friend) {
+                    self.selected = Some(ChatTarget::Friend(id));
                 }
             });
 
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| match self.selected {
-            Some(id) => self.conversation(ui, &t, ctx, id),
+            Some(ChatTarget::Friend(id)) => self.conversation(ui, &t, ctx, id),
+            Some(ChatTarget::Group(gid)) => self.group_conversation(ui, &t, ctx, gid, &mut actions),
             None => self.overview(ui, &t, ctx),
         });
+        for a in actions {
+            ctx.act(a);
+        }
+        group_chat::modals(ui.ctx(), &t, ctx.state, &client_of(ctx), &mut self.group_ui);
     }
 }
 
 impl Community {
+    fn group_conversation(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, group_id: GroupChatId, actions: &mut Vec<Action>) {
+        let Some(g) = ctx.state.chat_groups.get(&group_id).cloned() else {
+            self.selected = None;
+            return;
+        };
+        let name = ctx.state.group_display_name(&g);
+        let sender = client_of(ctx);
+        egui::Frame::new().fill(t.chrome).inner_margin(Margin::symmetric(24, 14)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                group_chat::group_avatar(ui, t, &g, &name, 44.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.add_space(3.0);
+                    ui.label(w::text_bold(&name, 18.0, t.text));
+                    let sub = if !g.tagline.is_empty() {
+                        format!("{} · {}", g.tagline, t!("{n} members", n = g.active_member_count.max(g.members.len() as u32)))
+                    } else {
+                        t!("{n} members", n = g.active_member_count.max(g.members.len() as u32))
+                    };
+                    ui.label(w::text(sub, 13.0, t.text_dim));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if w::icon_button(ui, t, icons::X, t!("Close conversation"), false, 0).clicked() {
+                        self.selected = None;
+                    }
+                    group_chat::header_actions(ui, t, ctx.state, &sender, &g, &mut self.group_ui, false);
+                });
+            });
+        });
+        let rect = ui.max_rect();
+        ui.painter().hline(rect.x_range(), ui.cursor().top(), Stroke::new(1.0, t.border));
+        egui::Frame::new().inner_margin(Margin::symmetric(24, 12)).show(ui, |ui| {
+            let h = ui.available_height();
+            group_chat::group_view(ui, t, ctx.state, &sender, group_id, &mut self.group_ui, actions, false, h);
+        });
+    }
+
     fn conversation(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, id: SteamId) {
         let p = ctx.state.persona(id);
         egui::Frame::new().fill(t.chrome).inner_margin(Margin::symmetric(24, 14)).show(ui, |ui| {
@@ -178,7 +263,7 @@ pub fn chat_body(ui: &mut Ui, t: &Theme, state: &State, client: &impl Sender, fr
             }
             let mut last: Option<(SteamId, u64)> = None;
             // Nothing to show (e.g. markup we don't draw): skip it.
-            for m in msgs.iter().filter(|m| !m.text.is_empty() || m.invite.is_some()) {
+            for m in msgs.iter().filter(|m| !m.text.is_empty() || m.invite.is_some() || m.group_invite.is_some()) {
                 let new_group = last.is_none_or(|(from, time)| from != m.from || m.time.saturating_sub(time) > 300);
                 if new_group {
                     ui.add_space(10.0);
@@ -193,13 +278,13 @@ pub fn chat_body(ui: &mut Ui, t: &Theme, state: &State, client: &impl Sender, fr
                                 ui.label(w::text_semibold(name, 14.0, if me { t.accent } else { t.text }));
                                 ui.label(w::text(format_time(m.time), 11.5, t.text_faint));
                             });
-                            message(ui, t, state, m, &mut join);
+                            message(ui, t, state, client, m, &mut join);
                         });
                     });
                 } else {
                     ui.horizontal_top(|ui| {
                         ui.add_space(42.0);
-                        ui.vertical(|ui| message(ui, t, state, m, &mut join));
+                        ui.vertical(|ui| message(ui, t, state, client, m, &mut join));
                     });
                 }
                 last = Some((m.from, m.time));
@@ -246,17 +331,20 @@ pub fn chat_body(ui: &mut Ui, t: &Theme, state: &State, client: &impl Sender, fr
     join
 }
 
-/// One message: its text, and a game invite as a card.
-fn message(ui: &mut Ui, t: &Theme, state: &State, m: &model::ChatMessage, join: &mut Option<Action>) {
-    let Some(inv) = &m.invite else {
-        ui.add(egui::Label::new(w::text(&m.text, 14.0, t.text)).wrap());
-        return;
-    };
-    // Steam's invites are only markup; old Aurora ones were the link text.
-    if !m.text.is_empty() && !m.text.contains("steam://run/") {
+/// One message: its text, plus any game invite or group chat invite card.
+fn message(ui: &mut Ui, t: &Theme, state: &State, client: &impl Sender, m: &model::ChatMessage, join: &mut Option<Action>) {
+    if !m.text.is_empty() && !(m.invite.is_some() && m.text.contains("steam://run/")) {
         ui.add(egui::Label::new(w::text(&m.text, 14.0, t.text)).wrap());
     }
-    let mine = m.from == state.steam_id;
+    if let Some(inv) = &m.invite {
+        game_invite_card(ui, t, state, inv, m.from == state.steam_id, join);
+    }
+    if let Some(ginv) = &m.group_invite {
+        group_chat::invite_card(ui, t, state, client, ginv, m.from == state.steam_id, join);
+    }
+}
+
+pub(crate) fn game_invite_card(ui: &mut Ui, t: &Theme, state: &State, inv: &model::GameInvite, mine: bool, join: &mut Option<Action>) {
     let name = state.app_name(inv.app_id).map(String::from).unwrap_or_else(|| t!("App {id}", id = inv.app_id).to_string());
     let width = ui.available_width().min(380.0);
     egui::Frame::new()
@@ -286,7 +374,7 @@ fn message(ui: &mut Ui, t: &Theme, state: &State, m: &model::ChatMessage, join: 
         });
 }
 
-fn format_time(unix: u64) -> String {
+pub(crate) fn format_time(unix: u64) -> String {
     if unix == 0 {
         return String::new();
     }
@@ -362,6 +450,7 @@ impl Community {
                     ui.add_space(4.0);
                     let items = [
                         (FriendsTab::Friends, icons::USER, t!("Your friends"), friends_n),
+                        (FriendsTab::Groups, icons::USERS_THREE, t!("Group chats"), state.chat_groups.len()),
                         (FriendsTab::Add, icons::USER_PLUS, t!("Add a friend"), 0),
                         (FriendsTab::Invites, icons::BELL, t!("Invites"), invites_n),
                         (FriendsTab::Blocked, icons::LOCK_SIMPLE, t!("Blocked"), blocked_n),
@@ -396,6 +485,7 @@ impl Community {
                 ui.vertical(|ui| {
                     egui::ScrollArea::vertical().id_salt("friends-page").auto_shrink([false, false]).show(ui, |ui| match self.tab {
                         FriendsTab::Friends => self.friends_grid(ui, t, ctx, friends_n),
+                        FriendsTab::Groups => self.groups_grid(ui, t, ctx),
                         FriendsTab::Add => self.add_friend(ui, t, ctx),
                         FriendsTab::Invites => self.invites(ui, t, ctx),
                         FriendsTab::Blocked => self.blocked(ui, t, ctx),
@@ -404,6 +494,56 @@ impl Community {
             });
         });
         self.remove_dialog(ui, t, ctx);
+    }
+
+    fn groups_grid(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+        let groups = ctx.state.group_list();
+        ui.horizontal(|ui| {
+            ui.label(w::text_bold(format!("{}  {}", icons::USERS_THREE, w::sentence_case(t!("GROUP CHATS"))), 15.0, t.text));
+            ui.label(w::text_bold(groups.len().to_string(), 13.0, t.accent));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if w::button(ui, t, Some(icons::PLUS), t!("Create group chat"), w::Kind::Primary, w::Size::Sm).clicked() {
+                    self.group_ui.open_create();
+                }
+                if w::button(ui, t, Some(icons::LINK), t!("Join by invite link"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                    self.group_ui.open_join_link();
+                }
+            });
+        });
+        ui.add_space(12.0);
+        if groups.is_empty() {
+            w::empty(ui, t, icons::USERS_THREE, t!("No group chats yet"), t!("Start a group chat with friends or join via an invite link."));
+            return;
+        }
+        for g in groups {
+            let name = ctx.state.group_display_name(g);
+            let unread = g.unread_count();
+            egui::Frame::new().fill(t.raised).corner_radius(t.corner_small()).inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
+                ui.set_width(ui.available_width().min(720.0));
+                ui.horizontal(|ui| {
+                    group_chat::group_avatar(ui, t, g, &name, 42.0);
+                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(w::text_semibold(&name, 14.5, t.text));
+                        let members = t!("{n} members", n = g.active_member_count.max(g.members.len() as u32));
+                        let channels = t!("{n} channels", n = g.rooms.len());
+                        let sub = if g.tagline.is_empty() { format!("{members} · {channels}") } else { format!("{} · {members}", g.tagline) };
+                        ui.label(w::text(sub, 12.5, t.text_dim));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if w::button(ui, t, Some(icons::CHAT), t!("Open"), w::Kind::Primary, w::Size::Sm).clicked() {
+                            self.selected = Some(ChatTarget::Group(g.id));
+                            self.group_ui.chat_id = None;
+                        }
+                        if unread > 0 {
+                            w::pill(ui, &t!("{n} unread", n = unread), t.on_accent, t.accent);
+                        }
+                    });
+                });
+            });
+            ui.add_space(8.0);
+        }
     }
 
     fn friends_grid(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, total: usize) {
@@ -668,7 +808,7 @@ mod tests {
         let t = Theme::default();
         let mut state = State::default();
         let friend: SteamId = 76561197960287930;
-        state.chats.insert(friend, (0..30).map(|i| model::ChatMessage { friend, from: friend, text: format!("message {i}"), time: 1_700_000_000 + i * 600, invite: (i % 7 == 0).then(|| model::GameInvite { app_id: 477160, connect: "+connect_lobby 1".into() }) }).collect());
+        state.chats.insert(friend, (0..30).map(|i| model::ChatMessage { friend, from: friend, text: format!("message {i}"), time: 1_700_000_000 + i * 600, invite: (i % 7 == 0).then(|| model::GameInvite { app_id: 477160, connect: "+connect_lobby 1".into() }), group_invite: None }).collect());
         let mut input = String::new();
         let mut heights = Vec::new();
         for frame in 0..40 {

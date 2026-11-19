@@ -155,12 +155,12 @@ Details: [steam-compatibility.md](steam-compatibility.md).
 | Exact interface layouts for SDK 1.3x–1.6x (91 versions, both bitnesses) | Done |
 | `ISteamNetworkingSockets` / `ISteamNetworkingMessages` with players on the official client | Partly: Valve's protocol (Steam-signed certificates, rendezvous, encrypted SNP) over direct ICE connections, which official players allow for friends. No Steam Datagram Relay, which the official client uses for strangers. Not yet tested against an official player |
 | `ISteamNetworkingSockets`, `ISteamNetworkingMessages` between Aurora players | Done, on Valve's protocol over ICE (P2P; connecting by IP to dedicated servers isn't possible) |
-| Workshop (`ISteamUGC`): queries, subscriptions, votes, favorites, downloads | Done. Publishing items isn't supported |
-| Inventory (`ISteamInventory`): items, drops, promos, crafting, properties | Done. Item definitions don't load yet; no purchases |
+| Workshop (`ISteamUGC`): queries, subscriptions, votes, favorites, downloads, publishing/updating | Done (publishing supports create, metadata/tags/visibility, preview & single-file cloud content, delete; multi-file depot uploads not yet supported) |
+| Inventory (`ISteamInventory`): items, drops, promos, crafting, properties, item definitions | Done (item definitions load via CM / Web API with local digest cache; no purchases) |
 | Server browser (`ISteamMatchmakingServers`): internet and LAN lists, ping, players, rules | Done |
 | Screenshots (`ISteamScreenshots`) into the Steam screenshot folder | Done. Not uploaded |
-| Steam Input on Xbox-style pads with the game's bindings | Done. No gyro, trackpads or binding panel |
-| Hosting game servers (`ISteamGameServer`) | Not yet: needs a game-server sign-in to Steam |
+| Steam Input on Xbox-style pads with the game's bindings, plus SDL3 gyro/accel (`GetMotionData`) | Done. No trackpads or binding panel |
+| Hosting game servers (`ISteamGameServer`, `ISteamGameServerStats`) | Partly: local/listen server lifecycle, metadata, A2S_INFO/PLAYER/RULES responder, fail-closed Steam auth ticket validation and server stats; public master-server registration needs a separate Steam GS connection |
 
 ## Shift+Tab overlay
 

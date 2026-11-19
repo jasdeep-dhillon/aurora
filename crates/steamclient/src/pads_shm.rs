@@ -87,11 +87,17 @@ pub struct Slot {
     /// X | Y << 16, XInput's sign (Y up is positive).
     left: AtomicU32,
     right: AtomicU32,
+    /// Bit 0: has motion sensor (gyro/accel) data.
+    motion_flags: AtomicU32,
+    /// Accelerometer (m/s^2) as f32 bit patterns.
+    accel: [AtomicU32; 3],
+    /// Gyroscope (rad/s) as f32 bit patterns.
+    gyro: [AtomicU32; 3],
     /// Low-frequency motor | high-frequency motor << 16, set by the game.
     pub rumble: AtomicU32,
 }
 
-/// One pad's state, in XINPUT_GAMEPAD terms.
+/// One pad's state, in XINPUT_GAMEPAD terms, plus optional SDL3 motion sensors.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct State {
     pub packet: u32,
@@ -102,6 +108,25 @@ pub struct State {
     pub ly: i16,
     pub rx: i16,
     pub ry: i16,
+    pub has_motion: bool,
+    /// Accelerometer (m/s^2) stored as f32 bit patterns so `State` stays `Eq`.
+    pub accel_bits: [u32; 3],
+    /// Gyroscope (rad/s) stored as f32 bit patterns so `State` stays `Eq`.
+    pub gyro_bits: [u32; 3],
+}
+
+impl State {
+    pub fn accel(&self) -> [f32; 3] {
+        [f32::from_bits(self.accel_bits[0]), f32::from_bits(self.accel_bits[1]), f32::from_bits(self.accel_bits[2])]
+    }
+    pub fn gyro(&self) -> [f32; 3] {
+        [f32::from_bits(self.gyro_bits[0]), f32::from_bits(self.gyro_bits[1]), f32::from_bits(self.gyro_bits[2])]
+    }
+    pub fn set_motion(&mut self, accel: [f32; 3], gyro: [f32; 3]) {
+        self.has_motion = true;
+        self.accel_bits = [accel[0].to_bits(), accel[1].to_bits(), accel[2].to_bits()];
+        self.gyro_bits = [gyro[0].to_bits(), gyro[1].to_bits(), gyro[2].to_bits()];
+    }
 }
 
 fn pair(a: i16, b: i16) -> u32 {
@@ -121,6 +146,11 @@ impl Slot {
         self.triggers.store(s0.lt as u32 | (s0.rt as u32) << 8, Ordering::Relaxed);
         self.left.store(pair(s0.lx, s0.ly), Ordering::Relaxed);
         self.right.store(pair(s0.rx, s0.ry), Ordering::Relaxed);
+        self.motion_flags.store(s0.has_motion as u32, Ordering::Relaxed);
+        for i in 0..3 {
+            self.accel[i].store(s0.accel_bits[i], Ordering::Relaxed);
+            self.gyro[i].store(s0.gyro_bits[i], Ordering::Relaxed);
+        }
         self.seq.store((seq | 1).wrapping_add(1), Ordering::Release);
     }
 
@@ -143,6 +173,17 @@ impl Slot {
                 ly: (l >> 16) as u16 as i16,
                 rx: r as u16 as i16,
                 ry: (r >> 16) as u16 as i16,
+                has_motion: self.motion_flags.load(Ordering::Relaxed) != 0,
+                accel_bits: [
+                    self.accel[0].load(Ordering::Relaxed),
+                    self.accel[1].load(Ordering::Relaxed),
+                    self.accel[2].load(Ordering::Relaxed),
+                ],
+                gyro_bits: [
+                    self.gyro[0].load(Ordering::Relaxed),
+                    self.gyro[1].load(Ordering::Relaxed),
+                    self.gyro[2].load(Ordering::Relaxed),
+                ],
             };
             fence(Ordering::Acquire);
             if self.seq.load(Ordering::Relaxed) == before {
@@ -311,7 +352,7 @@ mod tests {
     fn slot_round_trip() {
         let slot: Slot = unsafe { std::mem::zeroed() };
         assert_eq!(slot.read(), None);
-        let s = State { packet: 7, buttons: 0x1000 | GUIDE, lt: 255, rt: 1, lx: -32768, ly: 32767, rx: -1, ry: 0 };
+        let s = State { packet: 7, buttons: 0x1000 | GUIDE, lt: 255, rt: 1, lx: -32768, ly: 32767, rx: -1, ry: 0, ..Default::default() };
         slot.write(Some(s));
         assert_eq!(slot.read(), Some(s));
         slot.write(None);
@@ -396,5 +437,17 @@ mod tests {
 
         assert!(open_shm("Global\\sir-pads-1234").is_none());
         assert!(open_shm("Local\\other-1234").is_none());
+    }
+
+    #[test]
+    fn slot_motion_round_trip() {
+        let slot: Slot = unsafe { std::mem::zeroed() };
+        let mut s = State { packet: 7, buttons: 0x1000, ..Default::default() };
+        s.set_motion([0.0, 9.80665, 0.5], [0.25, -0.5, 1.0]);
+        slot.write(Some(s));
+        let got = slot.read().expect("slot should be connected");
+        assert!(got.has_motion);
+        assert_eq!(got.accel(), [0.0, 9.80665, 0.5]);
+        assert_eq!(got.gyro(), [0.25, -0.5, 1.0]);
     }
 }

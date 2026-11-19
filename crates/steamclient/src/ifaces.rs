@@ -23,7 +23,10 @@ pub fn imp(kind: &str, name: &str) -> Option<Fp> {
             Some($f as Fp)
         };
     }
-    if let Some(f) = crate::extras::imp(kind, name).or_else(|| crate::sns::imp(kind, name)) {
+    if let Some(f) = crate::extras::imp(kind, name)
+        .or_else(|| crate::sns::imp(kind, name))
+        .or_else(|| crate::gameserver::imp(kind, name))
+    {
         return Some(f);
     }
     match (kind, name) {
@@ -275,13 +278,13 @@ extern "C" fn u_level(_t: This) -> i32 {
     with_session(|s| s.level as i32).unwrap_or(0)
 }
 /// EUserHasLicenseForAppResult: 0 has it, 1 doesn't, 2 can't tell.
-extern "C" fn u_has_license(_t: This, user: u64, app: u32) -> i32 {
+pub(crate) extern "C" fn u_has_license(_t: This, user: u64, app: u32) -> i32 {
     with_session(|s| if user != s.steam_id { 2 } else if s.app_id == app || s.owned.contains(&app) { 0 } else { 1 }).unwrap_or(2)
 }
 /// GetAuthSessionTicket(buffer, size, *written[, identity]): a ticket the
 /// game hands its server (or EOS), which checks it with Steam. Steam must
 /// accept the ticket list first; GetAuthSessionTicketResponse_t says when.
-extern "C" fn u_auth_ticket(_t: This, buf: *mut u8, max: i32, len: *mut u32) -> u32 {
+pub(crate) extern "C" fn u_auth_ticket(_t: This, buf: *mut u8, max: i32, len: *mut u32) -> u32 {
     put(len, 0);
     let Some(Reply::Ticket { ticket, crc, seq }) = crate::ipc::request(Request::AuthTicket { identity: String::new() }) else {
         crate::log!("no auth ticket");
@@ -338,14 +341,14 @@ extern "C" fn u_web_api_ticket(_t: This, identity: *const c_char) -> u32 {
     });
     handle
 }
-extern "C" fn u_cancel_ticket(_t: This, handle: u32) {
+pub(crate) extern "C" fn u_cancel_ticket(_t: This, handle: u32) {
     if let Some(crc) = lock().tickets.remove(&handle) {
         std::thread::spawn(move || crate::ipc::request(Request::CancelTicket { crc }));
     }
 }
 /// BeginAuthSession(ticket, size, player): we're the host checking a
 /// player's ticket; the verdict comes in ValidateAuthTicketResponse_t.
-extern "C" fn u_begin_auth(_t: This, ticket: *const u8, len: i32, user: u64) -> i32 {
+pub(crate) extern "C" fn u_begin_auth(_t: This, ticket: *const u8, len: i32, user: u64) -> i32 {
     if ticket.is_null() || len <= 0 || len > 8192 {
         return 1; // k_EBeginAuthSessionResultInvalidTicket
     }
@@ -362,7 +365,7 @@ extern "C" fn u_begin_auth(_t: This, ticket: *const u8, len: i32, user: u64) -> 
     });
     0 // k_EBeginAuthSessionResultOK
 }
-extern "C" fn u_end_auth(_t: This, user: u64) {
+pub(crate) extern "C" fn u_end_auth(_t: This, user: u64) {
     std::thread::spawn(move || crate::ipc::request(Request::EndAuth { steam_id: user }));
 }
 extern "C" fn u_request_encrypted_ticket(_t: This, data: *const c_void, len: i32) -> u64 {

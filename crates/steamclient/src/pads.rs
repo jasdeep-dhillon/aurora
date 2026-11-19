@@ -191,6 +191,14 @@ pub fn rumble(i: usize, low: u16, high: u16) {
     }
 }
 
+/// Motion sensors (accel in m/s^2, gyro in rad/s) for XInput slot `i`, when
+/// backed by an SDL3 pad that exposes IMU sensors.
+pub fn motion(i: usize) -> Option<([f32; 3], [f32; 3])> {
+    let (s, k) = shared_at(i)?;
+    let st = s.slots[k].read()?;
+    st.has_motion.then(|| (st.accel(), st.gyro()))
+}
+
 // ------------------------------------------------------- the game's XInput
 
 fn get_state(i: u32, out: *mut Pad, ex: bool) -> u32 {

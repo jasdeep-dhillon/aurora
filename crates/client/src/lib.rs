@@ -30,6 +30,7 @@ pub mod game_inventory;
 pub mod game_servers;
 mod input_config;
 pub mod account;
+pub mod chat_groups;
 mod notify;
 mod pads;
 
@@ -51,7 +52,10 @@ pub use launch::{LaunchArgs, LaunchMode, STEAM_DRM, anti_cheat_headless, mode as
 pub use state::State;
 pub use store::SavedAccount;
 
-use model::{AppId, ChatMessage, OwnedApp, Persona, PersonaState, ProfileInfo, Relationship, SteamId};
+use model::{
+    AppId, ChatGroup, ChatGroupMember, ChatMessage, ChatRoomChannel, ChatRoomId, GroupBanInfo, GroupChatId, GroupInviteInfo, GroupInviteLink,
+    GroupInviteRef, GroupMessage, OwnedApp, Persona, PersonaState, ProfileInfo, Relationship, SteamId,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -121,6 +125,36 @@ pub enum Command {
     Typing { to: SteamId },
     /// Fetch recent chat history with a friend.
     LoadHistory { friend: SteamId },
+    /// Load all group chats you belong to.
+    LoadChatGroups,
+    /// Mark a group chat as active in this session and fetch its full state (channels, members, roles).
+    OpenChatGroup { group_id: GroupChatId },
+    /// Fetch message history for a group chat channel (`before`: `(server_timestamp, ordinal)` for older messages).
+    LoadGroupHistory { group_id: GroupChatId, chat_id: ChatRoomId, before: Option<(u32, u32)> },
+    SendGroupMessage { group_id: GroupChatId, chat_id: ChatRoomId, text: String },
+    AckGroupMessage { group_id: GroupChatId, chat_id: ChatRoomId, timestamp: u32 },
+    /// Create a new group chat with optional initial name and invited friends.
+    CreateChatGroup { name: Option<String>, invitees: Vec<SteamId> },
+    InviteToChatGroup { group_id: GroupChatId, chat_id: Option<ChatRoomId>, friend: SteamId },
+    JoinChatGroup { group_id: Option<GroupChatId>, chat_id: Option<ChatRoomId>, invite_code: Option<String> },
+    LeaveChatGroup { group_id: GroupChatId },
+    SaveChatGroup { group_id: GroupChatId, name: String },
+    RenameChatGroup { group_id: GroupChatId, name: String },
+    SetChatGroupTagline { group_id: GroupChatId, tagline: String },
+    CreateChatChannel { group_id: GroupChatId, name: String, allow_voice: bool },
+    RenameChatChannel { group_id: GroupChatId, chat_id: ChatRoomId, name: String },
+    DeleteChatChannel { group_id: GroupChatId, chat_id: ChatRoomId },
+    CreateGroupInviteLink { group_id: GroupChatId, chat_id: Option<ChatRoomId>, seconds_valid: u32 },
+    LoadGroupInviteLinks { group_id: GroupChatId },
+    DeleteGroupInviteLink { group_id: GroupChatId, code: String },
+    ResolveGroupInvite { invite: GroupInviteRef },
+    KickGroupMember { group_id: GroupChatId, steam_id: SteamId, expiration_secs: i32 },
+    BanGroupMember { group_id: GroupChatId, steam_id: SteamId, ban: bool },
+    LoadGroupBanList { group_id: GroupChatId },
+    UpdateGroupReaction { group_id: GroupChatId, chat_id: ChatRoomId, timestamp: u32, ordinal: u32, reaction_type: i32, reaction: String, add: bool },
+    DeleteGroupMessages { group_id: GroupChatId, chat_id: ChatRoomId, messages: Vec<(u32, u32)> },
+    SetGroupNotificationPrefs { group_id: GroupChatId, unread_muted: bool, desktop_level: Option<i32> },
+    SearchGroupMembers { group_id: GroupChatId, query: String },
     /// Fetch someone's profile background, frame and bio.
     LoadProfile { steam_id: SteamId },
     /// Fetch one game's inventory for an account (753/6 is the Steam
@@ -290,6 +324,32 @@ impl std::fmt::Debug for Command {
             Command::QueryServer { addr } => f.debug_struct("QueryServer").field("addr", addr).finish(),
             Command::Typing { to } => f.debug_struct("Typing").field("to", to).finish(),
             Command::LoadHistory { friend } => f.debug_struct("LoadHistory").field("friend", friend).finish(),
+            Command::LoadChatGroups => f.write_str("LoadChatGroups"),
+            Command::OpenChatGroup { group_id } => f.debug_struct("OpenChatGroup").field("group_id", group_id).finish(),
+            Command::LoadGroupHistory { group_id, chat_id, before } => f.debug_struct("LoadGroupHistory").field("group_id", group_id).field("chat_id", chat_id).field("before", before).finish(),
+            Command::SendGroupMessage { group_id, chat_id, text } => f.debug_struct("SendGroupMessage").field("group_id", group_id).field("chat_id", chat_id).field("text", text).finish(),
+            Command::AckGroupMessage { group_id, chat_id, timestamp } => f.debug_struct("AckGroupMessage").field("group_id", group_id).field("chat_id", chat_id).field("timestamp", timestamp).finish(),
+            Command::CreateChatGroup { name, invitees } => f.debug_struct("CreateChatGroup").field("name", name).field("invitees", invitees).finish(),
+            Command::InviteToChatGroup { group_id, chat_id, friend } => f.debug_struct("InviteToChatGroup").field("group_id", group_id).field("chat_id", chat_id).field("friend", friend).finish(),
+            Command::JoinChatGroup { group_id, chat_id, invite_code } => f.debug_struct("JoinChatGroup").field("group_id", group_id).field("chat_id", chat_id).field("invite_code", invite_code).finish(),
+            Command::LeaveChatGroup { group_id } => f.debug_struct("LeaveChatGroup").field("group_id", group_id).finish(),
+            Command::SaveChatGroup { group_id, name } => f.debug_struct("SaveChatGroup").field("group_id", group_id).field("name", name).finish(),
+            Command::RenameChatGroup { group_id, name } => f.debug_struct("RenameChatGroup").field("group_id", group_id).field("name", name).finish(),
+            Command::SetChatGroupTagline { group_id, tagline } => f.debug_struct("SetChatGroupTagline").field("group_id", group_id).field("tagline", tagline).finish(),
+            Command::CreateChatChannel { group_id, name, allow_voice } => f.debug_struct("CreateChatChannel").field("group_id", group_id).field("name", name).field("allow_voice", allow_voice).finish(),
+            Command::RenameChatChannel { group_id, chat_id, name } => f.debug_struct("RenameChatChannel").field("group_id", group_id).field("chat_id", chat_id).field("name", name).finish(),
+            Command::DeleteChatChannel { group_id, chat_id } => f.debug_struct("DeleteChatChannel").field("group_id", group_id).field("chat_id", chat_id).finish(),
+            Command::CreateGroupInviteLink { group_id, chat_id, seconds_valid } => f.debug_struct("CreateGroupInviteLink").field("group_id", group_id).field("chat_id", chat_id).field("seconds_valid", seconds_valid).finish(),
+            Command::LoadGroupInviteLinks { group_id } => f.debug_struct("LoadGroupInviteLinks").field("group_id", group_id).finish(),
+            Command::DeleteGroupInviteLink { group_id, code } => f.debug_struct("DeleteGroupInviteLink").field("group_id", group_id).field("code", code).finish(),
+            Command::ResolveGroupInvite { invite } => f.debug_struct("ResolveGroupInvite").field("invite", invite).finish(),
+            Command::KickGroupMember { group_id, steam_id, expiration_secs } => f.debug_struct("KickGroupMember").field("group_id", group_id).field("steam_id", steam_id).field("expiration_secs", expiration_secs).finish(),
+            Command::BanGroupMember { group_id, steam_id, ban } => f.debug_struct("BanGroupMember").field("group_id", group_id).field("steam_id", steam_id).field("ban", ban).finish(),
+            Command::LoadGroupBanList { group_id } => f.debug_struct("LoadGroupBanList").field("group_id", group_id).finish(),
+            Command::UpdateGroupReaction { group_id, chat_id, timestamp, ordinal, reaction_type, reaction, add } => f.debug_struct("UpdateGroupReaction").field("group_id", group_id).field("chat_id", chat_id).field("timestamp", timestamp).field("ordinal", ordinal).field("reaction_type", reaction_type).field("reaction", reaction).field("add", add).finish(),
+            Command::DeleteGroupMessages { group_id, chat_id, messages } => f.debug_struct("DeleteGroupMessages").field("group_id", group_id).field("chat_id", chat_id).field("messages", messages).finish(),
+            Command::SetGroupNotificationPrefs { group_id, unread_muted, desktop_level } => f.debug_struct("SetGroupNotificationPrefs").field("group_id", group_id).field("unread_muted", unread_muted).field("desktop_level", desktop_level).finish(),
+            Command::SearchGroupMembers { group_id, query } => f.debug_struct("SearchGroupMembers").field("group_id", group_id).field("query", query).finish(),
             Command::LoadProfile { steam_id } => f.debug_struct("LoadProfile").field("steam_id", steam_id).finish(),
             Command::LoadInventory { steam_id, app_id, context_id, language } => f.debug_struct("LoadInventory").field("steam_id", steam_id).field("app_id", app_id).field("context_id", context_id).field("language", language).finish(),
             Command::SendTradeOffer { partner, token, message, give, take } => f.debug_struct("SendTradeOffer").field("partner", partner).field("token", &token.as_ref().map(|_| "[REDACTED]")).field("message", message).field("give", give).field("take", take).finish(),
@@ -437,6 +497,23 @@ pub enum Event {
     Message(ChatMessage),
     Typing { from: SteamId },
     History { friend: SteamId, messages: Vec<ChatMessage> },
+    ChatGroups(Vec<ChatGroup>),
+    ChatGroupUpdated(ChatGroup),
+    GroupHeaderUpdated(ChatGroup),
+    GroupMembersUpdated { group_id: GroupChatId, members: Vec<ChatGroupMember>, total: Option<u32>, virtualized: bool },
+    ChatGroupRemoved(GroupChatId),
+    GroupJoined(GroupChatId),
+    GroupHistory { group_id: GroupChatId, chat_id: ChatRoomId, prepend: bool, more: bool, messages: Vec<GroupMessage> },
+    GroupMessage(GroupMessage),
+    GroupMessageDeleted { group_id: GroupChatId, chat_id: ChatRoomId, messages: Vec<(u32, u32)> },
+    GroupMessageReaction { group_id: GroupChatId, chat_id: ChatRoomId, timestamp: u32, ordinal: u32, reaction_type: i32, reaction: String, reactor: SteamId, is_add: bool },
+    GroupAck { group_id: GroupChatId, chat_id: ChatRoomId, timestamp: u32 },
+    GroupMemberChanged { group_id: GroupChatId, member: ChatGroupMember, change: i32 },
+    GroupRoomsChanged { group_id: GroupChatId, default_chat_id: ChatRoomId, rooms: Vec<ChatRoomChannel> },
+    GroupInviteResolved { key: String, result: Result<GroupInviteInfo, String> },
+    GroupInviteLinks { group_id: GroupChatId, result: Result<Vec<GroupInviteLink>, String> },
+    GroupBanList { group_id: GroupChatId, result: Result<Vec<GroupBanInfo>, String> },
+    GroupMemberSearch { group_id: GroupChatId, results: Vec<Persona> },
     /// Your Steam level.
     Level(u32),
     /// Steam Wallet balance in cents, with Steam's currency code.
