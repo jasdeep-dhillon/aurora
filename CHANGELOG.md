@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.9.2](https://github.com/mollie2999/Aurora/compare/v0.9.1...v0.9.2) (2026-11-19)
+
+### New
+
+* **In-game overlay renderers:** added in-process overlay support for D3D12, D3D9, OpenGL, and Vulkan on Windows, plus a Linux Vulkan implicit layer for anti-cheat Proton games ([#55](https://github.com/mollie2999/Aurora/pull/55)) ([41b96e9](https://github.com/mollie2999/Aurora/commit/41b96e9)).
+* **Steam group chats:** added Steam group chat support across Community, the Friends window, and the in-game overlay ([#51](https://github.com/mollie2999/Aurora/pull/51)) ([7c66fcc](https://github.com/mollie2999/Aurora/commit/7c66fcc)).
+* **Steam Family & taskbar progress:** added native Steam Family management and Windows taskbar download progress ([#53](https://github.com/mollie2999/Aurora/pull/53)) ([c426636](https://github.com/mollie2999/Aurora/commit/c426636)).
+* **In-game Steam APIs & SDL3 motion:** added `ISteamInventory` definitions, `ISteamUGC` publishing, `ISteamGameServer`, and SDL3 gyro/accelerometer motion support ([#54](https://github.com/mollie2999/Aurora/pull/54)) ([b776af5](https://github.com/mollie2999/Aurora/commit/b776af5)).
+* **Bundled SDL3 (`3.4.18`):** `cargo xtask package` now bundles the official `SDL3.dll` (with `SDL3-LICENSE.txt` under the zlib license) by default so DualSense, Switch, and other non-Xbox controllers work out of the box ([3c050f3](https://github.com/mollie2999/Aurora/commit/3c050f3)).
+
+### Security & hardening
+
+* **Keyring & offline playtime:** added `0600` file-permission fallback/migration for keyring storage and hardened offline playtime tracking ([#52](https://github.com/mollie2999/Aurora/pull/52)) ([adcbb76](https://github.com/mollie2999/Aurora/commit/adcbb76)).
+
+### Fixes
+
+* **Aurora logo:** restored the `egui_extras` SVG loader for the Aurora logo ([#50](https://github.com/mollie2999/Aurora/pull/50)) ([2bd9422](https://github.com/mollie2999/Aurora/commit/2bd9422)).
+* **Overlay & packaging:** fixed Linux Vulkan `BadWindow` handling on game exit, fullscreen fallback overlay on Linux, and enabled `Win32_Security` in `steamclient` for 32-bit Windows builds ([1eafa22](https://github.com/mollie2999/Aurora/commit/1eafa22)).
+
 ## [0.9.1](https://github.com/mollie2999/Aurora/compare/v0.9.0...v0.9.1) (2026-11-18)
 
 **Aurora 0.9.1 is a critical security update.** It hardens game launches, downloads, networking, Steam Cloud, plugins, web links, local storage and IPC across Aurora and `steamhost`. Everyone should update as soon as possible.
