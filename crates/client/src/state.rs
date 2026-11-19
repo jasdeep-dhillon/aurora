@@ -1,7 +1,10 @@
 //! A snapshot of the session built purely from [`Event`]s.
 
 use crate::{Event, Guard};
-use model::{AppId, ChatMessage, OwnedApp, Persona, ProfileInfo, Relationship, SteamId};
+use model::{
+    AppId, ChatGroup, ChatMessage, ChatRoomId, GroupBanInfo, GroupChatId, GroupInviteInfo, GroupInviteLink, GroupMessage, OwnedApp, Persona,
+    ProfileInfo, Relationship, SteamId, steam_id_to_account,
+};
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -91,6 +94,20 @@ pub struct State {
     pub unread: HashMap<SteamId, usize>,
     /// When each friend last sent a typing notice (unix seconds).
     pub typing: HashMap<SteamId, u64>,
+    /// Joined Steam group chats keyed by `chat_group_id`.
+    pub chat_groups: BTreeMap<GroupChatId, ChatGroup>,
+    /// Group chat channel histories by `(chat_group_id, chat_id)`.
+    pub group_messages: HashMap<(GroupChatId, ChatRoomId), Vec<GroupMessage>>,
+    /// Whether older history pages exist for `(chat_group_id, chat_id)`.
+    pub group_more_history: HashMap<(GroupChatId, ChatRoomId), bool>,
+    /// Resolved group invite previews keyed by `GroupInviteRef::key()`.
+    pub group_invite_previews: HashMap<String, Result<GroupInviteInfo, String>>,
+    /// Active invite links per group.
+    pub group_invite_links: HashMap<GroupChatId, Result<Vec<GroupInviteLink>, String>>,
+    /// Ban lists per group.
+    pub group_bans: HashMap<GroupChatId, Result<Vec<GroupBanInfo>, String>>,
+    /// Member search results for large/virtualized groups.
+    pub group_member_search: HashMap<GroupChatId, Vec<Persona>>,
     pub playing: Option<AppId>,
     /// The running game's lobby, if it's in one ("Invite to lobby").
     pub game_lobby: Option<u64>,
@@ -322,6 +339,219 @@ impl State {
                 merged.extend(chat.iter().filter(|m| m.time > newest_loaded).cloned());
                 *chat = merged;
             }
+            Event::ChatGroups(list) => {
+                let mut next = BTreeMap::new();
+                for g in list {
+                    let mut merged = g.clone();
+                    if let Some(prev) = self.chat_groups.get(&g.id) {
+                        merge_group(&mut merged, prev, true);
+                    }
+                    next.insert(merged.id, merged);
+                }
+                self.chat_groups = next;
+            }
+            Event::ChatGroupUpdated(g) => {
+                let entry = self.chat_groups.entry(g.id).or_default();
+                let prev = entry.clone();
+                let mut merged = g.clone();
+                merge_group(&mut merged, &prev, false);
+                *entry = merged;
+            }
+            Event::GroupHeaderUpdated(g) => {
+                let entry = self.chat_groups.entry(g.id).or_insert_with(|| ChatGroup { id: g.id, ..Default::default() });
+                entry.name = g.name.clone();
+                entry.tagline = g.tagline.clone();
+                entry.avatar_url = g.avatar_url.clone();
+                if g.owner_id != 0 {
+                    entry.owner_id = g.owner_id;
+                }
+                entry.clan_id = g.clan_id;
+                entry.app_id = g.app_id;
+                if g.default_role_id != 0 {
+                    entry.default_role_id = g.default_role_id;
+                }
+                if !g.roles.is_empty() {
+                    entry.roles = g.roles.clone();
+                }
+                if !g.role_actions.is_empty() {
+                    entry.role_actions = g.role_actions.clone();
+                }
+            }
+            Event::GroupMembersUpdated { group_id, members, total, virtualized } => {
+                let entry = self.chat_groups.entry(*group_id).or_insert_with(|| ChatGroup { id: *group_id, ..Default::default() });
+                entry.members = members.clone();
+                entry.virtualized_members = *virtualized;
+                if let Some(n) = total {
+                    entry.active_member_count = *n;
+                }
+            }
+            Event::ChatGroupRemoved(id) => {
+                self.chat_groups.remove(id);
+                self.group_invite_links.remove(id);
+                self.group_bans.remove(id);
+                self.group_member_search.remove(id);
+                self.group_messages.retain(|(gid, _), _| gid != id);
+                self.group_more_history.retain(|(gid, _), _| gid != id);
+            }
+            Event::GroupJoined(_) => {}
+            Event::GroupHistory { group_id, chat_id, prepend, more, messages } => {
+                self.group_more_history.insert((*group_id, *chat_id), *more);
+                let chat = self.group_messages.entry((*group_id, *chat_id)).or_default();
+                let mut merged = if *prepend {
+                    let mut all = messages.clone();
+                    for existing in chat.iter() {
+                        if !all.iter().any(|m| same_group_msg(m, existing)) {
+                            all.push(existing.clone());
+                        }
+                    }
+                    all
+                } else {
+                    let newest_loaded = messages.last().map(|m| (m.time, m.ordinal)).unwrap_or((0, 0));
+                    let mut all = messages.clone();
+                    for existing in chat.iter() {
+                        if (existing.time, existing.ordinal) > newest_loaded && !all.iter().any(|m| same_group_msg(m, existing)) {
+                            all.push(existing.clone());
+                        }
+                    }
+                    all
+                };
+                merged.sort_by_key(|m| (m.time, m.ordinal));
+                *chat = merged;
+            }
+            Event::GroupMessage(m) => {
+                let chat = self.group_messages.entry((m.group_id, m.chat_id)).or_default();
+                let is_new = !chat.iter().rev().take(10).any(|c| same_group_msg(c, m));
+                if is_new {
+                    chat.push(m.clone());
+                    chat.sort_by_key(|x| (x.time, x.ordinal));
+                }
+                if let Some(g) = self.chat_groups.get_mut(&m.group_id) {
+                    let group_muted = g.unread_muted;
+                    if let Some(ch) = g.channel_mut(m.chat_id) {
+                        ch.time_last_message = ch.time_last_message.max(m.time as u32);
+                        ch.accountid_last_message = steam_id_to_account(m.from);
+                        if !m.text.is_empty() {
+                            ch.last_message = m.text.clone();
+                        }
+                        if m.from == self.steam_id {
+                            ch.time_last_ack = ch.time_last_ack.max(m.time as u32);
+                            ch.unread = 0;
+                        } else if is_new && m.server_msg.is_none() && !group_muted && !ch.unread_muted {
+                            ch.unread += 1;
+                        }
+                    }
+                }
+            }
+            Event::GroupMessageDeleted { group_id, chat_id, messages } => {
+                if let Some(list) = self.group_messages.get_mut(&(*group_id, *chat_id)) {
+                    for msg in list {
+                        if messages.iter().any(|&(t, o)| msg.time as u32 == t && msg.ordinal == o) {
+                            msg.deleted = true;
+                        }
+                    }
+                }
+            }
+            Event::GroupMessageReaction { group_id, chat_id, timestamp, ordinal, reaction_type, reaction, reactor, is_add } => {
+                if let Some(list) = self.group_messages.get_mut(&(*group_id, *chat_id)) {
+                    if let Some(msg) = list.iter_mut().find(|m| m.time as u32 == *timestamp && m.ordinal == *ordinal) {
+                        let mine = *reactor == self.steam_id;
+                        if let Some(r) = msg.reactions.iter_mut().find(|r| r.reaction_type == *reaction_type && r.reaction == *reaction) {
+                            if *is_add {
+                                if !mine || !r.reacted {
+                                    r.count = r.count.saturating_add(1);
+                                }
+                                if mine {
+                                    r.reacted = true;
+                                }
+                            } else {
+                                if !mine || r.reacted {
+                                    r.count = r.count.saturating_sub(1);
+                                }
+                                if mine {
+                                    r.reacted = false;
+                                }
+                            }
+                            msg.reactions.retain(|r| r.count > 0);
+                        } else if *is_add {
+                            msg.reactions.push(model::MessageReaction {
+                                reaction_type: *reaction_type,
+                                reaction: reaction.clone(),
+                                count: 1,
+                                reacted: mine,
+                            });
+                        }
+                    }
+                }
+            }
+            Event::GroupAck { group_id, chat_id, timestamp } => {
+                if let Some(ch) = self.chat_groups.get_mut(group_id).and_then(|g| g.channel_mut(*chat_id)) {
+                    ch.time_last_ack = ch.time_last_ack.max(*timestamp);
+                    ch.unread = 0;
+                }
+            }
+            Event::GroupMemberChanged { group_id, member, change } => {
+                if let Some(g) = self.chat_groups.get_mut(group_id) {
+                    // 2 = Parted, 3 = Kicked, 10 = Banned
+                    if matches!(change, 2 | 3 | 10) {
+                        if member.steam_id == self.steam_id {
+                            self.chat_groups.remove(group_id);
+                        } else {
+                            let before = g.members.len();
+                            g.members.retain(|m| m.steam_id != member.steam_id);
+                            if g.members.len() < before {
+                                g.active_member_count = g.active_member_count.saturating_sub(1);
+                            }
+                        }
+                    } else {
+                        if let Some(existing) = g.members.iter_mut().find(|m| m.steam_id == member.steam_id) {
+                            *existing = member.clone();
+                        } else {
+                            g.members.push(member.clone());
+                            g.active_member_count = g.active_member_count.max(g.members.len() as u32);
+                        }
+                        if member.steam_id == self.steam_id {
+                            g.my_rank = member.rank;
+                            g.my_role_ids = member.role_ids.clone();
+                        }
+                    }
+                }
+            }
+            Event::GroupRoomsChanged { group_id, default_chat_id, rooms } => {
+                if let Some(g) = self.chat_groups.get_mut(group_id) {
+                    let old = std::mem::take(&mut g.rooms);
+                    g.rooms = rooms
+                        .iter()
+                        .map(|r| {
+                            let mut ch = r.clone();
+                            if let Some(prev) = old.iter().find(|p| p.id == ch.id) {
+                                ch.time_last_ack = prev.time_last_ack;
+                                ch.time_first_unread = prev.time_first_unread;
+                                ch.time_last_mention = prev.time_last_mention;
+                                ch.unread_muted = prev.unread_muted;
+                                ch.unread = prev.unread;
+                            }
+                            ch
+                        })
+                        .collect();
+                    g.sort_rooms();
+                    if *default_chat_id != 0 {
+                        g.default_chat_id = *default_chat_id;
+                    }
+                    g.active_voice_member_count = g.rooms.iter().map(|r| r.members_in_voice.len() as u32).sum();
+                }
+            }
+            Event::GroupInviteResolved { key, result } => {
+                self.group_invite_previews.insert(key.clone(), result.clone());
+            }
+            Event::GroupInviteLinks { group_id, result } => {
+                self.group_invite_links.insert(*group_id, result.clone());
+            }
+            Event::GroupBanList { group_id, result } => {
+                self.group_bans.insert(*group_id, result.clone());
+            }
+            Event::GroupMemberSearch { group_id, results } => {
+                self.group_member_search.insert(*group_id, results.clone());
+            }
             // A developer attaching a game by hand: nothing to show.
             Event::GameAttached { .. } | Event::GameOverlay { .. } => {}
             Event::GameStarted { app_id } => {
@@ -417,7 +647,34 @@ impl State {
     }
 
     pub fn total_unread(&self) -> usize {
-        self.unread.values().sum()
+        self.unread.values().sum::<usize>() + self.chat_groups.values().map(ChatGroup::unread_count).sum::<usize>()
+    }
+
+    pub fn group_display_name(&self, g: &ChatGroup) -> String {
+        g.display_name(|id| self.personas.get(&id).map(|p| p.display_name()), self.steam_id)
+    }
+
+    /// Joined group chats, unread first, then saved groups, then most recently active.
+    pub fn group_list(&self) -> Vec<&ChatGroup> {
+        let mut out: Vec<&ChatGroup> = self.chat_groups.values().collect();
+        out.sort_by_key(|g| {
+            let latest = g.rooms.iter().map(|r| r.time_last_message).max().unwrap_or(0);
+            (g.unread_count() == 0, !g.is_saved(), std::cmp::Reverse(latest), self.group_display_name(g).to_lowercase())
+        });
+        out
+    }
+
+    /// Clear unread state for a channel and return the timestamp to ack on Steam.
+    pub fn mark_group_read(&mut self, group_id: GroupChatId, chat_id: ChatRoomId) -> Option<u32> {
+        let msg_ts = self.group_messages.get(&(group_id, chat_id)).and_then(|v| v.last()).map(|m| m.time as u32).unwrap_or(0);
+        let ch = self.chat_groups.get_mut(&group_id)?.channel_mut(chat_id)?;
+        let ts = ch.time_last_message.max(msg_ts);
+        let had_unread = ch.unread > 0 || (ts > ch.time_last_ack && ts > 0);
+        ch.unread = 0;
+        if ts > ch.time_last_ack {
+            ch.time_last_ack = ts;
+        }
+        (had_unread && ts > 0).then_some(ts)
     }
 
     /// True if the friend sent a typing notice in the last 8 seconds.
@@ -427,5 +684,159 @@ impl State {
 
     pub fn app_name(&self, id: AppId) -> Option<&str> {
         self.apps.as_ref().and_then(|a| a.get(&id)).map(|a| a.name.as_str()).or_else(|| self.app_names.get(&id).map(|s| s.as_str()))
+    }
+}
+
+fn same_group_msg(a: &GroupMessage, b: &GroupMessage) -> bool {
+    if a.ordinal != 0 && b.ordinal != 0 {
+        a.time == b.time && a.ordinal == b.ordinal
+    } else {
+        a.from == b.from && a.text == b.text && a.invite == b.invite && a.group_invite == b.group_invite && a.time.abs_diff(b.time) < 5
+    }
+}
+
+fn merge_group(dst: &mut ChatGroup, prev: &ChatGroup, summary_only: bool) {
+    if dst.name.is_empty() && summary_only {
+        dst.name = prev.name.clone();
+    }
+    if dst.tagline.is_empty() && !prev.tagline.is_empty() && summary_only {
+        dst.tagline = prev.tagline.clone();
+    }
+    if dst.avatar_url.is_none() {
+        dst.avatar_url = prev.avatar_url.clone();
+    }
+    if dst.owner_id == 0 {
+        dst.owner_id = prev.owner_id;
+    }
+    if dst.clan_id == 0 {
+        dst.clan_id = prev.clan_id;
+    }
+    if dst.app_id == 0 {
+        dst.app_id = prev.app_id;
+    }
+    if dst.default_chat_id == 0 {
+        dst.default_chat_id = prev.default_chat_id;
+    }
+    if dst.top_members.is_empty() {
+        dst.top_members = prev.top_members.clone();
+    }
+    if dst.members.is_empty() {
+        dst.members = prev.members.clone();
+    }
+    if dst.roles.is_empty() {
+        dst.roles = prev.roles.clone();
+    }
+    if dst.role_actions.is_empty() {
+        dst.role_actions = prev.role_actions.clone();
+    }
+    if dst.default_role_id == 0 {
+        dst.default_role_id = prev.default_role_id;
+    }
+    if dst.my_rank == 0 {
+        dst.my_rank = prev.my_rank;
+    }
+    if dst.my_role_ids.is_empty() {
+        dst.my_role_ids = prev.my_role_ids.clone();
+    }
+    if dst.time_joined == 0 {
+        dst.time_joined = prev.time_joined;
+    }
+    if dst.time_last_group_ack == 0 {
+        dst.time_last_group_ack = prev.time_last_group_ack;
+    }
+    if !summary_only && prev.unread_muted {
+        dst.unread_muted = prev.unread_muted;
+    }
+    if !summary_only && dst.desktop_notification_level == 0 {
+        dst.desktop_notification_level = prev.desktop_notification_level;
+    }
+    if dst.active_member_count == 0 {
+        dst.active_member_count = prev.active_member_count;
+    }
+    dst.full_loaded |= prev.full_loaded;
+    dst.virtualized_members |= prev.virtualized_members;
+    if dst.rooms.is_empty() {
+        dst.rooms = prev.rooms.clone();
+    } else {
+        for ch in &mut dst.rooms {
+            if let Some(old) = prev.rooms.iter().find(|r| r.id == ch.id) {
+                ch.unread = old.unread;
+                if ch.time_last_ack == 0 {
+                    ch.time_last_ack = old.time_last_ack;
+                }
+                if ch.time_first_unread == 0 {
+                    ch.time_first_unread = old.time_first_unread;
+                }
+                if ch.time_last_mention == 0 {
+                    ch.time_last_mention = old.time_last_mention;
+                }
+                if !summary_only {
+                    ch.unread_muted = old.unread_muted;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+    use model::{ChatGroup, ChatRoomChannel, GroupMessage};
+
+    #[test]
+    fn group_unread_ack_reactions_and_deletes() {
+        let mut s = State::default();
+        let me = 76561197960265729;
+        let friend = 76561197960265730;
+        s.apply(&Event::LoggedIn { steam_id: me, account: "me".into() });
+        s.apply(&Event::ChatGroups(vec![ChatGroup {
+            id: 100,
+            name: "Squad".into(),
+            default_chat_id: 1,
+            rooms: vec![ChatRoomChannel { id: 1, name: "general".into(), time_last_ack: 10, ..Default::default() }],
+            ..Default::default()
+        }]));
+
+        let msg = GroupMessage {
+            group_id: 100,
+            chat_id: 1,
+            from: friend,
+            text: "hi squad".into(),
+            time: 50,
+            ordinal: 1,
+            invite: None,
+            group_invite: None,
+            deleted: false,
+            server_msg: None,
+            reactions: Vec::new(),
+            mentioned_me: false,
+        };
+        s.apply(&Event::GroupMessage(msg.clone()));
+        // Duplicate delivery is ignored.
+        s.apply(&Event::GroupMessage(msg));
+        assert_eq!(s.group_messages.get(&(100, 1)).unwrap().len(), 1);
+        assert_eq!(s.total_unread(), 1);
+
+        // Reaction add / remove toggles count & reacted state.
+        s.apply(&Event::GroupMessageReaction {
+            group_id: 100,
+            chat_id: 1,
+            timestamp: 50,
+            ordinal: 1,
+            reaction_type: 1,
+            reaction: ":thumbsup:".into(),
+            reactor: me,
+            is_add: true,
+        });
+        let r = &s.group_messages.get(&(100, 1)).unwrap()[0].reactions[0];
+        assert_eq!((r.count, r.reacted), (1, true));
+
+        // Ack clears unread.
+        assert_eq!(s.mark_group_read(100, 1), Some(50));
+        assert_eq!(s.total_unread(), 0);
+
+        // Delete marks message deleted.
+        s.apply(&Event::GroupMessageDeleted { group_id: 100, chat_id: 1, messages: vec![(50, 1)] });
+        assert!(s.group_messages.get(&(100, 1)).unwrap()[0].deleted);
     }
 }

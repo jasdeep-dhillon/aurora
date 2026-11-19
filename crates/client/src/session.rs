@@ -383,6 +383,7 @@ struct Online {
     /// The offline cache needs writing; when it was last written.
     cache_dirty: bool,
     cache_saved: std::time::Instant,
+    active_groups: crate::chat_groups::ActiveGroups,
     /// Games whose pending Steam Cloud upload is running.
     cloud_flushing: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AppId>>>,
     /// Games compiling their shaders before launch; set to skip the rest.
@@ -496,6 +497,7 @@ async fn online(
         auto_downloads: true,
         cache_dirty: false,
         cache_saved: std::time::Instant::now(),
+        active_groups: Default::default(),
         cloud_flushing: Default::default(),
         shader_jobs: Default::default(),
         prefix_setups: Default::default(),
@@ -874,6 +876,36 @@ async fn online(
                 }
                 Some(Command::ForgetAccount { account }) => store::remove(&account),
                 Some(Command::SendMessage { to, text }) => st.send_message(to, text, sink),
+                Some(Command::LoadChatGroups) => crate::chat_groups::load_my_groups(st.conn.clone(), st.me, st.active_groups.clone(), sink.clone()),
+                Some(Command::OpenChatGroup { group_id }) => crate::chat_groups::load_group_state(st.conn.clone(), st.me, group_id, st.active_groups.clone(), sink.clone()),
+                Some(Command::LoadGroupHistory { group_id, chat_id, before }) => crate::chat_groups::load_history(st.conn.clone(), st.me, group_id, chat_id, before, sink.clone()),
+                Some(Command::SendGroupMessage { group_id, chat_id, text }) => crate::chat_groups::send_message(st.conn.clone(), st.me, group_id, chat_id, text, sink.clone()),
+                Some(Command::AckGroupMessage { group_id, chat_id, timestamp }) => crate::chat_groups::ack_message(&st.conn, group_id, chat_id, timestamp),
+                Some(Command::CreateChatGroup { name, invitees }) => crate::chat_groups::create_group(st.conn.clone(), st.me, st.active_groups.clone(), name, invitees, sink.clone()),
+                Some(Command::InviteToChatGroup { group_id, chat_id, friend }) => crate::chat_groups::invite_friend(st.conn.clone(), group_id, chat_id, friend, sink.clone()),
+                Some(Command::JoinChatGroup { group_id, chat_id, invite_code }) => crate::chat_groups::join_group(st.conn.clone(), st.me, st.active_groups.clone(), group_id, chat_id, invite_code, sink.clone()),
+                Some(Command::LeaveChatGroup { group_id }) => crate::chat_groups::leave_group(st.conn.clone(), st.active_groups.clone(), group_id, sink.clone()),
+                Some(Command::SaveChatGroup { group_id, name }) => crate::chat_groups::save_group(st.conn.clone(), st.me, st.active_groups.clone(), group_id, name, sink.clone()),
+                Some(Command::RenameChatGroup { group_id, name }) => crate::chat_groups::rename_group(st.conn.clone(), st.me, st.active_groups.clone(), group_id, name, sink.clone()),
+                Some(Command::SetChatGroupTagline { group_id, tagline }) => crate::chat_groups::set_tagline(st.conn.clone(), st.me, st.active_groups.clone(), group_id, tagline, sink.clone()),
+                Some(Command::CreateChatChannel { group_id, name, allow_voice }) => crate::chat_groups::create_channel(st.conn.clone(), st.me, st.active_groups.clone(), group_id, name, allow_voice, sink.clone()),
+                Some(Command::RenameChatChannel { group_id, chat_id, name }) => crate::chat_groups::rename_channel(st.conn.clone(), st.me, st.active_groups.clone(), group_id, chat_id, name, sink.clone()),
+                Some(Command::DeleteChatChannel { group_id, chat_id }) => crate::chat_groups::delete_channel(st.conn.clone(), st.me, st.active_groups.clone(), group_id, chat_id, sink.clone()),
+                Some(Command::CreateGroupInviteLink { group_id, chat_id, seconds_valid }) => crate::chat_groups::create_invite_link(st.conn.clone(), group_id, chat_id, seconds_valid, sink.clone()),
+                Some(Command::LoadGroupInviteLinks { group_id }) => crate::chat_groups::load_invite_links(st.conn.clone(), group_id, sink.clone()),
+                Some(Command::DeleteGroupInviteLink { group_id, code }) => crate::chat_groups::delete_invite_link(st.conn.clone(), group_id, code, sink.clone()),
+                Some(Command::ResolveGroupInvite { invite }) => crate::chat_groups::resolve_invite(st.conn.clone(), st.me, invite, sink.clone()),
+                Some(Command::KickGroupMember { group_id, steam_id, expiration_secs }) => crate::chat_groups::kick_member(st.conn.clone(), group_id, steam_id, expiration_secs, sink.clone()),
+                Some(Command::BanGroupMember { group_id, steam_id, ban }) => crate::chat_groups::ban_member(st.conn.clone(), group_id, steam_id, ban, sink.clone()),
+                Some(Command::LoadGroupBanList { group_id }) => crate::chat_groups::load_ban_list(st.conn.clone(), group_id, sink.clone()),
+                Some(Command::UpdateGroupReaction { group_id, chat_id, timestamp, ordinal, reaction_type, reaction, add }) => {
+                    crate::chat_groups::update_reaction(st.conn.clone(), st.me, group_id, chat_id, timestamp, ordinal, reaction_type, reaction, add, sink.clone());
+                }
+                Some(Command::DeleteGroupMessages { group_id, chat_id, messages }) => crate::chat_groups::delete_messages(st.conn.clone(), group_id, chat_id, messages, sink.clone()),
+                Some(Command::SetGroupNotificationPrefs { group_id, unread_muted, desktop_level }) => {
+                    crate::chat_groups::set_preferences(st.conn.clone(), st.me, st.active_groups.clone(), group_id, unread_muted, desktop_level, sink.clone());
+                }
+                Some(Command::SearchGroupMembers { group_id, query }) => crate::chat_groups::search_members(st.conn.clone(), group_id, query, sink.clone()),
                 Some(Command::InviteToLobby { app_id, lobby, friend }) => {
                     // Steam's own lobby invite: it lets them in (private and
                     // friends-only lobbies) and Steam writes the [lobbyinvite]
@@ -1620,20 +1652,27 @@ impl Online {
                     let n: CFriendMessagesIncomingMessageNotification = p.body()?;
                     match n.chat_entry_type() {
                         1 => {
-                            // The markup keeps invites (game, lobby); the plain text loses them.
-                            let (text, invite) = model::chat::parse(n.message());
-                            let text = if text.is_empty() && invite.is_none() { n.message_no_bbcode().to_string() } else { text };
+                            // The markup keeps invites (game, lobby, group); the plain text loses them.
+                            let parsed = model::chat::parse_message(n.message());
+                            let text = if parsed.text.is_empty() && parsed.invite.is_none() && parsed.group_invite.is_none() {
+                                n.message_no_bbcode().to_string()
+                            } else {
+                                parsed.text
+                            };
                             sink(Event::Message(model::ChatMessage {
                                 friend: n.steamid_friend(),
                                 from: if n.local_echo() { self.me } else { n.steamid_friend() },
                                 text,
                                 time: n.rtime32_server_timestamp() as u64,
-                                invite,
+                                invite: parsed.invite,
+                                group_invite: parsed.group_invite,
                             }))
                         }
                         2 => sink(Event::Typing { from: n.steamid_friend() }),
                         _ => {}
                     }
+                } else if name.starts_with("ChatRoomClient.") {
+                    crate::chat_groups::handle_notification(&self.conn, self.me, &self.active_groups, &name, &p, sink)?;
                 } else {
                     sink(Event::Unhandled { emsg: p.emsg, name });
                 }
@@ -1681,8 +1720,15 @@ impl Online {
                 .await;
             match r {
                 Ok(r) => {
-                    let (text, invite) = model::chat::parse(if r.modified_message().is_empty() { &text } else { r.modified_message() });
-                    sink(Event::Message(model::ChatMessage { friend: to, from: me, text, time: r.server_timestamp() as u64, invite }))
+                    let parsed = model::chat::parse_message(if r.modified_message().is_empty() { &text } else { r.modified_message() });
+                    sink(Event::Message(model::ChatMessage {
+                        friend: to,
+                        from: me,
+                        text: parsed.text,
+                        time: r.server_timestamp() as u64,
+                        invite: parsed.invite,
+                        group_invite: parsed.group_invite,
+                    }))
                 }
                 Err(e) => sink(Event::Error(format!("Message not sent: {e}"))),
             }
@@ -2366,8 +2412,15 @@ impl Online {
                         .messages
                         .iter()
                         .map(|m| {
-                            let (text, invite) = model::chat::parse(m.message());
-                            model::ChatMessage { friend, from: base | m.accountid() as u64, text, time: m.timestamp() as u64, invite }
+                            let parsed = model::chat::parse_message(m.message());
+                            model::ChatMessage {
+                                friend,
+                                from: base | m.accountid() as u64,
+                                text: parsed.text,
+                                time: m.timestamp() as u64,
+                                invite: parsed.invite,
+                                group_invite: parsed.group_invite,
+                            }
                         })
                         .collect();
                     messages.sort_by_key(|m| m.time);
@@ -2978,6 +3031,7 @@ impl Online {
             }
         });
         self.load_notifications(sink);
+        crate::chat_groups::load_my_groups(self.conn.clone(), self.me, self.active_groups.clone(), sink.clone());
     }
 
     /// Offline mode: the library and friends as they were at the last sign-in.

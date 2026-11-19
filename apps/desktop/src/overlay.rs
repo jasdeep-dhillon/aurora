@@ -64,7 +64,8 @@ pub struct Overlay {
     game_front: bool,
     pressed: Arc<AtomicBool>,
     pub game: Option<(AppId, Instant)>,
-    chat_with: Option<SteamId>,
+    chat_with: Option<crate::builtin::group_chat::ChatTarget>,
+    group_ui: crate::builtin::group_chat::GroupUiState,
     input: String,
     notes: String,
     search: String,
@@ -126,6 +127,7 @@ impl Overlay {
             pressed,
             game: None,
             chat_with: None,
+            group_ui: Default::default(),
             input: String::new(),
             notes: String::new(),
             search: String::new(),
@@ -678,6 +680,7 @@ fn content(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
     notes_window(app, &ctx, t);
     community_window(app, &ctx, t, actions);
     store_window(app, &ctx, t, actions);
+    crate::builtin::group_chat::modals(&ctx, t, &app.state, &app.client, &mut app.overlay.group_ui);
     // The clock and session time.
     ctx.request_repaint_after(std::time::Duration::from_secs(1));
     close
@@ -1068,8 +1071,20 @@ fn friends_window(app: &mut SteamApp, ctx: &egui::Context, t: &Theme, actions: &
     let screen = ctx.content_rect();
     let pos = pos2(screen.right() - 370.0, STRIP + 40.0);
     ov_window(app, ctx, t, Win::Friends, &t!("Friends"), pos, vec2(330.0, 600.0), |app, ui| {
-        w::search(ui, t, &mut app.overlay.search, &t!("Search friends"), ui.available_width());
+        w::search(ui, t, &mut app.overlay.search, &t!("Search friends & groups"), ui.available_width());
         ui.add_space(8.0);
+        let sel_group = match app.overlay.chat_with {
+            Some(crate::builtin::group_chat::ChatTarget::Group(gid)) => Some(gid),
+            _ => None,
+        };
+        let search = app.overlay.search.clone();
+        let mut g_ui = std::mem::take(&mut app.overlay.group_ui);
+        let clicked_group = crate::builtin::group_chat::group_list_section(ui, t, &app.state, &search, sel_group, &mut g_ui, &app.client, actions);
+        app.overlay.group_ui = g_ui;
+        if let Some(gid) = clicked_group {
+            open_group_chat(app, gid);
+        }
+        ui.add_space(6.0);
         let q = app.overlay.search.trim().to_lowercase();
         let all: Vec<Persona> = app.state.friend_list().into_iter().filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q)).collect();
         let in_game: Vec<_> = all.iter().filter(|p| p.in_game()).cloned().collect();
@@ -1107,7 +1122,7 @@ fn friend_row(app: &mut SteamApp, ui: &mut Ui, t: &Theme, p: &Persona, actions: 
     // the hover from the row, and checking the row alone made them flicker.
     let over = ui.rect_contains_pointer(rect);
     let hover = over || resp.hovered() || resp.context_menu_opened();
-    if hover || app.overlay.chat_with == Some(p.steam_id) {
+    if hover || app.overlay.chat_with == Some(crate::builtin::group_chat::ChatTarget::Friend(p.steam_id)) {
         ui.painter().rect_filled(rect, t.corner_small(), t.surface_hover);
     }
     let av = Rect::from_min_size(rect.min + vec2(4.0, 7.0), vec2(32.0, 32.0));
@@ -1177,31 +1192,62 @@ fn friend_row(app: &mut SteamApp, ui: &mut Ui, t: &Theme, p: &Persona, actions: 
 }
 
 fn open_chat(app: &mut SteamApp, id: SteamId, actions: &mut Vec<Action>) {
-    app.overlay.chat_with = Some(id);
+    app.overlay.chat_with = Some(crate::builtin::group_chat::ChatTarget::Friend(id));
     app.overlay.win_mut(Win::Chat).open = true;
     app.client.send(Command::LoadHistory { friend: id });
     actions.push(Action::MarkRead(id));
 }
 
+fn open_group_chat(app: &mut SteamApp, group_id: model::GroupChatId) {
+    app.overlay.chat_with = Some(crate::builtin::group_chat::ChatTarget::Group(group_id));
+    app.overlay.group_ui.chat_id = None;
+    app.overlay.win_mut(Win::Chat).open = true;
+}
+
 fn chat_window(app: &mut SteamApp, ctx: &egui::Context, t: &Theme, actions: &mut Vec<Action>) {
-    let Some(id) = app.overlay.chat_with else { return };
-    let p = app.state.persona(id);
+    let Some(target) = app.overlay.chat_with else { return };
     let screen = ctx.content_rect();
     let pos = pos2(screen.right() - 830.0, STRIP + 40.0);
-    ov_window(app, ctx, t, Win::Chat, &p.name, pos, vec2(440.0, 520.0), |app, ui| {
-        ui.horizontal(|ui| {
-            w::avatar(ui, t, &art::avatar(p.avatar_hash.as_deref()), 30.0, Some(crate::shell::status_color(t, &p)));
-            ui.label(w::text(crate::shell::status_text(&app.state, &p), 12.5, t.text_dim));
-        });
-        ui.add_space(6.0);
-        // Exactly the space the window has, so it never grows by itself.
-        let h = ui.available_height();
-        actions.extend(crate::builtin::community::chat_body(ui, t, &app.state, &app.client, id, &mut app.overlay.input, h));
-    });
+    match target {
+        crate::builtin::group_chat::ChatTarget::Friend(id) => {
+            let p = app.state.persona(id);
+            ov_window(app, ctx, t, Win::Chat, &p.name, pos, vec2(440.0, 520.0), |app, ui| {
+                ui.horizontal(|ui| {
+                    w::avatar(ui, t, &art::avatar(p.avatar_hash.as_deref()), 30.0, Some(crate::shell::status_color(t, &p)));
+                    ui.label(w::text(crate::shell::status_text(&app.state, &p), 12.5, t.text_dim));
+                });
+                ui.add_space(6.0);
+                // Exactly the space the window has, so it never grows by itself.
+                let h = ui.available_height();
+                actions.extend(crate::builtin::community::chat_body(ui, t, &app.state, &app.client, id, &mut app.overlay.input, h));
+            });
+        }
+        crate::builtin::group_chat::ChatTarget::Group(gid) => {
+            let Some(g) = app.state.chat_groups.get(&gid).cloned() else {
+                app.overlay.chat_with = None;
+                app.overlay.win_mut(Win::Chat).open = false;
+                return;
+            };
+            let title = app.state.group_display_name(&g);
+            ov_window(app, ctx, t, Win::Chat, &title, pos, vec2(500.0, 540.0), |app, ui| {
+                let mut g_ui = std::mem::take(&mut app.overlay.group_ui);
+                ui.horizontal(|ui| {
+                    crate::builtin::group_chat::group_avatar(ui, t, &g, &title, 28.0);
+                    ui.label(w::text(t!("{n} members", n = g.active_member_count.max(g.members.len() as u32)), 12.5, t.text_dim));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        crate::builtin::group_chat::header_actions(ui, t, &app.state, &app.client, &g, &mut g_ui, true);
+                    });
+                });
+                ui.add_space(6.0);
+                let h = ui.available_height();
+                crate::builtin::group_chat::group_view(ui, t, &app.state, &app.client, gid, &mut g_ui, actions, true, h);
+                app.overlay.group_ui = g_ui;
+            });
+        }
+    }
     if !app.overlay.win(Win::Chat).open {
         app.overlay.chat_with = None;
     }
-    let _ = actions;
 }
 
 fn notes_window(app: &mut SteamApp, ctx: &egui::Context, t: &Theme) {
