@@ -1164,6 +1164,7 @@ pub fn run_through_host(
     account: &str,
     token: &str,
     steam_id: u64,
+    overlay: Option<(u16, &str)>,
     started: impl FnOnce(),
 ) -> Result<(), String> {
     use std::io::{BufRead, BufReader, Write};
@@ -1241,7 +1242,7 @@ pub fn run_through_host(
     // Launch the game through Proton with lsteamclient ON (the default), so the
     // game's steamclient reaches the host. `command` already points
     // STEAM_COMPAT_CLIENT_INSTALL_PATH at the real Steam root.
-    let game = spawn_for_host(app, install_dir, &args.user, &connect, account);
+    let game = spawn_for_host(app, install_dir, &args.user, &connect, account, overlay);
     let mut child = match game {
         Ok(c) => c,
         Err(e) => {
@@ -1266,7 +1267,14 @@ pub fn run_through_host(
 /// The game launch for the headless-host path: the normal command (Proton on
 /// Linux, with lsteamclient left enabled) plus the `Steam*` environment a
 /// game expects.
-fn spawn_for_host(app: &OwnedApp, install_dir: &Path, user_args: &str, connect: &[String], account: &str) -> Result<Child, String> {
+fn spawn_for_host(
+    app: &OwnedApp,
+    install_dir: &Path,
+    user_args: &str,
+    connect: &[String],
+    account: &str,
+    overlay: Option<(u16, &str)>,
+) -> Result<Child, String> {
     let opts = UserOptions::parse(user_args);
     let mut cmd = command(app, install_dir, &opts, connect)?;
     let id = app.app_id.to_string();
@@ -1275,7 +1283,69 @@ fn spawn_for_host(app: &OwnedApp, install_dir: &Path, user_args: &str, connect: 
         .env("SteamEnv", "1")
         .env("SteamAppUser", account)
         .env("SteamUser", account);
+    #[cfg(target_os = "linux")]
+    apply_vk_overlay_env(&mut cmd, overlay);
+    #[cfg(not(target_os = "linux"))]
+    let _ = overlay;
     finish(app, install_dir, &opts, cmd).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+}
+
+#[cfg(target_os = "linux")]
+fn vk_overlay_lib() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let lib = dir.join("libVkLayer_aurora_overlay.so");
+    lib.is_file().then_some(lib)
+}
+
+#[cfg(target_os = "linux")]
+fn write_vk_layer_manifest(lib_path: &Path) -> Option<PathBuf> {
+    let dir = directories::ProjectDirs::from("", "", "aurora")
+        .map(|p| p.cache_dir().join("vk_layer"))
+        .unwrap_or_else(|| std::env::temp_dir().join("aurora-vk-layer"));
+    std::fs::create_dir_all(&dir).ok()?;
+    let manifest_path = dir.join("VkLayer_aurora_overlay.json");
+    let lib_str = serde_json::to_string(&lib_path.to_string_lossy()).ok()?;
+    let json = format!(
+        r#"{{
+  "file_format_version": "1.1.2",
+  "layer": {{
+    "name": "VK_LAYER_AURORA_overlay",
+    "type": "GLOBAL",
+    "library_path": {lib_str},
+    "api_version": "1.3.0",
+    "implementation_version": "1",
+    "description": "Aurora in-game Vulkan overlay",
+    "enable_environment": {{
+      "AURORA_VK_OVERLAY": "1"
+    }},
+    "disable_environment": {{
+      "DISABLE_AURORA_OVERLAY": "1"
+    }}
+  }}
+}}
+"#
+    );
+    if std::fs::read_to_string(&manifest_path).ok().as_deref() != Some(&json) {
+        std::fs::write(&manifest_path, json).ok()?;
+    }
+    Some(dir)
+}
+
+#[cfg(target_os = "linux")]
+fn apply_vk_overlay_env(cmd: &mut Command, overlay: Option<(u16, &str)>) {
+    let Some((port, token)) = overlay else { return };
+    let Some(lib) = vk_overlay_lib() else { return };
+    let Some(manifest_dir) = write_vk_layer_manifest(&lib) else { return };
+    let dir_str = manifest_dir.to_string_lossy();
+    let combined = match std::env::var("VK_ADD_IMPLICIT_LAYER_PATH") {
+        Ok(existing) if !existing.is_empty() => format!("{existing}:{dir_str}"),
+        _ => dir_str.into_owned(),
+    };
+    tracing::info!("enabling Linux Vulkan overlay layer ({})", lib.display());
+    cmd.env("VK_ADD_IMPLICIT_LAYER_PATH", combined)
+        .env("AURORA_VK_OVERLAY", "1")
+        .env("AURORA_OVERLAY_PORT", port.to_string())
+        .env("AURORA_OVERLAY_TOKEN", token);
 }
 
 /// `~/.steam/steam.pid` naming the headless host while it runs; what was

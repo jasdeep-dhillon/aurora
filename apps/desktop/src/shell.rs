@@ -261,9 +261,13 @@ fn friends_hover(app: &mut SteamApp, ui: &mut Ui, t: &Theme, button: &egui::Resp
     let popup_rect: Option<Rect> = ui.data(|d| d.get_temp(id.with("rect")));
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let over_popup = pointer.zip(popup_rect).is_some_and(|(p, r)| r.expand(6.0).contains(p));
-    if button.hovered() || over_popup {
+    let bridge = Rect::from_min_max(button.rect.left_top(), egui::pos2(button.rect.right(), button.rect.bottom() + 8.0));
+    let over_button = button.hovered() || pointer.is_some_and(|p| bridge.contains(p));
+    if over_button || over_popup {
         since.get_or_insert(now);
         ui.data_mut(|d| d.insert_temp(id.with("left"), now));
+    } else if pointer.is_none() {
+        since = None;
     } else {
         let left: f64 = ui.data(|d| d.get_temp(id.with("left"))).unwrap_or(0.0);
         if now - left > 0.25 {
@@ -310,7 +314,22 @@ fn friends_hover(app: &mut SteamApp, ui: &mut Ui, t: &Theme, button: &egui::Resp
                 });
                 ui.add_space(4.0);
                 egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                    if online.is_empty() {
+                    let groups: Vec<_> = app
+                        .state
+                        .group_list()
+                        .into_iter()
+                        .map(|g| {
+                            (
+                                g.id,
+                                app.state.group_display_name(g),
+                                g.avatar_url.clone(),
+                                g.unread_count(),
+                                g.default_text_channel_id(),
+                                g.active_member_count.max(g.members.len() as u32),
+                            )
+                        })
+                        .collect();
+                    if online.is_empty() && groups.is_empty() {
                         ui.label(w::text(t!("No friends online"), 13.0, t.text_faint));
                     }
                     for p in &online {
@@ -324,9 +343,14 @@ fn friends_hover(app: &mut SteamApp, ui: &mut Ui, t: &Theme, button: &egui::Resp
                         }
                         let color = status_color(t, p);
                         ui.painter().circle_filled(av.right_bottom() - vec2(1.0, 1.0), 4.5, color);
-                        ui.painter().text(egui::pos2(av.right() + 10.0, r.top() + 14.0), Align2::LEFT_CENTER, &p.name, w::font_semibold(13.0), if p.in_game() { t.in_game } else { t.text });
-                        ui.painter().text(egui::pos2(av.right() + 10.0, r.top() + 30.0), Align2::LEFT_CENTER, status_text(&app.state, p), w::font(11.5), color);
                         let unread = app.state.unread.get(&p.steam_id).copied().unwrap_or(0);
+                        let text_right = if unread > 0 { r.right() - 26.0 } else { r.right() - 6.0 };
+                        let text_rect = Rect::from_min_max(egui::pos2(av.right() + 10.0, r.top() + 3.0), egui::pos2(text_right, r.bottom() - 3.0));
+                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_rect).layout(Layout::top_down(Align::Min)));
+                        child.spacing_mut().item_spacing.y = 0.0;
+                        child.add(egui::Label::new(w::text_semibold(p.display_name(), 13.0, if p.in_game() { t.in_game } else { t.text })).truncate());
+                        let status = status_text(&app.state, p);
+                        child.add(egui::Label::new(w::text(&status, 11.5, color)).truncate());
                         if unread > 0 {
                             let c = egui::pos2(r.right() - 12.0, r.center().y);
                             ui.painter().circle_filled(c, 8.0, t.accent);
@@ -335,8 +359,49 @@ fn friends_hover(app: &mut SteamApp, ui: &mut Ui, t: &Theme, button: &egui::Resp
                         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t!("Send a message")).clicked() {
                             // Chat in the undocked window, like Steam.
                             app.friends_window.open = true;
-                            app.friends_window.chat = Some(p.steam_id);
+                            app.friends_window.chat = Some(crate::builtin::group_chat::ChatTarget::Friend(p.steam_id));
+                            app.client.send(Command::LoadHistory { friend: p.steam_id });
                             actions.push(Action::MarkRead(p.steam_id));
+                        }
+                    }
+                    if !groups.is_empty() {
+                        if !online.is_empty() {
+                            ui.add_space(6.0);
+                        }
+                        ui.label(w::text_semibold(t!("Group chats"), 11.5, t.text_dim));
+                        ui.add_space(2.0);
+                        for (gid, name, avatar_url, unread, default_ch, count) in groups {
+                            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+                            if resp.hovered() {
+                                ui.painter().rect_filled(r, t.corner_small(), t.surface_hover);
+                            }
+                            let av = Rect::from_min_size(r.min + vec2(4.0, 4.0), vec2(32.0, 32.0));
+                            let radius = egui::CornerRadius::same(7);
+                            if !avatar_url.as_deref().is_some_and(|u| w::paint_cover(ui, av, u, radius)) {
+                                ui.painter().rect_filled(av, radius, w::mix(t.raised, t.accent, 0.25));
+                                let init: String = name.chars().filter(|c| c.is_alphanumeric()).take(2).collect();
+                                ui.painter().text(av.center(), Align2::CENTER_CENTER, init.to_uppercase(), w::font_bold(12.0), t.text);
+                            }
+                            let text_right = if unread > 0 { r.right() - 26.0 } else { r.right() - 6.0 };
+                            let text_rect = Rect::from_min_max(egui::pos2(av.right() + 10.0, r.top() + 3.0), egui::pos2(text_right, r.bottom() - 3.0));
+                            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_rect).layout(Layout::top_down(Align::Min)));
+                            child.spacing_mut().item_spacing.y = 0.0;
+                            child.add(egui::Label::new(w::text_semibold(&name, 13.0, t.text)).truncate());
+                            child.add(egui::Label::new(w::text(t!("{n} members", n = count), 11.5, t.text_dim)).truncate());
+                            if unread > 0 {
+                                let c = egui::pos2(r.right() - 12.0, r.center().y);
+                                ui.painter().circle_filled(c, 8.0, t.accent);
+                                ui.painter().text(c, Align2::CENTER_CENTER, unread.min(99).to_string(), w::font_bold(10.0), egui::Color32::WHITE);
+                            }
+                            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t!("Open group chat")).clicked() {
+                                app.friends_window.open = true;
+                                app.friends_window.chat = Some(crate::builtin::group_chat::ChatTarget::Group(gid));
+                                app.friends_window.group_ui.chat_id = default_ch;
+                                if let Some(cid) = default_ch {
+                                    app.client.send(Command::LoadGroupHistory { group_id: gid, chat_id: cid, before: None });
+                                    actions.push(Action::MarkGroupRead { group_id: gid, chat_id: cid });
+                                }
+                            }
                         }
                     }
                 });
@@ -1077,6 +1142,36 @@ fn friend_row(app: &mut SteamApp, ui: &mut Ui, t: &Theme, p: &Persona, actions: 
             actions.push(Action::Navigate { page: "inventory".into(), arg: Some(persona.steam_id.to_string()) });
             ui.close();
         }
+        let invitable_groups: Vec<_> = app
+            .state
+            .group_list()
+            .into_iter()
+            .filter(|g| g.effective_permissions(model::steam_id_to_account(app.state.steam_id)).can_invite)
+            .map(|g| (g.id, app.state.group_display_name(g), g.default_text_channel_id()))
+            .collect();
+        ui.menu_button(format!("{}  {}", icons::USER_PLUS, t!("Invite to group chat")), |ui| {
+            for (gid, gname, cid) in &invitable_groups {
+                if ui.button(gname).clicked() {
+                    app.client.send(Command::InviteToChatGroup {
+                        group_id: *gid,
+                        chat_id: *cid,
+                        friend: persona.steam_id,
+                    });
+                    actions.push(Action::Toast(t!("Invited {name} to {group}", name = persona.display_name(), group = gname.clone())));
+                    ui.close();
+                }
+            }
+            if !invitable_groups.is_empty() {
+                ui.separator();
+            }
+            if ui.button(format!("{}  {}", icons::PLUS, t!("New group chat with {name}", name = persona.display_name()))).clicked() {
+                app.client.send(Command::CreateChatGroup {
+                    name: None,
+                    invitees: vec![persona.steam_id],
+                });
+                ui.close();
+            }
+        });
         ui.menu_button(format!("{}  {}", icons::GEAR, t!("Manage")), |ui| {
             if ui.button(t!("Add nickname…")).clicked() {
                 app.friend_dialog = Some((vp, FriendDialog::Nickname { id: persona.steam_id, text: persona.nickname.clone().unwrap_or_default() }));
