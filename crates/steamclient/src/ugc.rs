@@ -1,16 +1,14 @@
-//! ISteamUGC: the Workshop for games. Queries, subscriptions, votes and
-//! favorites go to Steam's PublishedFile service through Aurora;
-//! items download into `steamapps/workshop/content/<app>/<item>` like
-//! Steam's client puts them, and subscribed items that aren't there yet
-//! download when the game first asks for its subscriptions.
-//!
-//! Publishing items (CreateItem / SubmitItemUpdate) isn't supported: it
-//! needs Steam's UGC upload path. Those calls fail with k_EResultFail.
+//! ISteamUGC: the Workshop for games. Queries, subscriptions, votes,
+//! favorites, downloads and publishing/updating go to Steam's PublishedFile
+//! service through Aurora; items download into
+//! `steamapps/workshop/content/<app>/<item>` like Steam's client puts them,
+//! and subscribed items that aren't there yet download when the game first
+//! asks for its subscriptions.
 
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use crate::ifaces::{This, copy_out, put, slice, text};
-use crate::protocol::{Reply, Request, UgcItem, UgcQuery};
+use crate::protocol::{Reply, Request, UgcItem, UgcQuery, UgcUpdate};
 use crate::state::{Bytes, lock};
 use crate::vt::Fp;
 use std::collections::{HashMap, HashSet};
@@ -29,6 +27,7 @@ const SET_VOTE_RESULT: i32 = 3408;
 const GET_VOTE_RESULT: i32 = 3409;
 const START_PLAYTIME_RESULT: i32 = 3410;
 const STOP_PLAYTIME_RESULT: i32 = 3411;
+const DELETE_ITEM_RESULT: i32 = 3417;
 const SUBSCRIBE_RESULT: i32 = 1313;
 const UNSUBSCRIBE_RESULT: i32 = 1315;
 const FILE_SUBSCRIBED: i32 = 1321;
@@ -93,7 +92,20 @@ pub fn imp(name: &str) -> Option<Fp> {
         "RequestUGCDetails" => f!(request_details),
         "CreateItem" => f!(create_item),
         "StartItemUpdate" => f!(start_update),
+        "SetItemTitle" => f!(set_item_title),
+        "SetItemDescription" => f!(set_item_description),
+        "SetItemUpdateLanguage" => f!(set_item_language),
+        "SetItemMetadata" => f!(set_item_metadata),
+        "SetItemVisibility" => f!(set_item_visibility),
+        "SetItemTags" => f!(set_item_tags),
+        "SetItemContent" => f!(set_item_content),
+        "SetItemPreview" => f!(set_item_preview),
+        "RemoveAllItemKeyValueTags" => f!(remove_all_item_kv),
+        "RemoveItemKeyValueTags" => f!(remove_item_kv),
+        "AddItemKeyValueTag" => f!(add_item_kv),
         "SubmitItemUpdate" => f!(submit_update),
+        "GetItemUpdateProgress" => f!(update_progress),
+        "DeleteItem" => f!(delete_item),
         "SetUserItemVote" => f!(set_vote),
         "GetUserItemVote" => f!(get_vote),
         "AddItemToFavorites" => f!(favorite_add),
@@ -114,9 +126,20 @@ pub fn imp(name: &str) -> Option<Fp> {
 }
 
 #[derive(Default)]
+struct UpdateState {
+    update: UgcUpdate,
+    /// EItemUpdateStatus: 0 Invalid, 1 PreparingConfig, 2 PreparingContent,
+    /// 3 UploadingContent, 4 UploadingPreviewFile, 5 CommittingChanges.
+    status: i32,
+    processed: u64,
+    total: u64,
+}
+
+#[derive(Default)]
 struct Ugc {
     next: u64,
     queries: HashMap<u64, (UgcQuery, Vec<UgcItem>)>,
+    updates: HashMap<u64, UpdateState>,
     subscribed: Option<Vec<u64>>,
     /// Downloading now: item -> expected bytes.
     downloading: HashMap<u64, u64>,
@@ -422,26 +445,204 @@ extern "C" fn request_details(_t: This, id: u64, _max_age: u32) -> u64 {
 
 // ------------------------------------------------------------ publishing
 
-extern "C" fn create_item(_t: This, _app: u32, _kind: i32) -> u64 {
-    crate::log!("ugc: publishing items isn't supported");
-    let mut b = Bytes::new(24);
-    b.i32(0, FAIL);
-    let mut g = lock();
-    let call = g.new_call();
-    g.complete(call, CREATE_ITEM_RESULT, b.0, false);
+fn with_update(h: u64, f: impl FnOnce(&mut UgcUpdate)) -> bool {
+    match u().updates.get_mut(&h) {
+        Some(st) if st.status == 0 => {
+            f(&mut st.update);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// CreateItemResult_t: EResult (0), PublishedFileId_t (8), bool needs_agreement (16).
+extern "C" fn create_item(_t: This, app: u32, kind: i32) -> u64 {
+    let call = lock().new_call();
+    std::thread::spawn(move || {
+        let (eresult, id, needs_agreement) = match crate::ipc::request(Request::UgcCreateItem { consumer_app: app, file_type: kind }) {
+            Some(Reply::UgcCreated { eresult, id, needs_agreement }) => (eresult, id, needs_agreement),
+            _ => (FAIL, 0, false),
+        };
+        crate::log!("ugc: create item (app {app}, type {kind}): eresult {eresult}, id {id}");
+        let mut b = Bytes::new(24);
+        b.i32(0, eresult).u64(8, id).u8(16, needs_agreement as u8);
+        lock().complete(call, CREATE_ITEM_RESULT, b.0, eresult != OK);
+    });
     call
 }
 
-extern "C" fn start_update(_t: This, _app: u32, _id: u64) -> u64 {
-    INVALID
+extern "C" fn start_update(_t: This, app: u32, id: u64) -> u64 {
+    if id == 0 {
+        return INVALID;
+    }
+    let mut u = u();
+    let h = u.next;
+    u.next += 1;
+    u.updates.insert(
+        h,
+        UpdateState {
+            update: UgcUpdate { consumer_app: app, id, ..Default::default() },
+            status: 0,
+            processed: 0,
+            total: 0,
+        },
+    );
+    h
 }
 
-extern "C" fn submit_update(_t: This, _h: u64, _note: *const c_char) -> u64 {
-    let mut b = Bytes::new(16);
-    b.i32(0, FAIL);
-    let mut g = lock();
-    let call = g.new_call();
-    g.complete(call, SUBMIT_ITEM_UPDATE_RESULT, b.0, false);
+extern "C" fn set_item_title(_t: This, h: u64, title: *const c_char) -> bool {
+    let s = unsafe { text(title) };
+    with_update(h, |u| u.title = Some(s))
+}
+
+extern "C" fn set_item_description(_t: This, h: u64, desc: *const c_char) -> bool {
+    let s = unsafe { text(desc) };
+    with_update(h, |u| u.description = Some(s))
+}
+
+extern "C" fn set_item_language(_t: This, h: u64, lang: *const c_char) -> bool {
+    let s = unsafe { text(lang) };
+    with_update(h, |u| u.language = Some(s))
+}
+
+extern "C" fn set_item_metadata(_t: This, h: u64, meta: *const c_char) -> bool {
+    let s = unsafe { text(meta) };
+    with_update(h, |u| u.metadata = Some(s))
+}
+
+extern "C" fn set_item_visibility(_t: This, h: u64, vis: i32) -> bool {
+    with_update(h, |u| u.visibility = Some(vis))
+}
+
+extern "C" fn set_item_tags(_t: This, h: u64, tags: *const u8) -> bool {
+    let list = string_array(tags);
+    with_update(h, |u| u.tags = Some(list))
+}
+
+extern "C" fn set_item_content(_t: This, h: u64, folder: *const c_char) -> bool {
+    let s = unsafe { text(folder) };
+    if s.is_empty() {
+        return false;
+    }
+    with_update(h, |u| u.content_path = Some(s))
+}
+
+extern "C" fn set_item_preview(_t: This, h: u64, preview: *const c_char) -> bool {
+    let s = unsafe { text(preview) };
+    if s.is_empty() {
+        return false;
+    }
+    with_update(h, |u| u.preview_path = Some(s))
+}
+
+extern "C" fn remove_all_item_kv(_t: This, h: u64) -> bool {
+    with_update(h, |u| {
+        u.clear_kv_tags = true;
+        u.add_kv_tags.clear();
+    })
+}
+
+extern "C" fn remove_item_kv(_t: This, h: u64, key: *const c_char) -> bool {
+    let k = unsafe { text(key) };
+    if k.is_empty() {
+        return false;
+    }
+    with_update(h, |u| u.remove_kv_keys.push(k))
+}
+
+extern "C" fn add_item_kv(_t: This, h: u64, key: *const c_char, value: *const c_char) -> bool {
+    let (k, v) = unsafe { (text(key), text(value)) };
+    if k.is_empty() {
+        return false;
+    }
+    with_update(h, |u| u.add_kv_tags.push((k, v)))
+}
+
+/// SubmitItemUpdateResult_t: EResult (0), bool needs_agreement (4), PublishedFileId_t (8).
+extern "C" fn submit_update(_t: This, h: u64, note: *const c_char) -> u64 {
+    let note = unsafe { text(note) };
+    let upd = {
+        let mut g = u();
+        let Some(st) = g.updates.get_mut(&h) else {
+            let mut b = Bytes::new(16);
+            b.i32(0, FAIL);
+            let mut s = lock();
+            let call = s.new_call();
+            s.complete(call, SUBMIT_ITEM_UPDATE_RESULT, b.0, true);
+            return call;
+        };
+        st.update.change_note = note;
+        let total = st
+            .update
+            .content_path
+            .as_deref()
+            .and_then(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+            .unwrap_or(0)
+            + st.update
+                .preview_path
+                .as_deref()
+                .and_then(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+                .unwrap_or(0);
+        st.status = if st.update.content_path.is_some() {
+            3 // UploadingContent
+        } else if st.update.preview_path.is_some() {
+            4 // UploadingPreviewFile
+        } else {
+            5 // CommittingChanges
+        };
+        st.processed = 0;
+        st.total = total;
+        st.update.clone()
+    };
+    let item_id = upd.id;
+    let call = lock().new_call();
+    std::thread::spawn(move || {
+        let (eresult, id, needs_agreement) = match crate::ipc::request(Request::UgcUpdateItem(Box::new(upd))) {
+            Some(Reply::UgcUpdated { eresult, id, needs_agreement }) => (eresult, id, needs_agreement),
+            _ => (FAIL, item_id, false),
+        };
+        if let Some(st) = u().updates.get_mut(&h) {
+            if eresult == OK {
+                st.processed = st.total;
+            }
+            st.status = 0;
+        }
+        crate::log!("ugc: submit update {h} (item {id}): eresult {eresult}");
+        let mut b = Bytes::new(16);
+        b.i32(0, eresult).u8(4, needs_agreement as u8).u64(8, id);
+        lock().complete(call, SUBMIT_ITEM_UPDATE_RESULT, b.0, eresult != OK);
+    });
+    call
+}
+
+extern "C" fn update_progress(_t: This, h: u64, processed: *mut u64, total: *mut u64) -> i32 {
+    let g = u();
+    match g.updates.get(&h) {
+        Some(st) => {
+            put(processed, st.processed);
+            put(total, st.total);
+            st.status
+        }
+        None => {
+            put(processed, 0);
+            put(total, 0);
+            0
+        }
+    }
+}
+
+/// DeleteItemResult_t: EResult (0), PublishedFileId_t (8).
+extern "C" fn delete_item(_t: This, id: u64) -> u64 {
+    let call = lock().new_call();
+    std::thread::spawn(move || {
+        let eresult = match crate::ipc::request(Request::UgcDeleteItem { id }) {
+            Some(Reply::Result { eresult }) => eresult,
+            _ => FAIL,
+        };
+        let mut b = Bytes::new(16);
+        b.i32(0, eresult).u64(8, id);
+        lock().complete(call, DELETE_ITEM_RESULT, b.0, eresult != OK);
+    });
     call
 }
 

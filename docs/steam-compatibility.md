@@ -265,21 +265,29 @@ While developing, the launcher also finds
   Aurora doesn't implement it, so these connections fail at once with
   a clear end reason instead of hanging. Listen sockets by IP get only P2P
   connections.
-- **Game servers** (`ISteamGameServer`): hosting a server Steam lists needs
-  its own anonymous game-server sign-in to Steam and callbacks routed to the
-  server's pipe; not done yet, so in-process servers stay anonymous and
-  offline.
-- **Workshop publishing** (`CreateItem`, `SubmitItemUpdate`) fails with
-  k_EResultFail.
-- **Inventory**: item definitions need a digest Steam's Inventory service
-  refuses to a client session (tested while playing too), so
-  `GetItemDefinitionIDs` finds none yet; buying items needs Steam's overlay
-  checkout; another player's serialized result can't be checked (Valve's
-  signature), so `DeserializeResult` reports k_EResultFail.
+- **Game servers** (`ISteamGameServer`, `ISteamGameServerStats`): local/listen
+  server lifecycle (`InitGameServer`, `LogOnAnonymous`, `LogOff`, metadata,
+  A2S_INFO / A2S_PLAYER / A2S_RULES query responder, fail-closed Steam auth
+  ticket validation via `BeginAuthSession`, and `ISteamGameServerStats`) is
+  implemented; public Valve master-server listing still needs a separate
+  game-server CM connection, and `BSecure` stays `false` (fail-closed).
+- **Workshop publishing** (`CreateItem`, `StartItemUpdate`, `SetItem*`,
+  `SubmitItemUpdate`, `GetItemUpdateProgress`, `DeleteItem`): creates items
+  via `PublishedFile.Publish#1`, uploads preview images and single-file
+  content via Steam Cloud shared files, and commits via
+  `PublishedFile.Update#1`. Multi-file Workshop depot uploads are not yet
+  supported.
+- **Inventory**: item definitions try CM `Inventory.GetItemDefMeta#1` and
+  `IInventoryService/GetItemDefMeta/v1` (with an account web access token),
+  fetch `IGameInventory/GetItemDefArchive/v0001` with bounded reads, and cache
+  by `(app_id, digest)` locally; buying items needs Steam's overlay checkout;
+  another player's serialized result can't be checked (Valve's signature), so
+  `DeserializeResult` reports `k_EResultFail`.
 - **Screenshots** stay on this PC: Steam's client uploads them and lists
   them in its own index.
-- **Steam Input**: gyro, trackpads, mouse modes, haptics other than rumble
-  and the binding panel (Steam's overlay configurator).
+- **Steam Input**: gyro and accelerometer (`GetMotionData`) are bridged from
+  SDL3 pads; trackpads, mouse modes, haptics other than rumble and the binding
+  panel (Steam's overlay configurator) are not yet supported.
 - **Server browser**: friends, favorites, history and spectator lists come
   back empty.
 - **The overlay**: Aurora's own Shift+Tab overlay, not Steam's. Global

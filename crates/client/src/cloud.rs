@@ -888,6 +888,54 @@ async fn upload(conn: &Connection, t: &Target, files: &[(String, PathBuf, Vec<u8
     }
 }
 
+/// Upload a single shared file (e.g. Workshop content or preview image) via Steam Cloud.
+pub(crate) async fn upload_shared_file(conn: &Connection, app_id: AppId, cell_id: u32, name: &str, data: &[u8]) -> Result<(), String> {
+    if data.len() as u64 > MAX_CLOUD_UNCOMPRESSED_BYTES {
+        return Err("file exceeds maximum upload size".into());
+    }
+    let sha = sha1(data);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let begin: CCloudClientBeginFileUploadResponse = conn
+        .call(
+            "Cloud.ClientBeginFileUpload#1",
+            &CCloudClientBeginFileUploadRequest {
+                appid: Some(app_id),
+                file_size: Some(data.len() as u32),
+                raw_file_size: Some(data.len() as u32),
+                file_sha: Some(sha.clone()),
+                time_stamp: Some(now),
+                filename: Some(name.to_string()),
+                cell_id: Some(cell_id),
+                can_encrypt: Some(false),
+                is_shared_file: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let ok = send_blocks(&begin, data).await;
+    let commit: Result<CCloudClientCommitFileUploadResponse, _> = conn
+        .call(
+            "Cloud.ClientCommitFileUpload#1",
+            &CCloudClientCommitFileUploadRequest {
+                transfer_succeeded: Some(ok.is_ok()),
+                appid: Some(app_id),
+                file_sha: Some(sha),
+                filename: Some(name.to_string()),
+            },
+        )
+        .await;
+    match (ok, commit) {
+        (Ok(()), Ok(c)) if c.file_committed() => Ok(()),
+        (Err(e), _) => Err(e),
+        (_, Err(e)) => Err(e.to_string()),
+        _ => Err("Steam didn't commit the uploaded file".into()),
+    }
+}
+
 const MAX_CLOUD_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 
 fn is_valid_cloud_host(host: &str) -> bool {

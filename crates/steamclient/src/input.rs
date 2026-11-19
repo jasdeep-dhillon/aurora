@@ -50,6 +50,7 @@ pub fn imp(name: &str) -> Option<Fp> {
         "GetStringForActionOrigin" => f!(origin_name),
         "TriggerVibration" => f!(vibrate),
         "TriggerVibrationExtended" => f!(vibrate),
+        "GetMotionData" => f!(motion_data),
         "GetInputTypeForHandle" => f!(input_type),
         "GetControllerForGamepadIndex" => f!(for_index),
         "GetGamepadIndexForController" => f!(index_of),
@@ -566,6 +567,28 @@ extern "C" fn vibrate(_t: This, handle: u64, left: u16, right: u16) {
     for i in slots {
         crate::pads::rumble(i, left, right);
     }
+}
+
+/// InputMotionData_t (40 bytes): rotQuat (xyzw), posAccel (xyz in G), rotVel (xyz in deg/s).
+extern "C" fn motion_data(_t: This, ret: *mut u8, handle: u64) -> *mut u8 {
+    if !ret.is_null() {
+        let mut b = Bytes::new(40);
+        // Identity orientation quaternion (0, 0, 0, 1).
+        b.u32(12, 1.0f32.to_bits());
+        if let Some(slot) = handle.checked_sub(1).filter(|i| *i < 4)
+            && let Some((accel, gyro)) = crate::pads::motion(slot as usize)
+        {
+            const G: f32 = 9.80665;
+            b.u32(16, (accel[0] / G).to_bits());
+            b.u32(20, (accel[1] / G).to_bits());
+            b.u32(24, (accel[2] / G).to_bits());
+            b.u32(28, gyro[0].to_degrees().to_bits());
+            b.u32(32, gyro[1].to_degrees().to_bits());
+            b.u32(36, gyro[2].to_degrees().to_bits());
+        }
+        unsafe { std::ptr::copy_nonoverlapping(b.0.as_ptr(), ret, 40) };
+    }
+    ret
 }
 
 /// ESteamInputType: 3 = Xbox One controller.
