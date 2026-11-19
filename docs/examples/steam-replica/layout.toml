@@ -5,11 +5,11 @@
 # SHELL
 # ============================================================================
 
-# Top two-row Steam header (70px)
+# Top two-row Steam header (66px)
 [[shell]]
 type = "panel"
 side = "top"
-size = 70
+size = 66
 drag_window = true
 style = { bg = "$chrome", border_bottom = { width = 1, color = "#0E1116" } }
 
@@ -17,7 +17,7 @@ style = { bg = "$chrome", border_bottom = { width = 1, color = "#0E1116" } }
 [[shell.children]]
 type = "row"
 align = "center"
-style = { height = 28, padding = [2, 8, 0, 8], gap = 6 }
+style = { height = 28, padding = [2, 6, 0, 10], gap = 4 }
 
 [[shell.children.children]]
 type = "logo"
@@ -26,7 +26,7 @@ size = 16
 [[shell.children.children]]
 type = "menu"
 label = "Steam"
-style = { font_size = 12, color = "$text_dim", hover_color = "$text" }
+style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 6] }
 items = [
     { label = "Settings", action = "navigate:settings" },
     { label = "Downloads", action = "navigate:downloads" },
@@ -42,7 +42,7 @@ items = [
 [[shell.children.children]]
 type = "menu"
 label = "View"
-style = { font_size = 12, color = "$text_dim", hover_color = "$text" }
+style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 6] }
 items = [
     { label = "Library", action = "navigate:library" },
     { label = "Store", action = "navigate:store" },
@@ -54,7 +54,7 @@ items = [
 [[shell.children.children]]
 type = "menu"
 label = "Friends"
-style = { font_size = 12, color = "$text_dim", hover_color = "$text" }
+style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 6] }
 items = [
     { label = "Friends & Chat", action = "open_friends" },
     { label = "All Friends", action = "navigate:friends" },
@@ -63,7 +63,7 @@ items = [
 [[shell.children.children]]
 type = "menu"
 label = "Games"
-style = { font_size = 12, color = "$text_dim", hover_color = "$text" }
+style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 6] }
 items = [
     { label = "View Games Library", action = "navigate:library" },
     { label = "Activate a Product...", action = "activate_product" },
@@ -73,7 +73,7 @@ items = [
 [[shell.children.children]]
 type = "menu"
 label = "Help"
-style = { font_size = 12, color = "$text_dim", hover_color = "$text" }
+style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 6] }
 items = [
     { label = "Steam Support", action = "open_url:https://help.steampowered.com" },
     { label = "Check for Updates...", action = "check_updates" },
@@ -85,14 +85,14 @@ flex = true
 
 [[shell.children.children]]
 type = "friends_button"
-size = 22
-style = { width = 36, bg = "#24282F", radius = 2 }
+size = 24
+style = { width = 40, bg = "#1A9FFF", color = "#FFFFFF", radius = 2 }
 
 [[shell.children.children]]
 type = "notifications"
-size = 22
-highlight_unread_bg = "$play"
-style = { width = 36, bg = "#24282F", radius = 2 }
+size = 24
+highlight_unread_bg = "#5B7A28"
+style = { width = 40, bg = "#24282F", radius = 2 }
 
 [[shell.children.children]]
 type = "account"
@@ -100,19 +100,19 @@ show_avatar = true
 show_name = true
 show_wallet = true
 show_caret = true
-avatar_size = 20
-style = { bg = "#24282F", radius = 2, padding = [2, 8, 2, 4] }
+avatar_size = 24
+style = { height = 24, bg = "#222730", radius = 2, padding = [0, 8, 0, 0] }
 
 [[shell.children.children]]
 type = "window_controls"
 variant = "windows"
 height = 28
 
-# Row 2 (42px): back/forward arrows + bold uppercase underline navigation tabs
+# Row 2 (38px): back/forward arrows + bold uppercase underline navigation tabs
 [[shell.children]]
 type = "row"
 align = "center"
-style = { height = 42, padding = [0, 12, 0, 12], gap = 8 }
+style = { height = 38, padding = [0, 12, 0, 10], gap = 10 }
 
 [[shell.children.children]]
 type = "back_forward"
@@ -126,14 +126,14 @@ uppercase = true
 profile_as_username = true
 indicator = "underline"
 indicator_height = 2.5
-tab_gap = 18
-style = { font_size = 17, font_weight = "bold", color = "#B8BCBF", hover_color = "#FFFFFF", active_color = "#1A9FFF" }
+tab_gap = 16
+style = { font_size = 16, font_weight = "bold", color = "#DCDEDF", hover_color = "#FFFFFF", active_color = "#1A9FFF" }
 
-# Bottom Steam status bar (32px)
+# Bottom Steam status bar (34px)
 [[shell]]
 type = "panel"
 side = "bottom"
-size = 32
+size = 34
 style = { bg = "$chrome", border_top = { width = 1, color = "#0E1116" }, padding = [0, 14, 0, 14] }
 
 [[shell.children]]
@@ -143,9 +143,10 @@ style = { height = "fill", gap = 8 }
 
 [[shell.children.children]]
 type = "button"
-label = "+ Add a Game"
+label = "Add a Game"
+icon = "plus_box"
 action = "add_game"
-style = { font_size = 12, color = "$text_dim", hover_color = "$text", bg = "transparent", padding = [4, 6, 4, 6] }
+style = { font_size = 12.5, color = "$text_dim", hover_color = "$text", bg = "transparent", padding = [4, 4, 4, 4] }
 
 [[shell.children.children]]
 type = "spacer"
@@ -153,7 +154,7 @@ flex = true
 
 [[shell.children.children]]
 type = "downloads_bar"
-width = 260
+width = 360
 
 [[shell.children.children]]
 type = "spacer"
@@ -162,8 +163,9 @@ flex = true
 [[shell.children.children]]
 type = "button"
 label = "Friends & Chat"
+icon = "friends_box"
 action = "open_friends"
-style = { font_size = 12, color = "$text_dim", hover_color = "$text", bg = "transparent", padding = [4, 6, 4, 6] }
+style = { font_size = 12.5, color = "$text_dim", hover_color = "$text", bg = "transparent", padding = [4, 4, 4, 4] }
 
 # Dockable Friends & Chat drawer
 [[shell]]
@@ -183,11 +185,11 @@ type = "page_content"
 # LIBRARY
 # ============================================================================
 
-# Left compact Steam library sidebar (276px)
+# Left compact Steam library sidebar (254px)
 [[library]]
 type = "panel"
 side = "left"
-size = 276
+size = 254
 style = { bg = "#22252C", border_right = { width = 1, color = "#12151B" }, padding = [8, 8, 8, 8], gap = 6 }
 
 [[library.children]]

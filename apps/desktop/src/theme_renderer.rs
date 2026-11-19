@@ -636,11 +636,42 @@ fn render_shell_node(rctx: &mut ShellRenderCtx<'_, '_, '_>, ui: &mut Ui, node: &
             crate::shell::friends_hover(rctx.app, ui, &t, &fr, rctx.actions);
         }
 
-        Node::DownloadsBar { width, .. } => {
-            let w_px = width.unwrap_or(240.0);
-            let h_px = ui.available_height().clamp(20.0, 28.0);
-            let (rect, _) = ui.allocate_exact_size(vec2(w_px, h_px), Sense::hover());
-            crate::shell::downloads_control(rctx.app, ui, &t, rect);
+        Node::DownloadsBar { width, style } => {
+            let w_px = width.unwrap_or(340.0);
+            let h_px = ui.available_height().clamp(24.0, 32.0);
+            let (rect, resp) = ui.allocate_exact_size(vec2(w_px, h_px), Sense::click());
+            let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
+            let active = rctx.app.state.downloads.values().find(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)).cloned();
+            let p = ui.painter();
+            let fg = w::mix(style.color.map(|c| c.resolve(&t)).unwrap_or(t.text_dim), t.text, hover);
+            if let Some(d) = active {
+                let frac = (d.disk_done as f64 / d.disk_total.max(1) as f64).clamp(0.0, 1.0) as f32;
+                let pct = format!("{}%", (frac * 100.0).round() as u32);
+                let name = rctx.app.state.app_name(d.app_id).unwrap_or("Updating").to_string();
+                let ic_rect = Rect::from_min_size(pos2(rect.left(), rect.center().y - 10.0), vec2(20.0, 20.0));
+                let ic_url = rctx.app.state.apps.as_ref().and_then(|a| a.get(&d.app_id)).and_then(|o| o.icon.as_deref()).map(|h| art::icon(d.app_id, h));
+                let hdr = art::header(d.app_id);
+                let urls: Vec<&str> = ic_url.as_deref().into_iter().chain([hdr.as_str()]).collect();
+                if !w::paint_cover_first(ui, ic_rect, &urls, CornerRadius::same(2)) {
+                    p.rect_filled(ic_rect, CornerRadius::same(2), t.raised);
+                }
+                let tx = ic_rect.right() + 8.0;
+                p.text(pos2(tx, rect.top() + 3.0), Align2::LEFT_TOP, name, w::font(12.0), fg);
+                p.text(pos2(rect.right(), rect.top() + 3.0), Align2::RIGHT_TOP, pct, w::font(12.0), fg);
+                let track = Rect::from_min_max(pos2(tx, rect.bottom() - 5.0), pos2(rect.right(), rect.bottom() - 2.0));
+                p.rect_filled(track, CornerRadius::same(1), Color32::from_rgb(0x0B, 0x0E, 0x12));
+                let fill = Rect::from_min_size(track.min, vec2(track.width() * frac, track.height()));
+                p.rect_filled(fill, CornerRadius::same(1), if d.paused { t.text_faint } else { t.accent });
+            } else {
+                let label = format!("{}  {}", icons::DOWNLOAD, t!("Manage Downloads"));
+                let galley = p.layout_no_wrap(label, w::font(12.0), fg);
+                p.galley(pos2(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5 - 2.0), galley, fg);
+                let track = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 3.5), vec2((w_px * 0.55).min(180.0), 2.5));
+                p.rect_filled(track, CornerRadius::same(1), Color32::from_rgb(0x0B, 0x0E, 0x12));
+            }
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                rctx.actions.push(Action::Navigate { page: "downloads".into(), arg: None });
+            }
         }
 
         Node::FriendsDrawer { width, style } => {
@@ -893,19 +924,22 @@ fn render_account_node(
     if show_avatar {
         let av_rect = Rect::from_min_size(pos2(x, rect.center().y - avatar_size * 0.5), vec2(avatar_size, avatar_size));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(av_rect));
-        w::avatar_rounded(&mut child, &t, &art::avatar(me.avatar_hash.as_deref()), avatar_size, Some(color), CornerRadius::same(2));
-        x += avatar_size + 6.0;
+        w::avatar_rounded(&mut child, &t, &art::avatar(me.avatar_hash.as_deref()), avatar_size, None, CornerRadius::ZERO);
+        // Steam-style 2px vertical status stripe along the right edge of the avatar.
+        ui.painter().rect_filled(Rect::from_min_size(pos2(av_rect.right(), av_rect.top()), vec2(2.0, avatar_size)), CornerRadius::ZERO, color);
+        x += avatar_size + 8.0;
     }
     if let Some(g) = name_g {
         let gw = g.size().x;
         ui.painter().galley(pos2(x, rect.center().y - g.size().y * 0.5), g, name_color);
-        x += gw + 8.0;
+        x += gw + 4.0;
+    }
+    if show_caret {
+        ui.painter().text(pos2(x + 4.0, rect.center().y), Align2::CENTER_CENTER, icons::CARET_DOWN, w::font(10.0), name_color);
+        x += 14.0;
     }
     if let Some(g) = wallet_g {
         ui.painter().galley(pos2(x, rect.center().y - g.size().y * 0.5), g, t.text_dim);
-    }
-    if show_caret {
-        ui.painter().text(rect.right_center() - vec2(pad.right + 4.0, 0.0), Align2::CENTER_CENTER, icons::CARET_DOWN, w::font(11.0), t.text_faint);
     }
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     crate::shell::account_menu_popup(rctx.app, &resp, &t, &me, rctx.actions);
@@ -916,18 +950,20 @@ fn render_styled_button(ui: &mut Ui, t: &Theme, label: &str, icon: Option<&str>,
     let font = font_for(style.font_weight, fs);
     let raw = if label.is_empty() { String::new() } else { i18n::tr_dyn(label) };
     let display = if style.uppercase.unwrap_or(false) { raw.to_uppercase() } else { raw };
-    let ic = icon.map(icon_for_name);
+    let is_badge_btn = icon == Some("plus_box") || icon == Some("friends_box");
+    let ic = if is_badge_btn { None } else { icon.map(icon_for_name) };
     let text_str = match (ic, display.is_empty()) {
         (Some(i), true) => i.to_string(),
         (Some(i), false) => format!("{i}  {display}"),
         (None, _) => display,
     };
-    let galley = ui.painter().layout_no_wrap(text_str, font, Color32::PLACEHOLDER);
+    let galley = ui.painter().layout_no_wrap(text_str, font.clone(), Color32::PLACEHOLDER);
     let pad = style.padding.unwrap_or(themes::Edges::symmetric(4.0, 8.0));
+    let extra_badge_w = if is_badge_btn { 26.0 } else { 0.0 };
     let w_px = match style.width {
         Some(SizeVal::Px(w)) => w,
-        Some(SizeVal::Fill) => ui.available_width().max(galley.size().x + pad.left + pad.right),
-        _ => galley.size().x + pad.left + pad.right,
+        Some(SizeVal::Fill) => ui.available_width().max(galley.size().x + extra_badge_w + pad.left + pad.right),
+        _ => galley.size().x + extra_badge_w + pad.left + pad.right,
     };
     let h_px = match style.height {
         Some(SizeVal::Px(h)) => h,
@@ -953,12 +989,33 @@ fn render_styled_button(ui: &mut Ui, t: &Theme, label: &str, icon: Option<&str>,
     if icon == Some("grid") && label.is_empty() {
         // Draw crisp 2x2 squares directly (Steam Collections icon, never misses a font glyph).
         let c = rect.center();
-        let s = 5.0;
+        let s = 6.0;
         let g = 2.0;
         for dx in [-s - g * 0.5, g * 0.5] {
             for dy in [-s - g * 0.5, g * 0.5] {
                 ui.painter().rect_filled(Rect::from_min_size(pos2(c.x + dx, c.y + dy), vec2(s, s)), CornerRadius::same(1), fg);
             }
+        }
+        return resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
+    if icon == Some("plus_box") || icon == Some("friends_box") {
+        let right_side = icon == Some("friends_box");
+        let lbl_g = ui.painter().layout_no_wrap(i18n::tr_dyn(label), font, fg);
+        let box_sz = 18.0;
+        let gap = 7.0;
+        let box_bg = w::mix(Color32::from_rgb(0x3B, 0x42, 0x4D), Color32::from_rgb(0x4E, 0x57, 0x66), hover);
+        let glyph_c = Color32::from_rgb(0x17, 0x1D, 0x25);
+        if right_side {
+            let lx = rect.left() + pad.left;
+            ui.painter().galley(pos2(lx, rect.center().y - lbl_g.size().y * 0.5), lbl_g, fg);
+            let b = Rect::from_min_size(pos2(rect.right() - pad.right - box_sz, rect.center().y - box_sz * 0.5), vec2(box_sz, box_sz));
+            ui.painter().rect_filled(b, CornerRadius::same(2), box_bg);
+            ui.painter().text(b.center(), Align2::CENTER_CENTER, icons::USERS, w::font(11.5), glyph_c);
+        } else {
+            let b = Rect::from_min_size(pos2(rect.left() + pad.left, rect.center().y - box_sz * 0.5), vec2(box_sz, box_sz));
+            ui.painter().rect_filled(b, CornerRadius::same(2), box_bg);
+            ui.painter().text(b.center(), Align2::CENTER_CENTER, icons::PLUS, w::font_bold(12.0), glyph_c);
+            ui.painter().galley(pos2(b.right() + gap, rect.center().y - lbl_g.size().y * 0.5), lbl_g, fg);
         }
         return resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     }
