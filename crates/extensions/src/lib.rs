@@ -109,6 +109,12 @@ pub enum Action {
     OpenChat(model::SteamId),
     /// Clear the unread count for a conversation.
     MarkRead(model::SteamId),
+    /// Open a group chat (and optionally a specific channel).
+    OpenGroupChat { group_id: model::GroupChatId, chat_id: Option<model::ChatRoomId> },
+    /// Clear unread count and acknowledge the latest message in a group channel.
+    MarkGroupRead { group_id: model::GroupChatId, chat_id: model::ChatRoomId },
+    /// Join a group chat from an inline invite card or invite link.
+    JoinGroupInvite { group_id: Option<model::GroupChatId>, chat_id: Option<model::ChatRoomId>, code: Option<String> },
     /// Re-scan the local Steam library (after an uninstall, for example).
     ReloadLocal,
     ToggleOverlay,

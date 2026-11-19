@@ -103,6 +103,8 @@ pub const SQUARE: &str = "\u{E45E}";
 pub const RESTORE: &str = "\u{E1CC}";
 pub const USER_SWITCH: &str = "\u{E756}";
 pub const QUESTION: &str = "\u{E3E8}";
+pub const SPEAKER_HIGH: &str = "\u{E44A}";
+pub const SPEAKER_X: &str = "\u{E45C}";
 
 /// Map a short icon name (used in plugin manifests) to a glyph.
 pub fn by_name(name: &str) -> &'static str {

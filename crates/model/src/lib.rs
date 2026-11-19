@@ -6,6 +6,19 @@ use std::path::PathBuf;
 
 pub type AppId = u32;
 pub type SteamId = u64;
+pub type GroupChatId = u64;
+pub type ChatRoomId = u64;
+
+/// Convert a 32-bit Steam account ID into a full 64-bit individual SteamID
+/// (universe 1 = Public, type 1 = Individual, instance 1 = Desktop).
+pub const fn account_to_steam_id(account_id: u32) -> SteamId {
+    76561197960265728 + account_id as u64
+}
+
+/// Extract the 32-bit account ID from a 64-bit SteamID.
+pub const fn steam_id_to_account(steam_id: SteamId) -> u32 {
+    (steam_id & 0xFFFF_FFFF) as u32
+}
 
 /// A game installed in one of the local Steam library folders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1466,6 +1479,344 @@ pub struct ChatMessage {
     /// "steam://run" link), shown as a card with a Join button.
     #[serde(default)]
     pub invite: Option<GameInvite>,
+    /// A group chat invite (`[invite]`, `[inviteurl]`, or `s.team/chat/…`),
+    /// shown as a card with a Join button.
+    #[serde(default)]
+    pub group_invite: Option<GroupInviteRef>,
+}
+
+/// Reference to a group chat invitation embedded in a message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GroupInviteRef {
+    Direct { group_id: GroupChatId, chat_id: ChatRoomId },
+    Link { code: String },
+}
+
+impl GroupInviteRef {
+    pub fn key(&self) -> String {
+        match self {
+            Self::Direct { group_id, chat_id } => format!("direct:{group_id}:{chat_id}"),
+            Self::Link { code } => format!("link:{code}"),
+        }
+    }
+
+    pub fn link_url(code: &str) -> String {
+        format!("https://s.team/chat/{code}")
+    }
+}
+
+/// Summary information about a group chat invite fetched from Steam.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupInviteInfo {
+    pub key: String,
+    pub group_id: GroupChatId,
+    pub chat_id: ChatRoomId,
+    pub name: String,
+    pub avatar_url: Option<String>,
+    pub member_count: u32,
+    pub banned: bool,
+    pub kick_expires: u32,
+    pub expires: u32,
+    pub already_member: bool,
+}
+
+/// A role within a group chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatRole {
+    pub role_id: u64,
+    pub name: String,
+    pub ordinal: u32,
+}
+
+/// Permissions granted to a group chat role.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatRoleActions {
+    pub role_id: u64,
+    pub can_create_rename_delete_channel: bool,
+    pub can_kick: bool,
+    pub can_ban: bool,
+    pub can_invite: bool,
+    pub can_change_tagline_avatar_name: bool,
+    pub can_chat: bool,
+    pub can_view_history: bool,
+    pub can_change_group_roles: bool,
+    pub can_change_user_roles: bool,
+    pub can_mention_all: bool,
+    pub can_set_watching_broadcast: bool,
+}
+
+impl ChatRoleActions {
+    pub fn all() -> Self {
+        Self {
+            role_id: 0,
+            can_create_rename_delete_channel: true,
+            can_kick: true,
+            can_ban: true,
+            can_invite: true,
+            can_change_tagline_avatar_name: true,
+            can_chat: true,
+            can_view_history: true,
+            can_change_group_roles: true,
+            can_change_user_roles: true,
+            can_mention_all: true,
+            can_set_watching_broadcast: true,
+        }
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        self.can_create_rename_delete_channel |= other.can_create_rename_delete_channel;
+        self.can_kick |= other.can_kick;
+        self.can_ban |= other.can_ban;
+        self.can_invite |= other.can_invite;
+        self.can_change_tagline_avatar_name |= other.can_change_tagline_avatar_name;
+        self.can_chat |= other.can_chat;
+        self.can_view_history |= other.can_view_history;
+        self.can_change_group_roles |= other.can_change_group_roles;
+        self.can_change_user_roles |= other.can_change_user_roles;
+        self.can_mention_all |= other.can_mention_all;
+        self.can_set_watching_broadcast |= other.can_set_watching_broadcast;
+    }
+}
+
+/// One text or voice channel inside a group chat.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChatRoomChannel {
+    pub id: ChatRoomId,
+    pub name: String,
+    pub voice_allowed: bool,
+    pub members_in_voice: Vec<u32>,
+    pub sort_order: u32,
+    pub time_last_message: u32,
+    pub last_message: String,
+    pub accountid_last_message: u32,
+    pub time_last_ack: u32,
+    pub time_first_unread: u32,
+    pub time_last_mention: u32,
+    pub unread_muted: bool,
+    /// Locally tracked unread messages arriving while this channel isn't open.
+    pub unread: usize,
+}
+
+impl ChatRoomChannel {
+    pub fn has_unread(&self) -> bool {
+        !self.unread_muted && (self.unread > 0 || (self.time_last_message > self.time_last_ack && self.time_last_message > 0))
+    }
+
+    pub fn unread_badge(&self) -> usize {
+        if self.unread_muted {
+            0
+        } else if self.unread > 0 {
+            self.unread
+        } else if self.time_last_message > self.time_last_ack && self.time_last_message > 0 {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+/// One member inside a group chat.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChatGroupMember {
+    pub steam_id: SteamId,
+    pub account_id: u32,
+    /// `EChatRoomGroupRank`: 50 Owner, 40 Officer, 30 Moderator, 20 Member, 15 Guest, 10 Viewer.
+    pub rank: i32,
+    /// `EChatRoomJoinState`: 2 Joined, 1 None.
+    pub state: i32,
+    pub time_kick_expire: u32,
+    pub role_ids: Vec<u64>,
+}
+
+/// A Steam group chat (ad-hoc multi-friend chat, saved group, or Steam clan chat).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChatGroup {
+    pub id: GroupChatId,
+    pub name: String,
+    pub tagline: String,
+    pub avatar_url: Option<String>,
+    pub owner_id: SteamId,
+    pub clan_id: u32,
+    pub app_id: AppId,
+    pub default_chat_id: ChatRoomId,
+    pub rooms: Vec<ChatRoomChannel>,
+    pub members: Vec<ChatGroupMember>,
+    pub top_members: Vec<SteamId>,
+    pub active_member_count: u32,
+    pub active_voice_member_count: u32,
+    pub my_rank: i32,
+    pub my_role_ids: Vec<u64>,
+    pub roles: Vec<ChatRole>,
+    pub role_actions: Vec<ChatRoleActions>,
+    pub default_role_id: u64,
+    pub time_joined: u32,
+    pub time_last_group_ack: u32,
+    pub unread_muted: bool,
+    pub desktop_notification_level: i32,
+    pub full_loaded: bool,
+    pub virtualized_members: bool,
+}
+
+impl ChatGroup {
+    pub fn is_saved(&self) -> bool {
+        !self.name.trim().is_empty() || self.clan_id != 0
+    }
+
+    pub fn sort_rooms(&mut self) {
+        self.rooms.sort_by_key(|r| (r.sort_order, r.id));
+    }
+
+    pub fn text_channels(&self) -> impl Iterator<Item = &ChatRoomChannel> {
+        self.rooms.iter().filter(|r| !r.voice_allowed)
+    }
+
+    pub fn voice_channels(&self) -> impl Iterator<Item = &ChatRoomChannel> {
+        self.rooms.iter().filter(|r| r.voice_allowed)
+    }
+
+    pub fn channel(&self, chat_id: ChatRoomId) -> Option<&ChatRoomChannel> {
+        self.rooms.iter().find(|r| r.id == chat_id)
+    }
+
+    pub fn channel_mut(&mut self, chat_id: ChatRoomId) -> Option<&mut ChatRoomChannel> {
+        self.rooms.iter_mut().find(|r| r.id == chat_id)
+    }
+
+    pub fn default_text_channel_id(&self) -> Option<ChatRoomId> {
+        if self.rooms.iter().any(|r| r.id == self.default_chat_id && !r.voice_allowed) {
+            return Some(self.default_chat_id);
+        }
+        self.rooms
+            .iter()
+            .find(|r| !r.voice_allowed)
+            .or_else(|| self.rooms.first())
+            .map(|r| r.id)
+    }
+
+    pub fn unread_count(&self) -> usize {
+        if self.unread_muted {
+            return 0;
+        }
+        self.rooms.iter().map(ChatRoomChannel::unread_badge).sum()
+    }
+
+    pub fn effective_permissions(&self, me_account: u32) -> ChatRoleActions {
+        if self.my_rank >= 50 || (me_account != 0 && self.owner_id == account_to_steam_id(me_account)) {
+            return ChatRoleActions::all();
+        }
+        let mut perms = ChatRoleActions::default();
+        let mut matched = false;
+        let ids: Vec<u64> = if !self.my_role_ids.is_empty() {
+            self.my_role_ids.clone()
+        } else if let Some(m) = self.members.iter().find(|m| m.account_id == me_account) {
+            m.role_ids.clone()
+        } else {
+            Vec::new()
+        };
+        for act in &self.role_actions {
+            if ids.contains(&act.role_id) || (ids.is_empty() && act.role_id == self.default_role_id) {
+                perms.merge(act);
+                matched = true;
+            }
+        }
+        if !matched && self.role_actions.is_empty() {
+            // Summary before full role actions load: allow chatting & inviting for ordinary members.
+            perms.can_chat = self.my_rank >= 15 || self.my_rank == 0;
+            perms.can_view_history = true;
+            perms.can_invite = self.my_rank >= 20 || !self.is_saved();
+            perms.can_create_rename_delete_channel = self.my_rank >= 40;
+            perms.can_change_tagline_avatar_name = self.my_rank >= 40;
+            perms.can_kick = self.my_rank >= 30;
+            perms.can_ban = self.my_rank >= 40;
+            perms.can_mention_all = self.my_rank >= 30;
+        }
+        perms
+    }
+
+    pub fn display_name(&self, resolve: impl Fn(SteamId) -> Option<String>, me: SteamId) -> String {
+        if !self.name.trim().is_empty() {
+            return self.name.clone();
+        }
+        let mut seen = Vec::new();
+        for id in self.top_members.iter().copied().chain(self.members.iter().map(|m| m.steam_id)) {
+            if id == 0 || id == me || seen.contains(&id) {
+                continue;
+            }
+            seen.push(id);
+        }
+        let names: Vec<String> = seen
+            .iter()
+            .take(3)
+            .filter_map(|id| resolve(*id).filter(|s| !s.trim().is_empty()))
+            .collect();
+        if names.is_empty() {
+            return format!("Group #{}", self.id);
+        }
+        let extra = self.active_member_count.saturating_sub(1 + names.len() as u32);
+        if extra > 0 && names.len() >= 2 {
+            format!("{} + {extra}", names[..2].join(", "))
+        } else {
+            names.join(", ")
+        }
+    }
+}
+
+/// System/server notice recorded in group chat history (`EChatRoomServerMessage`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupServerMessage {
+    pub kind: i32,
+    pub string_param: String,
+    pub account_id_param: u32,
+}
+
+/// One emoji/sticker reaction summary on a group chat message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageReaction {
+    pub reaction_type: i32,
+    pub reaction: String,
+    pub count: u32,
+    pub reacted: bool,
+}
+
+/// One message in a group chat channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMessage {
+    pub group_id: GroupChatId,
+    pub chat_id: ChatRoomId,
+    pub from: SteamId,
+    pub text: String,
+    pub time: u64,
+    pub ordinal: u32,
+    #[serde(default)]
+    pub invite: Option<GameInvite>,
+    #[serde(default)]
+    pub group_invite: Option<GroupInviteRef>,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub server_msg: Option<GroupServerMessage>,
+    #[serde(default)]
+    pub reactions: Vec<MessageReaction>,
+    #[serde(default)]
+    pub mentioned_me: bool,
+}
+
+/// An active invite link for a group chat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupInviteLink {
+    pub code: String,
+    pub creator: SteamId,
+    pub expires: u32,
+    pub chat_id: ChatRoomId,
+}
+
+/// A banned user in a group chat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupBanInfo {
+    pub steam_id: SteamId,
+    pub actor: SteamId,
+    pub time_banned: u32,
+    pub reason: String,
 }
 
 /// "Come play with me": which game, and how to join the inviter.
@@ -1498,9 +1849,17 @@ impl GameInvite {
     }
 }
 
-/// Steam chat markup ("BBCode") to plain text plus a game invite, if any.
+/// Steam chat markup ("BBCode") to plain text plus any embedded game or
+/// group-chat invite.
 pub mod chat {
-    use super::GameInvite;
+    use super::{GameInvite, GroupInviteRef};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ParsedChat {
+        pub text: String,
+        pub invite: Option<GameInvite>,
+        pub group_invite: Option<GroupInviteRef>,
+    }
 
     /// `name="value"` (or `name=value`) from inside a tag.
     fn attr(tag: &str, name: &str) -> Option<String> {
@@ -1531,11 +1890,35 @@ pub mod chat {
         Some(GameInvite { app_id, connect })
     }
 
-    /// Plain text for display, and the invite in it. Tags are dropped and
-    /// their inside kept (emoticons become `:name:`).
-    pub fn parse(raw: &str) -> (String, Option<GameInvite>) {
+    fn group_invite_from(tag: &str) -> Option<GroupInviteRef> {
+        if let Some(code) = attr(tag, "invitecode").filter(|c| !c.is_empty()) {
+            return Some(GroupInviteRef::Link { code });
+        }
+        let group_id = attr(tag, "chatgroupid")?.parse().ok()?;
+        let chat_id = attr(tag, "chatid").and_then(|c| c.parse().ok()).unwrap_or(0);
+        Some(GroupInviteRef::Direct { group_id, chat_id })
+    }
+
+    fn link_group_invite(text: &str) -> Option<GroupInviteRef> {
+        for prefix in ["https://s.team/chat/", "http://s.team/chat/", "https://steamcommunity.com/chat/invite/", "http://steamcommunity.com/chat/invite/"] {
+            if let Some(at) = text.find(prefix) {
+                let code: String = text[at + prefix.len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                if !code.is_empty() {
+                    return Some(GroupInviteRef::Link { code });
+                }
+            }
+        }
+        None
+    }
+
+    /// Parse Steam chat markup into display text plus optional game or group-chat invite.
+    pub fn parse_message(raw: &str) -> ParsedChat {
         let mut out = String::new();
         let mut invite = None;
+        let mut group_invite = None;
         let mut rest = raw;
         while let Some(c) = rest.chars().next() {
             // Steam escapes a literal "[" as "\[".
@@ -1552,6 +1935,7 @@ pub mod chat {
                     if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                         match name {
                             "gameinvite" | "lobbyinvite" if !closing => invite = invite.or_else(|| invite_from(tag)),
+                            "invite" | "inviteurl" if !closing => group_invite = group_invite.or_else(|| group_invite_from(tag)),
                             "emoticon" => out.push(':'),
                             "sticker" if !closing => out.push_str(&format!("[{}]", attr(tag, "type").unwrap_or_else(|| "sticker".into()))),
                             _ => {}
@@ -1569,7 +1953,59 @@ pub mod chat {
         if invite.is_none() {
             invite = link_invite(&text);
         }
-        (text, invite)
+        if group_invite.is_none() {
+            group_invite = link_group_invite(&text);
+        }
+        ParsedChat { text, invite, group_invite }
+    }
+
+    /// Plain text for display, and the game invite in it.
+    pub fn parse(raw: &str) -> (String, Option<GameInvite>) {
+        let parsed = parse_message(raw);
+        (parsed.text, parsed.invite)
+    }
+
+    /// Convert `@all`, `@here`, and `@name` tokens into Steam `[mention=...]` BBCode.
+    pub fn encode_mentions(raw: &str, members: &[(u32, &str)]) -> String {
+        let mut sorted: Vec<(u32, &str)> = members.iter().copied().filter(|(_, n)| !n.trim().is_empty()).collect();
+        sorted.sort_by_key(|(_, n)| std::cmp::Reverse(n.len()));
+        let mut out = String::with_capacity(raw.len());
+        let mut rest = raw;
+        while let Some(at) = rest.find('@') {
+            out.push_str(&rest[..at]);
+            let after = &rest[at + 1..];
+            let preceded_ok = rest[..at].chars().last().is_none_or(|c| c.is_whitespace());
+            if !preceded_ok {
+                out.push('@');
+                rest = after;
+                continue;
+            }
+            let kw = ["all", "here"].into_iter().find(|k| {
+                after.len() >= k.len()
+                    && after[..k.len()].eq_ignore_ascii_case(k)
+                    && after[k.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric() && c != '_')
+            });
+            if let Some(k) = kw {
+                out.push_str(&format!("[mention={k}]@{k}[/mention]"));
+                rest = &after[k.len()..];
+                continue;
+            }
+            let matched = sorted.iter().find(|(_, name)| {
+                after.len() >= name.len()
+                    && after[..name.len()].eq_ignore_ascii_case(name)
+                    && after[name.len()..].chars().next().is_none_or(|c| c.is_whitespace() || ",.!?;:)]}".contains(c))
+            });
+            if let Some((acct, name)) = matched {
+                let exact = &after[..name.len()];
+                out.push_str(&format!("[mention={acct}]@{exact}[/mention]"));
+                rest = &after[name.len()..];
+            } else {
+                out.push('@');
+                rest = after;
+            }
+        }
+        out.push_str(rest);
+        out
     }
 
     /// The invite in a `steam://run/<app>[//<args>]` link, if any.
@@ -1610,6 +2046,25 @@ pub mod chat {
             assert_eq!(inv, Some(GameInvite { app_id: 570, connect: "+invite 30095787509687845 -launchsource2".into() }));
             let (_, inv) = parse(r#"[lobbyinvite appid="477160" lobbyid="109775241000000001"][/lobbyinvite]"#);
             assert_eq!(inv.unwrap().connect, "+connect_lobby 109775241000000001");
+        }
+
+        #[test]
+        fn group_invites_and_mentions() {
+            let p = parse_message(r#"[invite chatgroupid="12345" chatid="67890"][/invite]"#);
+            assert_eq!(p.text, "");
+            assert_eq!(p.group_invite, Some(GroupInviteRef::Direct { group_id: 12345, chat_id: 67890 }));
+
+            let p2 = parse_message(r#"[inviteurl invitecode="AbCdEf12"][/inviteurl]"#);
+            assert_eq!(p2.group_invite, Some(GroupInviteRef::Link { code: "AbCdEf12".into() }));
+
+            let p3 = parse_message("join us at https://s.team/chat/XyZ987 tonight!");
+            assert_eq!(p3.group_invite, Some(GroupInviteRef::Link { code: "XyZ987".into() }));
+
+            let p4 = parse_message("hey [mention=42]@Ferris[/mention] check [mention=all]@all[/mention]");
+            assert_eq!(p4.text, "hey @Ferris check @all");
+
+            let encoded = encode_mentions("hi @Ferris and @all! email@test.com", &[(42, "Ferris")]);
+            assert_eq!(encoded, "hi [mention=42]@Ferris[/mention] and [mention=all]@all[/mention]! email@test.com");
         }
 
         #[test]
@@ -1686,6 +2141,20 @@ pub mod art {
     /// Community item images (profile backgrounds, frames).
     pub fn community_item(path: &str) -> String {
         format!("https://cdn.akamai.steamstatic.com/steamcommunity/public/images/{path}")
+    }
+    /// Group chat icon from its SHA bytes.
+    pub fn group_chat_avatar(sha: &[u8]) -> Option<String> {
+        if sha.len() < 3 || sha.iter().all(|b| *b == 0) {
+            return None;
+        }
+        let hex: String = sha.iter().map(|b| format!("{b:02x}")).collect();
+        Some(format!(
+            "https://shared.fastly.steamstatic.com/community_assets/images/chaticons/{}/{}/{}/{}_64.jpg",
+            &hex[0..2],
+            &hex[2..4],
+            &hex[4..6],
+            hex
+        ))
     }
     /// Inventory item image, at most `size` × `size` with its own shape.
     /// (The "…fx…f" form pads it into a transparent square, which made

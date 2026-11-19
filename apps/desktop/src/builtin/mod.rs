@@ -4,6 +4,7 @@
 //! users install themselves, see the `plugins` crate.
 
 pub mod community;
+pub mod group_chat;
 mod downloads;
 pub mod hub;
 mod inventory;

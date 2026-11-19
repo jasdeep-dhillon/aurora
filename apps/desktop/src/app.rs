@@ -212,7 +212,8 @@ impl SteamApp {
             rt.handle(),
             Arc::new(move |e| {
                 let _ = tx.send(e);
-                repaint.request_repaint();
+                repaint.request_repaint_of(egui::ViewportId::ROOT);
+                repaint.request_repaint_of(egui::ViewportId::from_hash_of("friends-window"));
             }),
         );
         // Tell the session the setting before it signs in and would otherwise
@@ -336,15 +337,37 @@ impl SteamApp {
         self.toasts.push(Toast { title: title.into(), body: body.into(), until: now + 5.0 });
     }
 
-    fn drain_events(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+    pub(crate) fn drain_events(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let now = ctx.input(|i| i.time);
         while let Ok(e) = self.events.try_recv() {
             // Toast-worthy things are decided before state changes.
             if let Event::Message(m) = &e {
-                let open = self.prefs.page == "community" && self.current_arg.as_deref() == Some(&m.friend.to_string());
+                let open = (self.prefs.page == "community" && self.current_arg.as_deref() == Some(&m.friend.to_string()))
+                    || (self.friends_window.open && self.friends_window.chat == Some(crate::builtin::group_chat::ChatTarget::Friend(m.friend)));
                 if m.from != self.state.steam_id && !open && self.prefs.toast_messages {
                     let name = self.state.persona(m.from).name;
                     self.toast(now, name, m.text.clone());
+                }
+            }
+            if let Event::GroupMessage(m) = &e {
+                let open_main = self.prefs.page == "community"
+                    && self
+                        .current_arg
+                        .as_deref()
+                        .and_then(|s| s.strip_prefix("group:"))
+                        .is_some_and(|rest| rest.split(':').next().and_then(|g| g.parse::<u64>().ok()) == Some(m.group_id));
+                let open_fw = self.friends_window.open
+                    && self.friends_window.chat == Some(crate::builtin::group_chat::ChatTarget::Group(m.group_id));
+                if m.from != self.state.steam_id && m.server_msg.is_none() && !open_main && !open_fw && self.prefs.toast_messages {
+                    if let Some(g) = self.state.chat_groups.get(&m.group_id) {
+                        let ch_muted = g.channel(m.chat_id).is_some_and(|c| c.unread_muted);
+                        let should = !g.unread_muted && !ch_muted && (m.mentioned_me || !g.is_saved() || g.desktop_notification_level == 4);
+                        if should {
+                            let group_name = self.state.group_display_name(g);
+                            let sender = self.state.persona(m.from).display_name();
+                            self.toast(now, group_name, format!("{sender}: {}", m.text));
+                        }
+                    }
                 }
             }
             if let (Event::NotificationsArrived(list), true) = (&e, self.prefs.toast_notifications) {
@@ -380,6 +403,18 @@ impl SteamApp {
                     self.login.on_failed();
                 }
                 Event::AccountInfo { .. } => self.saved = client::store::load(),
+                Event::GroupJoined(gid) => {
+                    if self.friends_window.open {
+                        self.friends_window.chat = Some(crate::builtin::group_chat::ChatTarget::Group(*gid));
+                        self.friends_window.group_ui.chat_id = None;
+                    }
+                }
+                Event::ChatGroupRemoved(gid) => {
+                    if self.friends_window.chat == Some(crate::builtin::group_chat::ChatTarget::Group(*gid)) {
+                        self.friends_window.chat = None;
+                        self.friends_window.group_ui.chat_id = None;
+                    }
+                }
                 Event::GameStarted { app_id } => {
                     self.overlay.game_started(*app_id, self.prefs.overlay_enabled);
                     if let Some(p) = self.launch_popup.as_mut().filter(|p| p.app_id == *app_id) {
@@ -465,6 +500,17 @@ impl SteamApp {
                     }
                 }
                 Action::OpenChat(id) => self.navigate("community".into(), Some(id.to_string())),
+                Action::OpenGroupChat { group_id, chat_id } => {
+                    let arg = match chat_id {
+                        Some(cid) => format!("group:{group_id}:{cid}"),
+                        None => format!("group:{group_id}"),
+                    };
+                    if self.friends_window.open {
+                        self.friends_window.chat = Some(crate::builtin::group_chat::ChatTarget::Group(group_id));
+                        self.friends_window.group_ui.chat_id = chat_id;
+                    }
+                    self.navigate("community".into(), Some(arg));
+                }
                 Action::ReloadLocal => {
                     if let Ok(l) = local::load(Some(self.local.steam_root.clone())) {
                         self.local = l;
@@ -472,6 +518,14 @@ impl SteamApp {
                 }
                 Action::MarkRead(id) => {
                     self.state.unread.remove(&id);
+                }
+                Action::MarkGroupRead { group_id, chat_id } => {
+                    if let Some(ts) = self.state.mark_group_read(group_id, chat_id) {
+                        self.client.send(Command::AckGroupMessage { group_id, chat_id, timestamp: ts });
+                    }
+                }
+                Action::JoinGroupInvite { group_id, chat_id, code } => {
+                    self.client.send(Command::JoinChatGroup { group_id, chat_id, invite_code: code });
                 }
                 Action::ToggleOverlay => self.overlay.toggle(),
                 Action::JoinGame { app_id, connect } => {
@@ -646,6 +700,11 @@ impl eframe::App for SteamApp {
     /// (minimized or behind a fullscreen game on Wayland): the overlay drawn
     /// inside the game runs here so it stays quick then.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut actions = Vec::new();
+        self.drain_events(ctx, &mut actions);
+        self.handle_tray(ctx, &mut actions);
+        self.handle_links(ctx, &mut actions);
+        self.apply_actions(ctx, actions);
         crate::overlay::logic(self, ctx);
     }
 
