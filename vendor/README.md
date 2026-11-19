@@ -41,3 +41,11 @@ Copy the new `epaint`, `egui_glow` and `eframe` from
 `~/.cargo/registry/src/*/` and reapply the changes above, or drop the patch
 and stop calling `ui::install_fonts_with(ctx, true)` (and accept a slower
 in-game overlay on Wayland).
+
+# SDL3 (`vendor/sdl3/`)
+
+`SDL3.dll` (x64) from the official `libsdl-org/SDL` 3.4.18 Windows release
+(`SDL3-3.4.18-win32-x64.zip`, SHA-256
+`75c2c0fc74e7d1206aaedc22893a35887332f4f85f5c8b74fddc10d177985f2c`),
+distributed unmodified under the zlib license (`vendor/sdl3/LICENSE.txt`,
+copied as `SDL3-LICENSE.txt` in packaged builds).

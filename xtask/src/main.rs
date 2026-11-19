@@ -107,10 +107,26 @@ fn package() -> Result {
     // steamclient64.dll; nothing of Valve's is bundled).
     copy(&release.join("steamhost.exe"), &stage.join("steamhost.exe"))?;
     // SDL3 reads PlayStation, Switch and other non-Xbox controllers for games
-    // (crates/client/src/pads.rs). CI downloads the official build.
-    match std::env::var_os("SIR_SDL3").map(PathBuf::from).filter(|p| p.is_file()) {
-        Some(sdl) => copy(&sdl, &stage.join("SDL3.dll"))?,
-        None => eprintln!("warning: SIR_SDL3 not set: games will only see Xbox controllers (no SDL3.dll)."),
+    // (crates/client/src/pads.rs). Prefer SIR_SDL3 if set, otherwise use the
+    // vendored official build and include its zlib license notice.
+    let sdl = std::env::var_os("SIR_SDL3")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            let vendored = root.join("vendor").join("sdl3").join("SDL3.dll");
+            vendored.is_file().then_some(vendored)
+        });
+    match sdl {
+        Some(sdl) => {
+            copy(&sdl, &stage.join("SDL3.dll"))?;
+            let sdl_license = [sdl.with_file_name("LICENSE.txt"), root.join("vendor").join("sdl3").join("LICENSE.txt")]
+                .into_iter()
+                .find(|p| p.is_file());
+            if let Some(lic) = sdl_license {
+                copy(&lic, &stage.join("SDL3-LICENSE.txt"))?;
+            }
+        }
+        None => eprintln!("warning: SIR_SDL3 not set and vendor/sdl3/SDL3.dll missing: games will only see Xbox controllers (no SDL3.dll)."),
     }
 
     // The same DLL for 32-bit games, when a 32-bit MinGW is around.
