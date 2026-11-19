@@ -8,7 +8,8 @@
 //! - `stats/<app>.json`: a game's stats and achievements, with changes made
 //!   offline that still need sending.
 //!
-//! Nothing here is a credential; the refresh token stays in `accounts.json`.
+//! Nothing here is a credential; refresh tokens live in the OS credential
+//! store (or `0600` fallback file).
 
 use crate::ipc::protocol::Stats;
 use model::{AppId, OwnedApp, Persona, Relationship, SteamId};
@@ -88,27 +89,39 @@ fn playtime_path(steam_id: SteamId) -> PathBuf {
 }
 
 pub fn play_sessions(steam_id: SteamId) -> Vec<PlaySession> {
-    read(&playtime_path(steam_id)).unwrap_or_default()
+    play_sessions_at(&playtime_path(steam_id))
+}
+
+fn play_sessions_at(path: &Path) -> Vec<PlaySession> {
+    read(path).unwrap_or_default()
 }
 
 pub fn record_play(steam_id: SteamId, s: PlaySession) {
+    record_play_at(&playtime_path(steam_id), s);
+}
+
+fn record_play_at(path: &Path, s: PlaySession) {
     if s.seconds == 0 {
         return;
     }
-    let mut list = play_sessions(steam_id);
+    let mut list = play_sessions_at(path);
     list.push(s);
-    write(&playtime_path(steam_id), &list);
+    write(path, &list);
 }
 
 /// Mark these sessions as sent to Steam.
 pub fn mark_reported(steam_id: SteamId, sent: &[PlaySession]) {
-    let mut list = play_sessions(steam_id);
+    mark_reported_at(&playtime_path(steam_id), sent);
+}
+
+fn mark_reported_at(path: &Path, sent: &[PlaySession]) {
+    let mut list = play_sessions_at(path);
     for s in list.iter_mut() {
-        if sent.iter().any(|x| x.app_id == s.app_id && x.start == s.start && x.seconds == s.seconds) {
+        if sent.iter().any(|x| x.app_id == s.app_id && x.start == s.start && x.seconds == s.seconds && x.offline == s.offline) {
             s.reported = true;
         }
     }
-    write(&playtime_path(steam_id), &list);
+    write(path, &list);
 }
 
 /// Per game: (seconds played while not connected, of those not on Steam yet).
@@ -253,6 +266,32 @@ mod tests {
         let s = |app, secs, reported| PlaySession { app_id: app, start: 1, seconds: secs, offline: true, reported };
         let t = playtime_totals(&[s(10, 60, true), s(10, 120, false), s(20, 30, false)]);
         assert_eq!(t, vec![(10, 180, 120), (20, 30, 30)]);
+    }
+
+    #[test]
+    fn record_play_and_mark_reported_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("sir-offline-playtime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = dir.join("playtime.json");
+
+        // Zero-second sessions are ignored.
+        record_play_at(&p, PlaySession { app_id: 440, start: 1000, seconds: 0, offline: true, reported: false });
+        assert!(play_sessions_at(&p).is_empty());
+
+        let s1 = PlaySession { app_id: 440, start: 1000, seconds: 180, offline: true, reported: false };
+        let s2 = PlaySession { app_id: 730, start: 2000, seconds: 90, offline: false, reported: false };
+        record_play_at(&p, s1.clone());
+        record_play_at(&p, s2.clone());
+        assert_eq!(play_sessions_at(&p), vec![s1.clone(), s2.clone()]);
+
+        // Mark only s1 reported; s2 stays pending.
+        mark_reported_at(&p, &[s1.clone()]);
+        let after = play_sessions_at(&p);
+        assert!(after[0].reported);
+        assert!(!after[1].reported);
+        assert_eq!(playtime_totals(&after), vec![(440, 180, 0), (730, 90, 90)]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

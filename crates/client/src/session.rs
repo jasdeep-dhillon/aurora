@@ -703,8 +703,12 @@ async fn online(
                 None => lost!("the server closed the connection"),
             },
             cmd = cmds.recv() => match cmd {
-                None => return Ok("Shutting down".into()),
+                None => {
+                    st.record_active_unconnected_play();
+                    return Ok("Shutting down".into());
+                }
                 Some(Command::LogOut) => {
+                    st.record_active_unconnected_play();
                     let _ = conn.send(emsg::CLIENT_LOG_OFF, &CMsgClientLogOff {});
                     return Ok("Logged out".into());
                 }
@@ -2945,10 +2949,7 @@ impl Online {
         self.cell_id = info.cell_id;
         self.auth = crate::ipc::Auth::new(info.public_ip);
         self.web = Default::default();
-        let now = unix_now();
-        for (app_id, (start, offline_mode)) in std::mem::take(&mut self.unconnected_play) {
-            offline::record_play(self.me, offline::PlaySession { app_id, start, seconds: now.saturating_sub(start), offline: offline_mode, reported: false });
-        }
+        self.record_active_unconnected_play();
         self.set_link(Link::Online, sink);
         sink(Event::LoggedIn { steam_id: self.me, account: self.account.clone() });
         self.connected(sink);
@@ -3083,33 +3084,32 @@ impl Online {
         }
     }
 
+    /// Flush any currently running offline/disconnected game sessions into
+    /// `playtime.json` (used on reconnect, logout, and shutdown).
+    fn record_active_unconnected_play(&mut self) {
+        let now = unix_now();
+        for (app_id, (start, offline_mode)) in std::mem::take(&mut self.unconnected_play) {
+            offline::record_play(self.me, offline::PlaySession { app_id, start, seconds: now.saturating_sub(start), offline: offline_mode, reported: false });
+        }
+    }
+
     /// Back online: send play time and game stats recorded while offline.
     fn flush_offline(&self, sink: &Sink) {
         let (conn, sink, me) = (self.conn.clone(), sink.clone(), self.me);
         tokio::spawn(async move {
-            let unsent: Vec<offline::PlaySession> = offline::play_sessions(me).into_iter().filter(|s| !s.reported).collect();
-            if !unsent.is_empty() && offline::SEND_TO_STEAM {
-                // What Steam's own client sends for time played while disconnected.
-                let req = CPlayerRecordDisconnectedPlaytimeRequest {
-                    play_sessions: unsent
-                        .iter()
-                        .map(|s| c_player_record_disconnected_playtime_request::PlayHistory {
-                            appid: Some(s.app_id),
-                            session_time_start: Some(s.start as u32),
-                            seconds: Some(s.seconds.min(u32::MAX as u64) as u32),
-                            offline: Some(s.offline),
-                            owner: Some(model::account_id(me)),
-                        })
-                        .collect(),
-                };
-                match conn.call::<_, CPlayerRecordDisconnectedPlaytimeResponse>("Player.RecordDisconnectedPlaytime#1", &req).await {
-                    Ok(_) => {
-                        tracing::info!("sent {} offline play session(s) to Steam", unsent.len());
-                        offline::mark_reported(me, &unsent);
+            let sessions = offline::play_sessions(me);
+            if offline::SEND_TO_STEAM {
+                if let Some((req, unsent)) = build_disconnected_playtime_request(me, &sessions) {
+                    // What Steam's own client sends for time played while disconnected.
+                    match conn.call::<_, CPlayerRecordDisconnectedPlaytimeResponse>("Player.RecordDisconnectedPlaytime#1", &req).await {
+                        Ok(_) => {
+                            tracing::info!("sent {} offline play session(s) to Steam", unsent.len());
+                            offline::mark_reported(me, &unsent);
+                        }
+                        Err(e) => tracing::warn!("offline play time not sent: {e}"),
                     }
-                    Err(e) => tracing::warn!("offline play time not sent: {e}"),
+                    sink(Event::OfflinePlaytime(offline::playtime_totals(&offline::play_sessions(me))));
                 }
-                sink(Event::OfflinePlaytime(offline::playtime_totals(&offline::play_sessions(me))));
             }
             if offline::SEND_TO_STEAM {
                 for app_id in offline::stats_pending(me) {
@@ -3118,6 +3118,32 @@ impl Online {
             }
         });
     }
+}
+
+/// Build a `Player.RecordDisconnectedPlaytime#1` request from unreported,
+/// non-zero play sessions, returning `None` if nothing needs sending.
+fn build_disconnected_playtime_request(
+    me: SteamId,
+    sessions: &[offline::PlaySession],
+) -> Option<(CPlayerRecordDisconnectedPlaytimeRequest, Vec<offline::PlaySession>)> {
+    let unsent: Vec<offline::PlaySession> = sessions.iter().filter(|s| !s.reported && s.seconds > 0).cloned().collect();
+    if unsent.is_empty() {
+        return None;
+    }
+    let owner = model::account_id(me);
+    let req = CPlayerRecordDisconnectedPlaytimeRequest {
+        play_sessions: unsent
+            .iter()
+            .map(|s| c_player_record_disconnected_playtime_request::PlayHistory {
+                appid: Some(s.app_id),
+                session_time_start: Some(s.start.min(u32::MAX as u64) as u32),
+                seconds: Some(s.seconds.min(u32::MAX as u64) as u32),
+                offline: Some(s.offline),
+                owner: Some(owner),
+            })
+            .collect(),
+    };
+    Some((req, unsent))
 }
 
 /// Send stats and achievements a game stored while offline.
@@ -3382,5 +3408,40 @@ mod reorder_tests {
             assert!(super::validate_support_ticket_url(bad).is_err(), "must reject {bad}");
         }
         assert!(super::validate_support_ticket_url("https://help.steampowered.com/en/wizard/HelpRequest/HT-1234").is_ok());
+    }
+
+    #[test]
+    fn disconnected_playtime_request_filters_and_maps_fields() {
+        let steam_id: model::SteamId = 76561198000000123;
+        let expected_owner = model::account_id(steam_id);
+        let sessions = vec![
+            crate::offline::PlaySession { app_id: 440, start: 1_700_000_000, seconds: 300, offline: true, reported: false },
+            // Already reported: must be skipped.
+            crate::offline::PlaySession { app_id: 570, start: 1_700_000_500, seconds: 600, offline: true, reported: true },
+            // Zero seconds: must be skipped.
+            crate::offline::PlaySession { app_id: 730, start: 1_700_000_900, seconds: 0, offline: false, reported: false },
+            // Disconnected (not offline mode) with large seconds clamped to u32::MAX.
+            crate::offline::PlaySession { app_id: 730, start: 1_700_001_000, seconds: u64::from(u32::MAX) + 50, offline: false, reported: false },
+        ];
+
+        let (req, unsent) = super::build_disconnected_playtime_request(steam_id, &sessions).expect("should build request");
+        assert_eq!(unsent.len(), 2);
+        assert_eq!(req.play_sessions.len(), 2);
+
+        assert_eq!(req.play_sessions[0].appid, Some(440));
+        assert_eq!(req.play_sessions[0].session_time_start, Some(1_700_000_000));
+        assert_eq!(req.play_sessions[0].seconds, Some(300));
+        assert_eq!(req.play_sessions[0].offline, Some(true));
+        assert_eq!(req.play_sessions[0].owner, Some(expected_owner));
+
+        assert_eq!(req.play_sessions[1].appid, Some(730));
+        assert_eq!(req.play_sessions[1].session_time_start, Some(1_700_001_000));
+        assert_eq!(req.play_sessions[1].seconds, Some(u32::MAX));
+        assert_eq!(req.play_sessions[1].offline, Some(false));
+        assert_eq!(req.play_sessions[1].owner, Some(expected_owner));
+
+        // When all sessions are already reported or zero-second, returns None.
+        let none = super::build_disconnected_playtime_request(steam_id, &sessions[1..3]);
+        assert!(none.is_none());
     }
 }
