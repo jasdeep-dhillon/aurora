@@ -380,10 +380,15 @@ pub fn safe_connect_args(connect: &str) -> Result<Vec<String>, String> {
     model::safe_connect_tokens(connect).map_err(|why| format!("refusing launch: {why}"))
 }
 
-pub fn spawn(app: &OwnedApp, install_dir: &Path, args: &LaunchArgs) -> Result<Child, String> {
+pub fn spawn(app: &OwnedApp, install_dir: &Path, args: &LaunchArgs, overlay: Option<(u16, &str)>) -> Result<Child, String> {
     let connect = safe_connect_args(&args.connect)?;
     let opts = UserOptions::parse(&args.user);
-    finish(app, install_dir, &opts, command(app, install_dir, &opts, &connect)?).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+    let mut cmd = finish(app, install_dir, &opts, command(app, install_dir, &opts, &connect)?);
+    #[cfg(target_os = "linux")]
+    apply_vk_overlay_env(&mut cmd, overlay, app_overlay_enabled(app.app_id));
+    #[cfg(not(target_os = "linux"))]
+    let _ = overlay;
+    cmd.spawn().map_err(|e| format!("could not start {}: {e}", app.name))
 }
 
 /// Environment variables controlling Steam Input and controller bridging for
@@ -411,17 +416,22 @@ pub(crate) fn steam_input_env_vars(
 /// Start a game with our steamclient: environment like a Steam launch, plus
 /// the pipe and token for the DLL. The registry swap must be in place.
 /// `pads` names the shared memory with the controllers XInput can't see.
-pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, args: &LaunchArgs, ipc_env: &str, account: &str, pads: Option<&str>) -> Result<Child, String> {
+pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, args: &LaunchArgs, ipc_env: &str, account: &str, pads: Option<&str>, overlay: Option<(u16, &str)>) -> Result<Child, String> {
     let connect = safe_connect_args(&args.connect)?;
     let opts = UserOptions::parse(&args.user);
     let mut cmd = command(app, install_dir, &opts, &connect)?;
     let id = app.app_id.to_string();
+    let overlay_on = app_overlay_enabled(app.app_id);
     cmd.env(crate::ipc::protocol::ENV_IPC, ipc_env)
         .env("SteamOverlayGameId", &id)
         .env("SteamClientLaunch", "1")
         .env("SteamEnv", "1")
         .env("SteamAppUser", account)
         .env("SteamUser", account);
+    if !overlay_on {
+        cmd.env("AURORA_DISABLE_OVERLAY", "1");
+    }
+    apply_hotkey_env(&mut cmd);
     let ctrl_override = crate::pads::effective_controller_override(app.app_id, args.controller);
     let ctrl_settings = crate::pads::settings();
     for (k, v) in steam_input_env_vars(ctrl_override, &ctrl_settings, pads) {
@@ -448,7 +458,12 @@ pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, args: &LaunchA
             tracing::info!("{}: new Proton prefix, Steam features from our steamclient from the next launch", app.name);
         }
     }
-    finish(app, install_dir, &opts, cmd).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+    let mut cmd = finish(app, install_dir, &opts, cmd);
+    #[cfg(target_os = "linux")]
+    apply_vk_overlay_env(&mut cmd, overlay, overlay_on);
+    #[cfg(not(target_os = "linux"))]
+    let _ = overlay;
+    cmd.spawn().map_err(|e| format!("could not start {}: {e}", app.name))
 }
 
 /// Start a non-Steam game the player added (program path, launch options).
@@ -1315,28 +1330,95 @@ fn spawn_for_host(
         .env("SteamEnv", "1")
         .env("SteamAppUser", account)
         .env("SteamUser", account);
+    let mut cmd = finish(app, install_dir, &opts, cmd);
     #[cfg(target_os = "linux")]
-    apply_vk_overlay_env(&mut cmd, overlay);
+    apply_vk_overlay_env(&mut cmd, overlay, app_overlay_enabled(app.app_id));
     #[cfg(not(target_os = "linux"))]
     let _ = overlay;
-    finish(app, install_dir, &opts, cmd).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+    cmd.spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+}
+
+static OVERLAY_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static OVERLAY_DISABLED_APPS: Mutex<std::collections::BTreeSet<AppId>> = Mutex::new(std::collections::BTreeSet::new());
+static OVERLAY_HOTKEY_ENV: Mutex<Option<String>> = Mutex::new(None);
+static SCREENSHOT_HOTKEY_ENV: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn set_overlay_enabled(on: bool) {
+    OVERLAY_ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn overlay_enabled() -> bool {
+    OVERLAY_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_overlay_disabled_apps(apps: std::collections::BTreeSet<AppId>) {
+    *OVERLAY_DISABLED_APPS.lock().unwrap() = apps;
+}
+
+pub fn set_app_overlay(app: AppId, on: bool) {
+    let mut disabled = OVERLAY_DISABLED_APPS.lock().unwrap();
+    if on {
+        disabled.remove(&app);
+    } else {
+        disabled.insert(app);
+    }
+}
+
+pub fn app_overlay_enabled(app: AppId) -> bool {
+    overlay_enabled() && !OVERLAY_DISABLED_APPS.lock().unwrap().contains(&app)
+}
+
+pub fn set_overlay_hotkeys(overlay_mods: u8, overlay_vk: u32, shot_mods: u8, shot_vk: u32) {
+    *OVERLAY_HOTKEY_ENV.lock().unwrap() = Some(format!("{overlay_mods}:{overlay_vk}"));
+    *SCREENSHOT_HOTKEY_ENV.lock().unwrap() = Some(format!("{shot_mods}:{shot_vk}"));
+}
+
+fn apply_hotkey_env(cmd: &mut Command) {
+    if let Some(v) = OVERLAY_HOTKEY_ENV.lock().unwrap().as_deref() {
+        cmd.env("AURORA_OVERLAY_HOTKEY", v);
+    }
+    if let Some(v) = SCREENSHOT_HOTKEY_ENV.lock().unwrap().as_deref() {
+        cmd.env("AURORA_SCREENSHOT_KEY", v);
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn vk_overlay_lib() -> Option<PathBuf> {
-    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let lib = dir.join("libVkLayer_aurora_overlay.so");
-    lib.is_file().then_some(lib)
+    if let Some(p) = std::env::var_os("STEAMINRUST_VK_OVERLAY_LIB").filter(|s| !s.is_empty()).map(PathBuf::from).filter(|p| p.is_file()) {
+        return Some(std::fs::canonicalize(&p).unwrap_or(p));
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    for candidate_dir in [Some(dir), dir.parent()] {
+        let Some(d) = candidate_dir else { continue };
+        let lib = d.join("libVkLayer_aurora_overlay.so");
+        if lib.is_file() {
+            return Some(std::fs::canonicalize(&lib).unwrap_or(lib));
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "linux")]
-fn write_vk_layer_manifest(lib_path: &Path) -> Option<PathBuf> {
-    let dir = directories::ProjectDirs::from("", "", "aurora")
+fn vk_layer_manifest_dir() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
+        return PathBuf::from(xdg).join("vulkan").join("implicit_layer.d");
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|s| !s.is_empty()) {
+        return PathBuf::from(home).join(".local").join("share").join("vulkan").join("implicit_layer.d");
+    }
+    directories::ProjectDirs::from("", "", "aurora")
         .map(|p| p.cache_dir().join("vk_layer"))
-        .unwrap_or_else(|| std::env::temp_dir().join("aurora-vk-layer"));
-    std::fs::create_dir_all(&dir).ok()?;
-    let manifest_path = dir.join("VkLayer_aurora_overlay.json");
-    let lib_str = serde_json::to_string(&lib_path.to_string_lossy()).ok()?;
+        .unwrap_or_else(|| std::env::temp_dir().join("aurora-vk-layer"))
+}
+
+#[cfg(target_os = "linux")]
+fn write_vk_layer_manifest_in(dir: &Path, lib_path: &Path) -> Option<PathBuf> {
+    let canon_lib = std::fs::canonicalize(lib_path).unwrap_or_else(|_| lib_path.to_path_buf());
+    std::fs::create_dir_all(dir).ok()?;
+    let canon_dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let manifest_path = canon_dir.join("VkLayer_aurora_overlay.json");
+    let lib_str = serde_json::to_string(&canon_lib.to_string_lossy()).ok()?;
     let json = format!(
         r#"{{
   "file_format_version": "1.1.2",
@@ -1360,24 +1442,92 @@ fn write_vk_layer_manifest(lib_path: &Path) -> Option<PathBuf> {
     if std::fs::read_to_string(&manifest_path).ok().as_deref() != Some(&json) {
         std::fs::write(&manifest_path, json).ok()?;
     }
-    Some(dir)
+    Some(canon_dir)
 }
 
 #[cfg(target_os = "linux")]
-fn apply_vk_overlay_env(cmd: &mut Command, overlay: Option<(u16, &str)>) {
-    let Some((port, token)) = overlay else { return };
-    let Some(lib) = vk_overlay_lib() else { return };
-    let Some(manifest_dir) = write_vk_layer_manifest(&lib) else { return };
-    let dir_str = manifest_dir.to_string_lossy();
-    let combined = match std::env::var("VK_ADD_IMPLICIT_LAYER_PATH") {
-        Ok(existing) if !existing.is_empty() => format!("{existing}:{dir_str}"),
-        _ => dir_str.into_owned(),
+fn write_vk_layer_manifest(lib_path: &Path) -> Option<PathBuf> {
+    let primary = vk_layer_manifest_dir();
+    if let Some(dir) = write_vk_layer_manifest_in(&primary, lib_path) {
+        return Some(dir);
+    }
+    let fallback = directories::ProjectDirs::from("", "", "aurora")
+        .map(|p| p.cache_dir().join("vk_layer"))
+        .unwrap_or_else(|| std::env::temp_dir().join("aurora-vk-layer"));
+    write_vk_layer_manifest_in(&fallback, lib_path)
+}
+
+#[cfg(target_os = "linux")]
+fn existing_cmd_env(cmd: &Command, key: &str) -> Option<String> {
+    if let Some((_, val)) = cmd.get_envs().find(|(k, _)| *k == std::ffi::OsStr::new(key)) {
+        return val.map(|v| v.to_string_lossy().into_owned());
+    }
+    std::env::var(key).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn append_colon_paths(existing: Option<&str>, add: &[&Path]) -> String {
+    let mut entries: Vec<String> = Vec::new();
+    let mut push_unique = |s: &str| {
+        if !s.is_empty() && !entries.iter().any(|e| e == s) {
+            entries.push(s.to_string());
+        }
     };
-    tracing::info!("enabling Linux Vulkan overlay layer ({})", lib.display());
-    cmd.env("VK_ADD_IMPLICIT_LAYER_PATH", combined)
+    if let Some(ex) = existing {
+        for part in ex.split(':') {
+            push_unique(part);
+        }
+    }
+    for path in add {
+        push_unique(&path.to_string_lossy());
+    }
+    entries.join(":")
+}
+
+#[cfg(target_os = "linux")]
+fn apply_vk_overlay_env_with(cmd: &mut Command, port: u16, token: &str, lib: &Path, manifest_dir: &Path) {
+    let canon_lib = std::fs::canonicalize(lib).unwrap_or_else(|_| lib.to_path_buf());
+    let canon_manifest = std::fs::canonicalize(manifest_dir).unwrap_or_else(|_| manifest_dir.to_path_buf());
+    let vk_layers = append_colon_paths(existing_cmd_env(cmd, "VK_ADD_IMPLICIT_LAYER_PATH").as_deref(), &[&canon_manifest]);
+
+    let mut pv_add: Vec<&Path> = Vec::new();
+    if let Some(lib_dir) = canon_lib.parent().filter(|p| !p.as_os_str().is_empty() && *p != Path::new("/") && *p != Path::new("/usr")) {
+        pv_add.push(lib_dir);
+    }
+    if canon_manifest != Path::new("/") && canon_manifest != Path::new("/usr") {
+        pv_add.push(&canon_manifest);
+    }
+    let pv_ro = append_colon_paths(existing_cmd_env(cmd, "PRESSURE_VESSEL_FILESYSTEMS_RO").as_deref(), &pv_add);
+
+    tracing::info!("enabling Linux Vulkan overlay layer ({})", canon_lib.display());
+    cmd.env("VK_ADD_IMPLICIT_LAYER_PATH", vk_layers)
         .env("AURORA_VK_OVERLAY", "1")
         .env("AURORA_OVERLAY_PORT", port.to_string())
         .env("AURORA_OVERLAY_TOKEN", token);
+    if !pv_ro.is_empty() {
+        cmd.env("PRESSURE_VESSEL_FILESYSTEMS_RO", pv_ro);
+    }
+    apply_hotkey_env(cmd);
+}
+
+#[cfg(target_os = "linux")]
+fn apply_vk_overlay_env(cmd: &mut Command, overlay: Option<(u16, &str)>, enabled: bool) {
+    if !enabled {
+        cmd.env("DISABLE_AURORA_OVERLAY", "1")
+            .env("AURORA_DISABLE_OVERLAY", "1")
+            .env_remove("AURORA_VK_OVERLAY");
+        return;
+    }
+    let Some((port, token)) = overlay else { return };
+    let Some(lib) = vk_overlay_lib() else {
+        tracing::warn!("Linux Vulkan overlay unavailable: libVkLayer_aurora_overlay.so not found beside aurora executable");
+        return;
+    };
+    let Some(manifest_dir) = write_vk_layer_manifest(&lib) else {
+        tracing::warn!("Linux Vulkan overlay unavailable: could not write VkLayer_aurora_overlay.json");
+        return;
+    };
+    apply_vk_overlay_env_with(cmd, port, token, &lib, &manifest_dir);
 }
 
 /// `~/.steam/steam.pid` naming the headless host while it runs; what was
@@ -2961,8 +3111,8 @@ mod tests {
             "+exec autoexec.cfg".into(),
         ] {
             let args = LaunchArgs { user: "-novid".into(), connect: payload.clone(), controller: 0 };
-            assert!(spawn(&test_app, &dir, &args).is_err(), "spawn must fail closed for {payload}");
-            assert!(spawn_with_steamclient(&test_app, &dir, &args, "127.0.0.1:1:tok", "acct", None).is_err());
+            assert!(spawn(&test_app, &dir, &args, None).is_err(), "spawn must fail closed for {payload}");
+            assert!(spawn_with_steamclient(&test_app, &dir, &args, "127.0.0.1:1:tok", "acct", None, None).is_err());
             assert!(run_through_steam(480, &args, 1, false, || {}).unwrap_err().contains("refusing launch"));
             assert!(run_through_host(&test_app, &dir, &args, "acct", "tok", 1, None, || {}).unwrap_err().contains("refusing launch"));
             assert!(!pwned.exists(), "evil wrapper executed!");
@@ -2975,7 +3125,7 @@ mod tests {
             connect: "+connect 127.0.0.1:27015 +password pass123".into(),
             controller: 0,
         };
-        let mut child = spawn(&test_app, &dir, &ok_args).unwrap();
+        let mut child = spawn(&test_app, &dir, &ok_args, None).unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "ok|1|-novid +connect 127.0.0.1:27015 +password pass123");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3004,6 +3154,67 @@ mod tests {
         assert!(xbox_only.contains(&(crate::pads::ENV_STEAM_INPUT, "1".into())));
         assert!(xbox_only.contains(&(crate::pads::ENV_INPUT_FAMILIES, "0x1".into())));
         assert!(!xbox_only.iter().any(|(k, _)| *k == crate::pads::ENV_PADS));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vk_overlay_manifest_and_pressure_vessel_env_preserve_existing() {
+        let root = std::env::temp_dir().join(format!("aurora-vk-env-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let lib_dir = root.join("opt/aurora");
+        let manifest_dir = root.join("xdg/vulkan/implicit_layer.d");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let lib = lib_dir.join("libVkLayer_aurora_overlay.so");
+        std::fs::write(&lib, b"elf").unwrap();
+
+        let written_dir = write_vk_layer_manifest_in(&manifest_dir, &lib).unwrap();
+        let manifest_text = std::fs::read_to_string(written_dir.join("VkLayer_aurora_overlay.json")).unwrap();
+        assert!(manifest_text.contains("VK_LAYER_AURORA_overlay"));
+        assert!(manifest_text.contains("AURORA_VK_OVERLAY"));
+        assert!(manifest_text.contains(&std::fs::canonicalize(&lib).unwrap().to_string_lossy().as_ref()));
+
+        let mut cmd = Command::new("/bin/true");
+        cmd.env("VK_ADD_IMPLICIT_LAYER_PATH", "/user/layers:/other/layers");
+        cmd.env("PRESSURE_VESSEL_FILESYSTEMS_RO", "/existing/ro");
+        apply_vk_overlay_env_with(&mut cmd, 41234, "tok-xyz", &lib, &written_dir);
+        // Applying twice must deduplicate rather than duplicate paths.
+        apply_vk_overlay_env_with(&mut cmd, 41234, "tok-xyz", &lib, &written_dir);
+
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned()))).collect();
+        assert_eq!(envs.get("AURORA_VK_OVERLAY").map(String::as_str), Some("1"));
+        assert_eq!(envs.get("AURORA_OVERLAY_PORT").map(String::as_str), Some("41234"));
+        assert_eq!(envs.get("AURORA_OVERLAY_TOKEN").map(String::as_str), Some("tok-xyz"));
+
+        let layers = envs.get("VK_ADD_IMPLICIT_LAYER_PATH").unwrap();
+        assert!(layers.starts_with("/user/layers:/other/layers:"));
+        let canon_manifest = std::fs::canonicalize(&written_dir).unwrap();
+        let canon_lib_dir = std::fs::canonicalize(&lib_dir).unwrap();
+        assert_eq!(layers.split(':').filter(|p| *p == canon_manifest.to_string_lossy()).count(), 1);
+
+        let ro = envs.get("PRESSURE_VESSEL_FILESYSTEMS_RO").unwrap();
+        assert!(ro.starts_with("/existing/ro:"));
+        assert_eq!(ro.split(':').filter(|p| *p == canon_lib_dir.to_string_lossy()).count(), 1);
+        assert_eq!(ro.split(':').filter(|p| *p == canon_manifest.to_string_lossy()).count(), 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn overlay_toggle_respects_global_and_per_app() {
+        set_overlay_enabled(true);
+        set_overlay_disabled_apps(Default::default());
+        assert!(app_overlay_enabled(553850));
+
+        set_app_overlay(553850, false);
+        assert!(!app_overlay_enabled(553850));
+        assert!(app_overlay_enabled(730));
+
+        set_app_overlay(553850, true);
+        assert!(app_overlay_enabled(553850));
+
+        set_overlay_enabled(false);
+        assert!(!app_overlay_enabled(553850));
+        set_overlay_enabled(true);
     }
 }
 

@@ -466,4 +466,118 @@ mod tests {
         assert!(vk_format_is_linear_out(50));
         assert!(!vk_format_is_linear_out(44));
     }
+
+    #[test]
+    fn converts_back_buffer_pixels_and_fps() {
+        let mut out = Vec::new();
+        to_rgb(PixelKind::Rgba8, &[1, 2, 3, 255], &mut out);
+        to_rgb(PixelKind::Bgra8, &[1, 2, 3, 255], &mut out);
+        to_rgb(PixelKind::Rgb10a2, &(1023u32 | (512 << 20)).to_le_bytes(), &mut out);
+        to_rgb(PixelKind::Bgr10a2, &(1023u32 | (512 << 20)).to_le_bytes(), &mut out);
+        to_rgb(PixelKind::Half, &[0x00, 0x3C, 0x00, 0x00, 0x00, 0x38, 0x00, 0x3C], &mut out);
+        assert_eq!(out, vec![1, 2, 3, 3, 2, 1, 255, 0, 128, 128, 0, 255, 255, 0, 188]);
+        assert_eq!(gl_rgba_flip_to_rgb(&[1, 2, 3, 255, 4, 5, 6, 255], 1, 2), vec![4, 5, 6, 1, 2, 3]);
+        assert_eq!(parse_hotkey_env(Some("2:120"), (1, 9)), (2, 120));
+        assert_eq!(parse_hotkey_env(Some("bad"), (1, 9)), (1, 9));
+    }
+}
+
+/// How a back buffer's pixels are laid out, for screenshots.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PixelKind {
+    Rgba8,
+    Bgra8,
+    Rgb10a2,
+    Bgr10a2,
+    /// 16-bit float RGBA, linear (HDR or scRGB): converted to sRGB.
+    Half,
+}
+
+pub fn to_rgb(kind: PixelKind, row: &[u8], out: &mut Vec<u8>) {
+    match kind {
+        PixelKind::Rgba8 => row.chunks_exact(4).for_each(|p| out.extend_from_slice(&p[..3])),
+        PixelKind::Bgra8 => row.chunks_exact(4).for_each(|p| out.extend_from_slice(&[p[2], p[1], p[0]])),
+        PixelKind::Rgb10a2 => row.chunks_exact(4).for_each(|p| {
+            let v = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+            out.extend_from_slice(&[((v & 0x3FF) >> 2) as u8, (((v >> 10) & 0x3FF) >> 2) as u8, (((v >> 20) & 0x3FF) >> 2) as u8]);
+        }),
+        PixelKind::Bgr10a2 => row.chunks_exact(4).for_each(|p| {
+            let v = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+            out.extend_from_slice(&[(((v >> 20) & 0x3FF) >> 2) as u8, (((v >> 10) & 0x3FF) >> 2) as u8, ((v & 0x3FF) >> 2) as u8]);
+        }),
+        PixelKind::Half => row.chunks_exact(8).for_each(|p| {
+            for c in 0..3 {
+                out.push(linear_to_srgb8(half_to_f32(u16::from_le_bytes([p[c * 2], p[c * 2 + 1]]))));
+            }
+        }),
+    }
+}
+
+/// Flip bottom-up GL RGBA pixels into tightly packed top-down RGB.
+pub fn gl_rgba_flip_to_rgb(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let row_bytes = (width as usize).saturating_mul(4);
+    let mut out = Vec::with_capacity((width as usize).saturating_mul(height as usize).saturating_mul(3));
+    if row_bytes == 0 {
+        return out;
+    }
+    for y in (0..height as usize).rev() {
+        let start = y * row_bytes;
+        let end = start + row_bytes;
+        if end <= rgba.len() {
+            to_rgb(PixelKind::Rgba8, &rgba[start..end], &mut out);
+        }
+    }
+    out
+}
+
+pub fn half_to_f32(h: u16) -> f32 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = ((h >> 10) & 0x1F) as i32;
+    let frac = (h & 0x3FF) as f32;
+    sign * match exp {
+        0 => frac * 2f32.powi(-24),
+        31 => f32::INFINITY,
+        _ => (1.0 + frac / 1024.0) * 2f32.powi(exp - 15),
+    }
+}
+
+pub fn linear_to_srgb8(v: f32) -> u8 {
+    let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+    let s = if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+    (s * 255.0 + 0.5) as u8
+}
+
+/// Parse `"<mods>:<vk>"` hotkey configuration strings.
+pub fn parse_hotkey_env(s: Option<&str>, default: (u8, u32)) -> (u8, u32) {
+    let Some(raw) = s else { return default };
+    let Some((m, k)) = raw.split_once(':') else { return default };
+    match (m.trim().parse::<u8>(), k.trim().parse::<u32>()) {
+        (Ok(mods), Ok(vk)) if vk != 0 => (mods & 0x07, vk),
+        _ => default,
+    }
+}
+
+/// Tracks presented frames and returns an integer FPS once per second.
+pub struct FpsCounter {
+    frames: u32,
+    since: std::time::Instant,
+}
+
+impl FpsCounter {
+    pub fn new() -> Self {
+        Self { frames: 0, since: std::time::Instant::now() }
+    }
+
+    pub fn tick(&mut self) -> Option<u32> {
+        self.frames += 1;
+        let elapsed = self.since.elapsed().as_secs_f32();
+        if elapsed >= 1.0 {
+            let fps = (self.frames as f32 / elapsed).round() as u32;
+            self.frames = 0;
+            self.since = std::time::Instant::now();
+            Some(fps)
+        } else {
+            None
+        }
+    }
 }
