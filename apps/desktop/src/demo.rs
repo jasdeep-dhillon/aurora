@@ -104,6 +104,7 @@ pub fn events(local: &local::LocalState) -> Vec<Event> {
     events.extend(group_chats(me, now));
     events.extend(inventory(me, now));
     events.extend(crate::builtin::hub::demo::events());
+    events.extend(crate::builtin::community_home::demo_events());
     events
 }
 

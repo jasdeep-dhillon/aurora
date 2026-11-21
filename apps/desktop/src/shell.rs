@@ -154,7 +154,13 @@ fn tab_menu_items(app: &SteamApp, page: &str) -> Vec<Option<MenuEntry>> {
             e(icons::HOUSE, t!("Home"), "library", None),
             e(icons::DOWNLOAD, t!("Downloads"), "downloads", None),
         ],
-        "community" => vec![
+        crate::builtin::community_home::PAGE => vec![
+            e(icons::HOUSE, t!("Home"), crate::builtin::community_home::PAGE, None),
+            e(icons::LIGHTNING, t!("Friends activity"), crate::builtin::community_home::PAGE, Some("friends".into())),
+            e(icons::GLOBE, t!("Explore"), crate::builtin::community_home::PAGE, Some("explore".into())),
+            e(icons::NOTE, t!("Developers"), crate::builtin::community_home::PAGE, Some("developers".into())),
+            e(icons::CHATS, t!("Discussions"), crate::builtin::community_home::PAGE, Some("discussions".into())),
+            None,
             e(icons::USERS, t!("Friends"), "community", None),
             e(icons::CUBE, t!("Workshop"), "workshop", None),
             e(icons::BACKPACK, t!("Inventory"), "inventory", None),

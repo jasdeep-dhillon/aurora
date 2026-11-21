@@ -11,6 +11,7 @@ mod achievements;
 pub mod demo;
 mod files;
 mod forum;
+pub mod post;
 pub mod rich;
 
 use client::hub::{self, FileKind, FileQuery, Request};

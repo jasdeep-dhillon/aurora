@@ -18,7 +18,7 @@ pub struct ConnectionError {
 }
 
 /// Pages that only work with a connection to Steam.
-const NEEDS_STEAM: &[&str] = &["store", "community", "profile", "inventory", "workshop", "support"];
+const NEEDS_STEAM: &[&str] = &["store", "community", "community_home", "profile", "inventory", "workshop", "support"];
 
 fn needs_steam(page: &str) -> bool {
     NEEDS_STEAM.contains(&page) || crate::builtin::hub::PAGES.contains(&page)
