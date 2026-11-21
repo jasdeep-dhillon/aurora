@@ -10,16 +10,33 @@
 use crate::net::shared;
 use crate::wire::{Input, MOD_ALT, MOD_CTRL, MOD_SHIFT};
 use std::ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 static ACTIVE_WINDOW: AtomicU64 = AtomicU64::new(0);
+static SURFACE_IS_WAYLAND: AtomicBool = AtomicBool::new(false);
+static OUR_DISPLAY: AtomicUsize = AtomicUsize::new(0);
+static PREV_ERR_HANDLER: AtomicUsize = AtomicUsize::new(0);
 
-/// Record the game's active X11 window ID (from `vkCreateXlibSurfaceKHR` or
-/// `vkCreateXcbSurfaceKHR`).
-pub fn set_active_window(win: u64) {
-    if win != 0 {
-        ACTIVE_WINDOW.store(win, Ordering::Relaxed);
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SurfaceKind {
+    X11(u64),
+    Wayland,
+}
+
+/// Record the game's active window/surface target.
+pub fn set_surface(kind: SurfaceKind) {
+    match kind {
+        SurfaceKind::X11(win) => {
+            SURFACE_IS_WAYLAND.store(false, Ordering::Relaxed);
+            if win != 0 {
+                ACTIVE_WINDOW.store(win, Ordering::Relaxed);
+            }
+        }
+        SurfaceKind::Wayland => {
+            SURFACE_IS_WAYLAND.store(true, Ordering::Relaxed);
+            ACTIVE_WINDOW.store(0, Ordering::Relaxed);
+        }
     }
 }
 
@@ -55,6 +72,35 @@ const CURRENT_TIME: Time = 0;
 const BUTTON_PRESS_MASK: c_uint = 1 << 2;
 const BUTTON_RELEASE_MASK: c_uint = 1 << 3;
 const POINTER_MOTION_MASK: c_uint = 1 << 6;
+const KEY_PRESS_MASK: c_uint = 1 << 0;
+const KEY_RELEASE_MASK: c_uint = 1 << 1;
+
+const INPUT_ONLY: c_uint = 2;
+const CW_OVERRIDE_REDIRECT: c_ulong = 1 << 9;
+const CW_EVENT_MASK: c_ulong = 1 << 11;
+const CW_CURSOR: c_ulong = 1 << 14;
+const REVERT_TO_PARENT: c_int = 2;
+const XC_LEFT_PTR: c_uint = 68;
+
+#[repr(C)]
+#[derive(Default)]
+struct XSetWindowAttributes {
+    background_pixmap: c_ulong,
+    background_pixel: c_ulong,
+    border_pixmap: c_ulong,
+    border_pixel: c_ulong,
+    bit_gravity: c_int,
+    win_gravity: c_int,
+    backing_store: c_int,
+    backing_planes: c_ulong,
+    backing_pixel: c_ulong,
+    save_under: Bool,
+    event_mask: c_long,
+    do_not_propagate_mask: c_long,
+    override_redirect: Bool,
+    colormap: c_ulong,
+    cursor: Cursor,
+}
 
 const KEY_PRESS: c_int = 2;
 const KEY_RELEASE: c_int = 3;
@@ -187,9 +233,50 @@ struct X11 {
     XKeysymToKeycode: unsafe extern "C" fn(*mut Display, KeySym) -> u8,
     XQueryKeymap: unsafe extern "C" fn(*mut Display, *mut c_char) -> c_int,
     XSetErrorHandler: Option<unsafe extern "C" fn(Option<unsafe extern "C" fn(*mut Display, *mut c_void) -> c_int>) -> *mut c_void>,
+    XDefaultRootWindow: Option<unsafe extern "C" fn(*mut Display) -> Window>,
+    XCreateWindow: Option<
+        unsafe extern "C" fn(
+            *mut Display,
+            Window,
+            c_int,
+            c_int,
+            c_uint,
+            c_uint,
+            c_uint,
+            c_int,
+            c_uint,
+            *mut c_void,
+            c_ulong,
+            *mut XSetWindowAttributes,
+        ) -> Window,
+    >,
+    XMapRaised: Option<unsafe extern "C" fn(*mut Display, Window) -> c_int>,
+    XDestroyWindow: Option<unsafe extern "C" fn(*mut Display, Window) -> c_int>,
+    XSetInputFocus: Option<unsafe extern "C" fn(*mut Display, Window, c_int, Time) -> c_int>,
+    XTranslateCoordinates: Option<
+        unsafe extern "C" fn(*mut Display, Window, Window, c_int, c_int, *mut c_int, *mut c_int, *mut Window) -> Bool,
+    >,
+    XCreateFontCursor: Option<unsafe extern "C" fn(*mut Display, c_uint) -> Cursor>,
+    XFreeCursor: Option<unsafe extern "C" fn(*mut Display, Cursor) -> c_int>,
 }
 
-unsafe extern "C" fn ignore_x11_error(_dpy: *mut Display, _err: *mut c_void) -> c_int {
+#[repr(C)]
+struct XErrorEvent {
+    ty: c_int,
+    display: *mut Display,
+}
+
+unsafe extern "C" fn ignore_x11_error(dpy: *mut Display, err: *mut c_void) -> c_int {
+    let ours = OUR_DISPLAY.load(Ordering::Acquire) as *mut Display;
+    let err_dpy = if !err.is_null() { unsafe { (*(err as *const XErrorEvent)).display } } else { dpy };
+    if !ours.is_null() && (dpy == ours || err_dpy == ours) {
+        return 0;
+    }
+    let prev = PREV_ERR_HANDLER.load(Ordering::Acquire);
+    if prev != 0 {
+        let f: unsafe extern "C" fn(*mut Display, *mut c_void) -> c_int = unsafe { std::mem::transmute(prev) };
+        return unsafe { f(dpy, err) };
+    }
     0
 }
 
@@ -221,6 +308,14 @@ impl X11 {
                 XKeysymToKeycode: sym(lib, c"XKeysymToKeycode")?,
                 XQueryKeymap: sym(lib, c"XQueryKeymap")?,
                 XSetErrorHandler: sym(lib, c"XSetErrorHandler"),
+                XDefaultRootWindow: sym(lib, c"XDefaultRootWindow"),
+                XCreateWindow: sym(lib, c"XCreateWindow"),
+                XMapRaised: sym(lib, c"XMapRaised"),
+                XDestroyWindow: sym(lib, c"XDestroyWindow"),
+                XSetInputFocus: sym(lib, c"XSetInputFocus"),
+                XTranslateCoordinates: sym(lib, c"XTranslateCoordinates"),
+                XCreateFontCursor: sym(lib, c"XCreateFontCursor"),
+                XFreeCursor: sym(lib, c"XFreeCursor"),
             })
         }
     }
@@ -266,12 +361,46 @@ pub fn keysym_to_vk(sym: u64) -> Option<u32> {
         0x0030..=0x0039 => Some(sym as u32), // '0'..'9'
         0x0041..=0x005a => Some(sym as u32), // 'A'..'Z'
         0x0061..=0x007a => Some((sym - 0x20) as u32), // 'a'..'z' -> 'A'..'Z'
+        0x0060 => Some(0xC0), // grave -> VK_OEM_3
         0xffbe..=0xffc9 => Some(0x70 + (sym - 0xffbe) as u32), // F1..F12
         0xffe1 | 0xffe2 => Some(0x10), // Shift
         0xffe3 | 0xffe4 => Some(0x11), // Control
         0xffe9 | 0xffea => Some(0x12), // Alt
         _ => None,
     }
+}
+
+/// Map a Windows Virtual-Key code back to an X11 KeySym for hotkey matching.
+pub fn vk_to_keysym(vk: u32) -> Option<u64> {
+    match vk {
+        0x08 => Some(0xff08),
+        0x09 => Some(0xff09),
+        0x0D => Some(0xff0d),
+        0x1B => Some(0xff1b),
+        0x20 => Some(0x0020),
+        0x21 => Some(0xff55),
+        0x22 => Some(0xff56),
+        0x23 => Some(0xff57),
+        0x24 => Some(0xff50),
+        0x25 => Some(0xff51),
+        0x26 => Some(0xff52),
+        0x27 => Some(0xff53),
+        0x28 => Some(0xff54),
+        0x2D => Some(0xff63),
+        0x2E => Some(0xffff),
+        0x30..=0x39 => Some(vk as u64),
+        0x41..=0x5A => Some(vk as u64),
+        0xC0 => Some(0x0060),
+        0x70..=0x7B => Some(0xffbe + (vk - 0x70) as u64),
+        _ => None,
+    }
+}
+
+fn push_event(events: &mut Vec<Input>, e: Input) {
+    if let (Input::Move { .. }, Some(Input::Move { .. })) = (&e, events.last()) {
+        events.pop();
+    }
+    events.push(e);
 }
 
 fn scale_point(x: i32, y: i32, win_w: u32, win_h: u32) -> (f32, f32) {
@@ -283,75 +412,208 @@ fn scale_point(x: i32, y: i32, win_w: u32, win_h: u32) -> (f32, f32) {
     }
 }
 
+fn combo_matches(keymap: &[u8; 32], req_mods: u8, kc_key: u8, mods_kc: (u8, u8, u8, u8, u8, u8)) -> bool {
+    if kc_key == 0 || !key_down(keymap, kc_key) {
+        return false;
+    }
+    let shift = key_down(keymap, mods_kc.0) || key_down(keymap, mods_kc.1);
+    let ctrl = key_down(keymap, mods_kc.2) || key_down(keymap, mods_kc.3);
+    let alt = key_down(keymap, mods_kc.4) || key_down(keymap, mods_kc.5);
+    let held = (if shift { MOD_SHIFT } else { 0 })
+        | (if ctrl { MOD_CTRL } else { 0 })
+        | (if alt { MOD_ALT } else { 0 });
+    held == (req_mods & 0x07)
+}
+
 fn input_loop() {
     let Some(x11) = (unsafe { X11::load() }) else {
         return;
     };
-    if let Some(set_err) = x11.XSetErrorHandler {
-        unsafe { set_err(Some(ignore_x11_error)) };
-    }
-
     let dpy = unsafe { (x11.XOpenDisplay)(std::ptr::null()) };
     if dpy.is_null() {
         return;
     }
+    OUR_DISPLAY.store(dpy as usize, Ordering::Release);
+    if let Some(set_err) = x11.XSetErrorHandler {
+        let prev = unsafe { set_err(Some(ignore_x11_error)) } as usize;
+        if prev != ignore_x11_error as *const () as usize {
+            PREV_ERR_HANDLER.store(prev, Ordering::Release);
+        }
+    }
+
     let kc_shift_l = unsafe { (x11.XKeysymToKeycode)(dpy, 0xffe1) };
     let kc_shift_r = unsafe { (x11.XKeysymToKeycode)(dpy, 0xffe2) };
-    let kc_tab = unsafe { (x11.XKeysymToKeycode)(dpy, 0xff09) };
+    let kc_ctrl_l = unsafe { (x11.XKeysymToKeycode)(dpy, 0xffe3) };
+    let kc_ctrl_r = unsafe { (x11.XKeysymToKeycode)(dpy, 0xffe4) };
+    let kc_alt_l = unsafe { (x11.XKeysymToKeycode)(dpy, 0xffe9) };
+    let kc_alt_r = unsafe { (x11.XKeysymToKeycode)(dpy, 0xffea) };
+    let mods_kc = (kc_shift_l, kc_shift_r, kc_ctrl_l, kc_ctrl_r, kc_alt_l, kc_alt_r);
     let kc_esc = unsafe { (x11.XKeysymToKeycode)(dpy, 0xff1b) };
-    let mut was_combo = false;
 
-    loop {
-        // While closed, poll XQueryKeymap at ~60Hz for Shift+Tab (never conflicts
-        // with game keyboard grabs and works even after Aurora releases its global hotkey).
-        while !shared().is_open() {
+    let resolve_kc = |vk: u32| -> u8 {
+        vk_to_keysym(vk).map(|s| unsafe { (x11.XKeysymToKeycode)(dpy, s) }).unwrap_or(0)
+    };
+    let mut cur_ov = (0u8, 0u32, 0u8);
+    let mut cur_sh = (0u8, 0u32, 0u8);
+    let refresh_keys = |ov: &mut (u8, u32, u8), sh: &mut (u8, u32, u8)| {
+        let (om, ovk) = shared().overlay_hotkey();
+        if (om, ovk) != (ov.0, ov.1) {
+            *ov = (om, ovk, resolve_kc(ovk));
+        }
+        let (sm, svk) = shared().screenshot_hotkey();
+        if (sm, svk) != (sh.0, sh.1) {
+            *sh = (sm, svk, resolve_kc(svk));
+        }
+    };
+
+    let mut was_ov = false;
+    let mut was_shot = false;
+
+    while !shared().is_shutdown() {
+        // While closed, poll XQueryKeymap at ~60Hz for the overlay & screenshot hotkeys.
+        while !shared().is_open() && !shared().is_shutdown() {
+            refresh_keys(&mut cur_ov, &mut cur_sh);
             let mut keymap = [0u8; 32];
             unsafe { (x11.XQueryKeymap)(dpy, keymap.as_mut_ptr().cast()) };
-            let shift = key_down(&keymap, kc_shift_l) || key_down(&keymap, kc_shift_r);
-            let tab = key_down(&keymap, kc_tab);
-            let combo = shift && tab;
-            if combo && !was_combo {
-                was_combo = true;
+
+            let shot = combo_matches(&keymap, cur_sh.0, cur_sh.2, mods_kc);
+            if shot && !was_shot {
+                was_shot = true;
+                shared().request_screenshot();
+            } else if !shot {
+                was_shot = false;
+            }
+
+            let combo = combo_matches(&keymap, cur_ov.0, cur_ov.2, mods_kc);
+            if combo && !was_ov {
+                was_ov = true;
                 shared().notify_opened(true);
                 break;
             }
             if !combo {
-                was_combo = false;
+                was_ov = false;
             }
             std::thread::sleep(Duration::from_millis(16));
         }
 
-        let win = ACTIVE_WINDOW.load(Ordering::Relaxed) as Window;
+        if shared().is_shutdown() {
+            break;
+        }
+
+        let is_wayland = SURFACE_IS_WAYLAND.load(Ordering::Relaxed);
+        let mut win = ACTIVE_WINDOW.load(Ordering::Relaxed) as Window;
+        if is_wayland && win == 0 {
+            // Native Wayland surfaces don't support XGrabPointer; wait cleanly until closed.
+            while shared().is_open() && !shared().is_shutdown() && SURFACE_IS_WAYLAND.load(Ordering::Relaxed) {
+                refresh_keys(&mut cur_ov, &mut cur_sh);
+                let mut keymap = [0u8; 32];
+                unsafe { (x11.XQueryKeymap)(dpy, keymap.as_mut_ptr().cast()) };
+                let shot = combo_matches(&keymap, cur_sh.0, cur_sh.2, mods_kc);
+                if shot && !was_shot {
+                    was_shot = true;
+                    shared().request_screenshot();
+                } else if !shot {
+                    was_shot = false;
+                }
+                let combo = combo_matches(&keymap, cur_ov.0, cur_ov.2, mods_kc) || key_down(&keymap, kc_esc);
+                if combo && !was_ov {
+                    was_ov = true;
+                    shared().notify_opened(false);
+                    break;
+                } else if !combo {
+                    was_ov = false;
+                }
+                std::thread::sleep(Duration::from_millis(24));
+            }
+            continue;
+        }
+
         if win == 0 {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
 
-        let mut win_w = 0u32;
-        let mut win_h = 0u32;
-        unsafe {
+        let query_geom = |w: Window| -> (u32, u32) {
+            let (mut ww, mut wh) = (0u32, 0u32);
             let mut root = 0;
             let (mut gx, mut gy) = (0, 0);
             let (mut bw, mut depth) = (0, 0);
-            if (x11.XGetGeometry)(dpy, win, &mut root, &mut gx, &mut gy, &mut win_w, &mut win_h, &mut bw, &mut depth) == 0 {
-                win_w = 0;
-                win_h = 0;
+            if unsafe { (x11.XGetGeometry)(dpy, w, &mut root, &mut gx, &mut gy, &mut ww, &mut wh, &mut bw, &mut depth) } != 0 {
+                (ww, wh)
+            } else {
+                (0, 0)
+            }
+        };
+
+        let (mut win_w, mut win_h) = query_geom(win);
+        let arrow_cursor = x11.XCreateFontCursor.map(|f| unsafe { f(dpy, XC_LEFT_PTR) }).unwrap_or(0);
+        // Create a child InputOnly shield window inside `win` (NOT a top-level
+        // override-redirect window on root) so we intercept pointer events and
+        // show a visible cursor without stealing top-level WM focus or blocking
+        // GNOME's `_NET_WM_PING` responsiveness check.
+        let mut shield: Window = 0;
+        if let (Some(create_fn), Some(map_fn)) = (x11.XCreateWindow, x11.XMapRaised) {
+            let sw = win_w.max(128);
+            let sh = win_h.max(128);
+            let mut attrs = XSetWindowAttributes {
+                event_mask: (POINTER_MOTION_MASK | BUTTON_PRESS_MASK | BUTTON_RELEASE_MASK | KEY_PRESS_MASK | KEY_RELEASE_MASK) as c_long,
+                cursor: arrow_cursor,
+                ..Default::default()
+            };
+            let mask = CW_EVENT_MASK | if arrow_cursor != 0 { CW_CURSOR } else { 0 };
+            let w = unsafe { create_fn(dpy, win, 0, 0, sw, sh, 0, 0, INPUT_ONLY, std::ptr::null_mut(), mask, &mut attrs) };
+            if w != 0 {
+                unsafe { map_fn(dpy, w) };
+                shield = w;
             }
         }
-
+        let grab_target = if shield != 0 { shield } else { win };
         let ptr_mask = POINTER_MOTION_MASK | BUTTON_PRESS_MASK | BUTTON_RELEASE_MASK;
-        let ptr_grabbed = unsafe {
-            (x11.XGrabPointer)(dpy, win, 0, ptr_mask, GRAB_MODE_ASYNC, GRAB_MODE_ASYNC, 0, 0, CURRENT_TIME) == GRAB_SUCCESS
+        let try_ptr_grab = |w: Window| -> bool {
+            unsafe { (x11.XGrabPointer)(dpy, w, 0, ptr_mask, GRAB_MODE_ASYNC, GRAB_MODE_ASYNC, 0, arrow_cursor, CURRENT_TIME) == GRAB_SUCCESS }
         };
-        let kbd_grabbed = unsafe {
-            (x11.XGrabKeyboard)(dpy, win, 0, GRAB_MODE_ASYNC, GRAB_MODE_ASYNC, CURRENT_TIME) == GRAB_SUCCESS
+        let try_kbd_grab = |w: Window| -> bool {
+            unsafe { (x11.XGrabKeyboard)(dpy, w, 0, GRAB_MODE_ASYNC, GRAB_MODE_ASYNC, CURRENT_TIME) == GRAB_SUCCESS }
         };
+        let mut ptr_grabbed = try_ptr_grab(grab_target);
+        let mut kbd_grabbed = try_kbd_grab(grab_target);
         unsafe { (x11.XFlush)(dpy) };
 
         let mut last_poll_pos: Option<(i32, i32)> = None;
         let mut last_poll_mask: c_uint = 0;
+        let mut ticks = 0u32;
 
-        while shared().is_open() {
+        while shared().is_open() && !shared().is_shutdown() {
+            refresh_keys(&mut cur_ov, &mut cur_sh);
+            ticks = ticks.wrapping_add(1);
+
+            let cur_win = ACTIVE_WINDOW.load(Ordering::Relaxed) as Window;
+            if cur_win != 0 && cur_win != win {
+                if ptr_grabbed {
+                    unsafe { (x11.XUngrabPointer)(dpy, CURRENT_TIME) };
+                    ptr_grabbed = false;
+                }
+                if kbd_grabbed {
+                    unsafe { (x11.XUngrabKeyboard)(dpy, CURRENT_TIME) };
+                    kbd_grabbed = false;
+                }
+                win = cur_win;
+                (win_w, win_h) = query_geom(win);
+            } else if ticks % 30 == 0 {
+                let geom = query_geom(win);
+                if geom.0 > 0 && geom.1 > 0 {
+                    (win_w, win_h) = geom;
+                }
+            }
+            if ticks % 12 == 0 {
+                if !ptr_grabbed {
+                    ptr_grabbed = try_ptr_grab(grab_target);
+                }
+                if !kbd_grabbed {
+                    kbd_grabbed = try_kbd_grab(grab_target);
+                }
+            }
+
             let mut events = Vec::new();
             let mut mods = 0u8;
             let mut close_requested = false;
@@ -365,7 +627,7 @@ fn input_loop() {
                             let m = ev.motion;
                             mods = x11_mods(m.state);
                             let (x, y) = scale_point(m.x, m.y, win_w, win_h);
-                            events.push(Input::Move { x, y });
+                            push_event(&mut events, Input::Move { x, y });
                         }
                         BUTTON_PRESS | BUTTON_RELEASE => {
                             let b = ev.button;
@@ -373,15 +635,15 @@ fn input_loop() {
                             mods = x11_mods(b.state);
                             let (x, y) = scale_point(b.x, b.y, win_w, win_h);
                             match b.button {
-                                1 => events.push(Input::Button { button: 0, down, x, y }),
-                                2 => events.push(Input::Button { button: 2, down, x, y }),
-                                3 => events.push(Input::Button { button: 1, down, x, y }),
-                                4 if down => events.push(Input::Wheel { x: 0.0, y: 1.0 }),
-                                5 if down => events.push(Input::Wheel { x: 0.0, y: -1.0 }),
-                                6 if down => events.push(Input::Wheel { x: -1.0, y: 0.0 }),
-                                7 if down => events.push(Input::Wheel { x: 1.0, y: 0.0 }),
-                                8 => events.push(Input::Button { button: 3, down, x, y }),
-                                9 => events.push(Input::Button { button: 4, down, x, y }),
+                                1 => push_event(&mut events, Input::Button { button: 0, down, x, y }),
+                                2 => push_event(&mut events, Input::Button { button: 2, down, x, y }),
+                                3 => push_event(&mut events, Input::Button { button: 1, down, x, y }),
+                                4 if down => push_event(&mut events, Input::Wheel { x: 0.0, y: 1.0 }),
+                                5 if down => push_event(&mut events, Input::Wheel { x: 0.0, y: -1.0 }),
+                                6 if down => push_event(&mut events, Input::Wheel { x: -1.0, y: 0.0 }),
+                                7 if down => push_event(&mut events, Input::Wheel { x: 1.0, y: 0.0 }),
+                                8 => push_event(&mut events, Input::Button { button: 3, down, x, y }),
+                                9 => push_event(&mut events, Input::Button { button: 4, down, x, y }),
                                 _ => {}
                             }
                         }
@@ -401,19 +663,24 @@ fn input_loop() {
                             if sym == 0 {
                                 sym = (x11.XLookupKeysym)(&mut k, 0);
                             }
-                            if down && (sym == 0xff1b || ((sym == 0xff09 || sym == 0xfe20) && (mods & MOD_SHIFT != 0))) {
-                                was_combo = true;
+                            let vk_opt = keysym_to_vk(sym as u64);
+                            if down && vk_opt == Some(cur_sh.1) && (mods & 0x07) == cur_sh.0 {
+                                shared().request_screenshot();
+                                continue;
+                            }
+                            if down && (sym == 0xff1b || (vk_opt == Some(cur_ov.1) && (mods & 0x07) == cur_ov.0)) {
+                                was_ov = true;
                                 close_requested = true;
                                 break;
                             }
-                            if let Some(vk) = keysym_to_vk(sym as u64) {
-                                events.push(Input::Key { vk, down, repeat: false });
+                            if let Some(vk) = vk_opt {
+                                push_event(&mut events, Input::Key { vk, down, repeat: false });
                             }
                             if down && n > 0 && (mods & (MOD_CTRL | MOD_ALT) == 0) {
                                 if let Ok(s) = std::str::from_utf8(&buf[..n as usize]) {
                                     let printable: String = s.chars().filter(|c| !c.is_control()).collect();
                                     if !printable.is_empty() {
-                                        events.push(Input::Text(printable));
+                                        push_event(&mut events, Input::Text(printable));
                                     }
                                 }
                             }
@@ -422,17 +689,24 @@ fn input_loop() {
                     }
                 }
 
-                // Fallback when the game holds an active XGrabKeyboard: poll Shift+Tab / Esc.
-                if !kbd_grabbed && !close_requested {
+                // Always poll hotkeys + Esc via XQueryKeymap (even when kbd_grabbed)
+                // so Shift+Tab / Esc can NEVER get stuck if a compositor dialog appears.
+                if !close_requested {
                     let mut keymap = [0u8; 32];
                     (x11.XQueryKeymap)(dpy, keymap.as_mut_ptr().cast());
-                    let shift = key_down(&keymap, kc_shift_l) || key_down(&keymap, kc_shift_r);
-                    let combo = (shift && key_down(&keymap, kc_tab)) || key_down(&keymap, kc_esc);
-                    if combo && !was_combo {
-                        was_combo = true;
+                    let shot = combo_matches(&keymap, cur_sh.0, cur_sh.2, mods_kc);
+                    if shot && !was_shot {
+                        was_shot = true;
+                        shared().request_screenshot();
+                    } else if !shot {
+                        was_shot = false;
+                    }
+                    let combo = combo_matches(&keymap, cur_ov.0, cur_ov.2, mods_kc) || key_down(&keymap, kc_esc);
+                    if combo && !was_ov {
+                        was_ov = true;
                         close_requested = true;
                     } else if !combo {
-                        was_combo = false;
+                        was_ov = false;
                     }
                 }
 
@@ -446,13 +720,13 @@ fn input_loop() {
                         let (x, y) = scale_point(wx, wy, win_w, win_h);
                         if last_poll_pos != Some((wx, wy)) {
                             last_poll_pos = Some((wx, wy));
-                            events.push(Input::Move { x, y });
+                            push_event(&mut events, Input::Move { x, y });
                         }
                         for (bit, btn) in [(BUTTON1_MASK, 0u8), (BUTTON3_MASK, 1), (BUTTON2_MASK, 2)] {
                             let was = last_poll_mask & bit != 0;
                             let now = mask & bit != 0;
                             if was != now {
-                                events.push(Input::Button { button: btn, down: now, x, y });
+                                push_event(&mut events, Input::Button { button: btn, down: now, x, y });
                             }
                         }
                         last_poll_mask = mask;
@@ -477,7 +751,22 @@ fn input_loop() {
             if kbd_grabbed {
                 (x11.XUngrabKeyboard)(dpy, CURRENT_TIME);
             }
+            if shield != 0 {
+                if let Some(destroy_fn) = x11.XDestroyWindow {
+                    destroy_fn(dpy, shield);
+                }
+                if let Some(focus_fn) = x11.XSetInputFocus {
+                    focus_fn(dpy, win, REVERT_TO_PARENT, CURRENT_TIME);
+                }
+            }
+            if arrow_cursor != 0 {
+                if let Some(free_fn) = x11.XFreeCursor {
+                    free_fn(dpy, arrow_cursor);
+                }
+            }
             (x11.XFlush)(dpy);
         }
     }
+
+    unsafe { (x11.XCloseDisplay)(dpy) };
 }
