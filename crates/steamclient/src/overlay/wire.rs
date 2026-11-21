@@ -66,6 +66,16 @@ pub enum FromGame {
     /// Shift+Tab (or the game) opened or closed the overlay.
     Opened(bool),
     Input { modifiers: u8, events: Vec<Input> },
+    /// Frames the game presented in the last second.
+    Fps(u32),
+    /// An F12 screenshot was saved (true) or failed.
+    Screenshot(bool),
+    /// Begin streaming a captured RGB screenshot from `vk_overlay`.
+    ScreenshotStart { width: u32, height: u32 },
+    /// Raw RGB chunk (fits under the 64 KiB post-hello cap).
+    ScreenshotChunk(Vec<u8>),
+    /// Finish streaming a captured RGB screenshot.
+    ScreenshotEnd,
 }
 
 /// One texture change, in egui's terms (`TexturesDelta`).
@@ -113,14 +123,25 @@ pub enum ToGame {
     Frame { pixels_per_point: f32, cursor: u8, set: Vec<TexSet>, free: Vec<u64>, meshes: Vec<Mesh> },
     /// Open or close the overlay (its close button, Esc, the game asking).
     SetOpen(bool),
+    /// Live hotkey configuration (modifiers bitmask MOD_* + Windows VK code).
+    Config { overlay_mods: u8, overlay_vk: u32, shot_mods: u8, shot_vk: u32 },
+    /// Ask the game's hook to capture the next frame as a screenshot.
+    TakeScreenshot,
 }
 
 const HELLO: u8 = 1;
 const RESIZE: u8 = 2;
 const OPENED: u8 = 3;
 const INPUT: u8 = 4;
+const FPS: u8 = 5;
+const SCREENSHOT: u8 = 6;
+const SCREENSHOT_START: u8 = 7;
+const SCREENSHOT_CHUNK: u8 = 8;
+const SCREENSHOT_END: u8 = 9;
 const FRAME: u8 = 10;
 const SET_OPEN: u8 = 11;
+const CONFIG: u8 = 12;
+const TAKE_SCREENSHOT: u8 = 13;
 
 struct W(Vec<u8>);
 
@@ -251,6 +272,26 @@ impl FromGame {
                     }
                 }
             }
+            FromGame::Fps(n) => {
+                w.u8(FPS);
+                w.u32(*n);
+            }
+            FromGame::Screenshot(ok) => {
+                w.u8(SCREENSHOT);
+                w.u8(*ok as u8);
+            }
+            FromGame::ScreenshotStart { width, height } => {
+                w.u8(SCREENSHOT_START);
+                w.u32(*width);
+                w.u32(*height);
+            }
+            FromGame::ScreenshotChunk(bytes) => {
+                w.u8(SCREENSHOT_CHUNK);
+                w.bytes(bytes);
+            }
+            FromGame::ScreenshotEnd => {
+                w.u8(SCREENSHOT_END);
+            }
         }
         w.0
     }
@@ -279,6 +320,18 @@ impl FromGame {
                 }
                 FromGame::Input { modifiers, events }
             }
+            FPS => FromGame::Fps(r.u32()?),
+            SCREENSHOT => FromGame::Screenshot(r.u8()? != 0),
+            SCREENSHOT_START => {
+                let width = r.u32()?;
+                let height = r.u32()?;
+                if width == 0 || height == 0 {
+                    return Err(bad());
+                }
+                FromGame::ScreenshotStart { width, height }
+            }
+            SCREENSHOT_CHUNK => FromGame::ScreenshotChunk(r.bytes()?.to_vec()),
+            SCREENSHOT_END => FromGame::ScreenshotEnd,
             _ => return Err(bad()),
         })
     }
@@ -329,6 +382,16 @@ impl ToGame {
                 w.u8(SET_OPEN);
                 w.u8(*open as u8);
             }
+            ToGame::Config { overlay_mods, overlay_vk, shot_mods, shot_vk } => {
+                w.u8(CONFIG);
+                w.u8(*overlay_mods);
+                w.u32(*overlay_vk);
+                w.u8(*shot_mods);
+                w.u32(*shot_vk);
+            }
+            ToGame::TakeScreenshot => {
+                w.u8(TAKE_SCREENSHOT);
+            }
         }
         w.0
     }
@@ -374,6 +437,13 @@ impl ToGame {
                 ToGame::Frame { pixels_per_point, cursor, set, free, meshes }
             }
             SET_OPEN => ToGame::SetOpen(r.u8()? != 0),
+            CONFIG => ToGame::Config {
+                overlay_mods: r.u8()?,
+                overlay_vk: r.u32()?,
+                shot_mods: r.u8()?,
+                shot_vk: r.u32()?,
+            },
+            TAKE_SCREENSHOT => ToGame::TakeScreenshot,
             _ => return Err(bad()),
         })
     }
@@ -419,6 +489,11 @@ mod tests {
             FromGame::Hello { token: "abc".into(), pid: 7, width: 1920, height: 1080 },
             FromGame::Resize { width: 1, height: 2 },
             FromGame::Opened(true),
+            FromGame::Fps(144),
+            FromGame::Screenshot(true),
+            FromGame::ScreenshotStart { width: 2, height: 1 },
+            FromGame::ScreenshotChunk(vec![1, 2, 3, 4, 5, 6]),
+            FromGame::ScreenshotEnd,
             FromGame::Input {
                 modifiers: MOD_SHIFT | MOD_CTRL,
                 events: vec![
@@ -444,6 +519,9 @@ mod tests {
         };
         assert_eq!(ToGame::decode(&frame.encode()).unwrap(), frame);
         assert_eq!(ToGame::decode(&ToGame::SetOpen(false).encode()).unwrap(), ToGame::SetOpen(false));
+        let cfg = ToGame::Config { overlay_mods: MOD_SHIFT, overlay_vk: 0x09, shot_mods: 0, shot_vk: 0x7B };
+        assert_eq!(ToGame::decode(&cfg.encode()).unwrap(), cfg);
+        assert_eq!(ToGame::decode(&ToGame::TakeScreenshot.encode()).unwrap(), ToGame::TakeScreenshot);
         let mut pipe = Vec::new();
         write_message(&mut pipe, &frame.encode()).unwrap();
         assert_eq!(ToGame::decode(&read_message(&mut &pipe[..]).unwrap()).unwrap(), frame);
@@ -453,6 +531,7 @@ mod tests {
     fn rejects_garbage() {
         assert!(ToGame::decode(&[FRAME, 0, 0]).is_err());
         assert!(FromGame::decode(&[INPUT, 0, 255, 255, 255, 255]).is_err());
+        assert!(FromGame::decode(&[SCREENSHOT_START, 0, 0, 0, 0, 10, 0, 0, 0]).is_err());
         assert!(read_message(&mut &[0u8, 0, 0, 0][..]).is_err());
     }
 }

@@ -36,6 +36,9 @@ pub struct State {
     /// Market prices by (app, market hash name).
     pub market_prices: HashMap<(AppId, String), Result<model::MarketPrice, String>>,
     pub my_listings: Option<Result<model::MyListings, String>>,
+    pub profile_edit: Option<Result<model::ProfileEdit, String>>,
+    /// Location lists by (country, state).
+    pub locations: HashMap<(Option<String>, Option<String>), Vec<(String, String)>>,
     /// Names of games not in your library.
     pub app_names: HashMap<AppId, String>,
     pub email: Option<(String, bool)>,
@@ -134,6 +137,40 @@ pub struct State {
     pub offline_playtime: HashMap<AppId, (u64, u64)>,
     /// Games whose Steam Cloud upload waits for a connection.
     pub cloud_pending: std::collections::HashSet<AppId>,
+    /// Games currently being moved between library folders.
+    pub moving: HashMap<AppId, TransferProgress>,
+    /// Games currently being backed up.
+    pub backing_up: HashMap<AppId, TransferProgress>,
+    /// Backup currently being restored into a library folder.
+    pub restoring: Option<RestoreProgress>,
+}
+
+/// Progress of an in-flight move or backup operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferProgress {
+    pub done_bytes: u64,
+    pub total_bytes: u64,
+}
+
+impl TransferProgress {
+    pub fn fraction(&self) -> f32 {
+        (self.done_bytes as f32 / self.total_bytes.max(1) as f32).clamp(0.0, 1.0)
+    }
+}
+
+/// Progress of an in-flight backup restore operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreProgress {
+    pub app_id: AppId,
+    pub name: String,
+    pub done_bytes: u64,
+    pub total_bytes: u64,
+}
+
+impl RestoreProgress {
+    pub fn fraction(&self) -> f32 {
+        (self.done_bytes as f32 / self.total_bytes.max(1) as f32).clamp(0.0, 1.0)
+    }
 }
 
 fn now() -> u64 {
@@ -194,6 +231,11 @@ impl State {
                 self.market_prices.insert((*app_id, hash_name.clone()), result);
             }
             Event::MyListings(r) => self.my_listings = Some(r.clone()),
+            Event::ProfileEdit(r) => self.profile_edit = Some(r.clone()),
+            Event::Locations { country, state, result: Ok(l) } => {
+                self.locations.insert((country.clone(), state.clone()), l.clone());
+            }
+            Event::Locations { .. } | Event::ProfileSaved { .. } => {}
             Event::Comments { steam_id, result } => {
                 self.comments.insert(*steam_id, result.clone());
             }
@@ -642,6 +684,29 @@ impl State {
                     self.downloads.remove(app_id);
                 }
             }
+            Event::MoveProgress { app_id, done_bytes, total_bytes } => {
+                self.moving.insert(*app_id, TransferProgress { done_bytes: *done_bytes, total_bytes: *total_bytes });
+            }
+            Event::MoveFinished { app_id, .. } => {
+                self.moving.remove(app_id);
+            }
+            Event::BackupProgress { app_id, done_bytes, total_bytes } => {
+                self.backing_up.insert(*app_id, TransferProgress { done_bytes: *done_bytes, total_bytes: *total_bytes });
+            }
+            Event::BackupFinished { app_id, .. } => {
+                self.backing_up.remove(app_id);
+            }
+            Event::RestoreProgress { app_id, name, done_bytes, total_bytes } => {
+                self.restoring = Some(RestoreProgress {
+                    app_id: *app_id,
+                    name: name.clone(),
+                    done_bytes: *done_bytes,
+                    total_bytes: *total_bytes,
+                });
+            }
+            Event::RestoreFinished { .. } => {
+                self.restoring = None;
+            }
             Event::DownloadFinished { app_id, result } => {
                 if let Some(d) = self.downloads.get_mut(app_id) {
                     match result {
@@ -667,6 +732,7 @@ impl State {
             Event::OfflinePlaytime(list) => self.offline_playtime = list.iter().map(|&(a, total, pending)| (a, (total, pending))).collect(),
             Event::CloudPending(list) => self.cloud_pending = list.iter().copied().collect(),
             Event::CloudSkipped { .. } => {}
+            Event::InputConfigInspected(_) => {}
         }
     }
 
@@ -894,5 +960,27 @@ mod group_tests {
         // Delete marks message deleted.
         s.apply(&Event::GroupMessageDeleted { group_id: 100, chat_id: 1, messages: vec![(50, 1)] });
         assert!(s.group_messages.get(&(100, 1)).unwrap()[0].deleted);
+    }
+
+    #[test]
+    fn tracks_storage_move_backup_and_restore_progress() {
+        let mut s = State::default();
+        s.apply(&Event::MoveProgress { app_id: 620, done_bytes: 50, total_bytes: 100 });
+        assert_eq!(s.moving.get(&620).unwrap().fraction(), 0.5);
+        s.apply(&Event::MoveFinished { app_id: 620, result: Err("cancelled".into()) });
+        assert!(s.moving.is_empty());
+
+        s.apply(&Event::BackupProgress { app_id: 440, done_bytes: 25, total_bytes: 100 });
+        assert_eq!(s.backing_up.get(&440).unwrap().fraction(), 0.25);
+        s.apply(&Event::BackupFinished { app_id: 440, result: Err("cancelled".into()) });
+        assert!(s.backing_up.is_empty());
+
+        s.apply(&Event::RestoreProgress { app_id: 730, name: "CS2".into(), done_bytes: 80, total_bytes: 100 });
+        let r = s.restoring.as_ref().unwrap();
+        assert_eq!(r.app_id, 730);
+        assert_eq!(r.name, "CS2");
+        assert_eq!(r.fraction(), 0.8);
+        s.apply(&Event::RestoreFinished { result: Err("cancelled".into()) });
+        assert!(s.restoring.is_none());
     }
 }

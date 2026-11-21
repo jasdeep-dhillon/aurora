@@ -4,6 +4,7 @@
 //! users install themselves, see the `plugins` crate.
 
 pub mod community;
+pub mod community_home;
 pub mod group_chat;
 mod downloads;
 pub mod hub;
@@ -15,6 +16,8 @@ mod profile;
 mod reviews;
 pub mod settings;
 mod settings_account;
+mod settings_controller;
+mod storage_ui;
 pub mod store;
 mod workshop;
 
@@ -30,6 +33,7 @@ pub fn registry(
     let mut r = Registry::default();
     r.register(store::Store::new(rt.clone(), ctx.clone()));
     r.register(library::Library::new(rt.clone(), ctx.clone(), flags.clone(), library_layout));
+    r.register(community_home::CommunityHome::new(rt.clone(), ctx.clone()));
     r.register(community::Community::default());
     r.register(profile::Profile::default());
     r.register(downloads::Downloads::new(flags.clone()));

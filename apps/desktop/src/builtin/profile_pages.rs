@@ -29,7 +29,7 @@ impl Profile {
             Section::Reviews => self.reviews_list(ui, t, ctx, id, name, mine),
             Section::Groups => self.groups_list(ui, t, ctx, id, name, mine),
             Section::Cards => self.card_set(ui, t, ctx, id),
-            Section::Profile | Section::Games => {}
+            Section::Profile | Section::Games | Section::Edit => {}
         });
     }
 

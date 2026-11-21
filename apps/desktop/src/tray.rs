@@ -310,7 +310,7 @@ fn contents(d: &MenuData, ui: &mut Ui, t: &Theme) -> Option<TrayCmd> {
     let items: [(&str, &str, TrayCmd); 7] = [
         (icons::STORE, t!("Store"), TrayCmd::Page("store")),
         (icons::BOOKS, t!("Library"), TrayCmd::Page("library")),
-        (icons::CHATS, t!("Community"), TrayCmd::Page("community")),
+        (icons::CHATS, t!("Community"), TrayCmd::Page("community_home")),
         (icons::USERS, t!("Friends"), TrayCmd::Friends),
         (icons::USER_CIRCLE, t!("Profile"), TrayCmd::Page("profile")),
         (icons::DOWNLOAD, t!("Downloads"), TrayCmd::Page("downloads")),

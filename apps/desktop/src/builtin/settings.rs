@@ -22,13 +22,14 @@ enum Section {
     Folders,
     Cloud,
     Overlay,
+    Controller,
     Accessibility,
     Plugins,
     About,
 }
 
 /// Steam's settings list, in Steam's order; `None` draws a divider.
-const SECTIONS: [Option<(Section, &str, &str)>; 19] = [
+const SECTIONS: [Option<(Section, &str, &str)>; 20] = [
     Some((Section::Account, icons::USER_CIRCLE, "Account")),
     Some((Section::Friends, icons::USERS, "Friends & Chat")),
     Some((Section::Family, icons::USERS_THREE, "Family")),
@@ -43,6 +44,7 @@ const SECTIONS: [Option<(Section, &str, &str)>; 19] = [
     Some((Section::Folders, icons::DRIVES, "Storage")),
     Some((Section::Cloud, icons::CLOUD_CHECK, "Cloud")),
     Some((Section::Overlay, icons::CONTROLLER, "In game")),
+    Some((Section::Controller, icons::CONTROLLER, "Controller")),
     Some((Section::Accessibility, icons::EYE, "Accessibility")),
     None,
     Some((Section::Plugins, icons::PLUGS, "Plugins")),
@@ -51,6 +53,30 @@ const SECTIONS: [Option<(Section, &str, &str)>; 19] = [
 ];
 
 /// App-level options the Settings page edits (owned by the app, shared here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum FpsCorner {
+    #[default]
+    Off,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl FpsCorner {
+    pub const ALL: [FpsCorner; 5] = [FpsCorner::Off, FpsCorner::TopLeft, FpsCorner::TopRight, FpsCorner::BottomLeft, FpsCorner::BottomRight];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FpsCorner::Off => t!("Off"),
+            FpsCorner::TopLeft => t!("Top-left"),
+            FpsCorner::TopRight => t!("Top-right"),
+            FpsCorner::BottomLeft => t!("Bottom-left"),
+            FpsCorner::BottomRight => t!("Bottom-right"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AppFlags {
     pub close_to_tray: bool,
@@ -66,6 +92,12 @@ pub struct AppFlags {
     pub scroll_speed: f32,
     /// The one-time Steam-DRM launch notice has been shown and accepted.
     pub drm_host_ack: bool,
+    /// Enable the in-game overlay.
+    pub overlay_enabled: bool,
+    /// Where to draw the in-game FPS counter.
+    pub fps_counter: FpsCorner,
+    /// High-contrast green color for the in-game FPS counter.
+    pub fps_high_contrast: bool,
 }
 
 pub type SharedFlags = std::sync::Arc<std::sync::Mutex<AppFlags>>;
@@ -74,12 +106,14 @@ pub struct Settings {
     section: Section,
     /// Account details, purchase history, licenses, family.
     acct: super::settings_account::AccountPages,
+    controller: super::settings_controller::ControllerPage,
     flags: SharedFlags,
     themes: crate::app::SharedThemeManager,
     confirm_uninstall: Option<String>,
     option_hex_bufs: std::collections::HashMap<String, String>,
     /// Cached "are we the steam:// handler?" (registry lookups are slow).
     handler: Option<bool>,
+    restore: Option<super::storage_ui::StorageDialog>,
 }
 
 impl Settings {
@@ -87,11 +121,13 @@ impl Settings {
         Self {
             section: Section::default(),
             acct: Default::default(),
+            controller: Default::default(),
             flags,
             themes,
             confirm_uninstall: None,
             option_hex_bufs: Default::default(),
             handler: None,
+            restore: None,
         }
     }
 }
@@ -110,6 +146,11 @@ impl Extension for Settings {
         match arg {
             Some("plugins") => self.section = Section::Plugins,
             Some("family") => self.section = Section::Family,
+            Some("security") => self.section = Section::Security,
+            Some(a) if a == "controller" || a.starts_with("controller:") => {
+                self.section = Section::Controller;
+                self.controller.open_arg(a);
+            }
             Some(a @ ("history" | "licenses" | "account-details")) => {
                 self.section = Section::Account;
                 self.acct.open(match a {
@@ -120,6 +161,10 @@ impl Extension for Settings {
             }
             _ => {}
         }
+    }
+
+    fn on_event(&mut self, event: &client::Event, _ctx: &mut Ctx) {
+        self.controller.on_event(event);
     }
 
     fn page(&mut self, _page: &str, ui: &mut Ui, ctx: &mut Ctx) {
@@ -182,8 +227,9 @@ impl Extension for Settings {
                             ctx.settings_for("store", ui);
                         });
                     }
-                    Section::Overlay => overlay(ui, &t, ctx),
-                    Section::Folders => folders(ui, &t, ctx),
+                    Section::Overlay => overlay(ui, &t, ctx, &self.flags),
+                    Section::Controller => self.controller.show(ui, &t, ctx),
+                    Section::Folders => folders(ui, &t, ctx, &mut self.restore),
                     Section::About => about(ui, &t),
                 });
                 ui.add_space(40.0);
@@ -256,7 +302,7 @@ fn account(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, pages: &mut super::settings_ac
             web("https://store.steampowered.com/steamaccount/addfunds");
         }
         if tile(ui, t, icons::EYE_SLASH, t!("Privacy settings"), t!("Profile, games, inventory and more"), width) {
-            web(&format!("https://steamcommunity.com/profiles/{}/edit/settings", ctx.state.steam_id));
+            ctx.navigate("profile", Some("edit/privacy".into()));
         }
         if tile(ui, t, icons::NOTE, t!("Account details"), t!("Contact, Steam Guard, password, devices"), width) {
             pages.open(AccountView::Details);
@@ -307,7 +353,7 @@ fn friends_chat(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
         ctx.navigate("community", None);
     }
     if info_row(ui, t, t!("Who can see your status and send invites"), "", Some(t!("Privacy settings"))) {
-        web(&format!("https://steamcommunity.com/profiles/{}/edit/settings", ctx.state.steam_id));
+        ctx.navigate("profile", Some("edit/privacy".into()));
     }
 }
 
@@ -1058,19 +1104,39 @@ fn interface(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, flags: &SharedFlags, handler
     });
 }
 
-fn overlay(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+fn overlay(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, flags: &SharedFlags) {
     w::page_title(ui, t, t!("In-game overlay"), None);
+    let mut f = flags.lock().unwrap();
     w::card(t).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.label(w::text_semibold(t!("Shift+Tab"), 15.0, t.text));
         ui.add(egui::Label::new(w::text(
-            t!("While a game you started from Aurora is running, press Shift+Tab to open the overlay: friends, quick chat and notes. It's a separate always-on-top window that never touches the game's process, so it's safe with anti-cheat. It shows over windowed and borderless games; exclusive fullscreen hides it."),
+            t!("Press Shift+Tab (or the controller Guide button) while playing to open the overlay: friends, chat, achievements, guides, discussions, screenshots and per-game notes. Press F12 to take a screenshot."),
             13.5,
             t.text_dim,
         )).wrap());
         ui.add_space(10.0);
+        ui.checkbox(&mut f.overlay_enabled, t!("Enable the in-game overlay"));
+        ui.add_space(10.0);
         if w::button(ui, t, Some(icons::EYE), t!("Preview overlay"), w::Kind::Secondary, w::Size::Md).clicked() {
             ctx.act(Action::ToggleOverlay);
+        }
+    });
+    ui.add_space(14.0);
+    w::card(t).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(w::text_semibold(t!("In-game FPS counter"), 15.0, t.text));
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            for corner in FpsCorner::ALL {
+                if w::chip(ui, t, corner.label(), f.fps_counter == corner).clicked() {
+                    f.fps_counter = corner;
+                }
+            }
+        });
+        if f.fps_counter != FpsCorner::Off {
+            ui.add_space(8.0);
+            ui.checkbox(&mut f.fps_high_contrast, t!("High contrast color"));
         }
     });
 }
@@ -1085,7 +1151,7 @@ fn add_library_folder(ctx: &mut Ctx) {
     }
 }
 
-fn folders(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+fn folders(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, restore: &mut Option<super::storage_ui::StorageDialog>) {
     // Saved pictures (store and library art), like Steam's web browser cache.
     w::card(t).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -1111,8 +1177,24 @@ fn folders(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
     });
     ui.add_space(14.0);
     w::page_title(ui, t, t!("Library folders"), Some(t!("Folders where games are installed: your Steam setup's, and any you add here.")));
-    if w::button(ui, t, Some(icons::FOLDER), t!("Add library folder…"), w::Kind::Secondary, w::Size::Sm).clicked() {
-        add_library_folder(ctx);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+        if w::button(ui, t, Some(icons::FOLDER), t!("Add library folder…"), w::Kind::Secondary, w::Size::Sm).clicked() {
+            add_library_folder(ctx);
+        }
+        if w::button(ui, t, Some(icons::RESTORE), t!("Restore game backup…"), w::Kind::Secondary, w::Size::Sm).clicked() {
+            *restore = Some(super::storage_ui::StorageDialog::Restore(super::storage_ui::RestoreDialog::new(ctx)));
+        }
+    });
+    if let Some(r) = &ctx.state.restoring {
+        ui.add_space(8.0);
+        super::storage_ui::restore_progress_card(ui, t, ctx, r);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    if let Some(mut dlg) = restore.take()
+        && dlg.show(ui, t, ctx, "settings")
+    {
+        *restore = Some(dlg);
     }
     ui.add_space(8.0);
     if ctx.local.libraries.is_empty() {

@@ -9,6 +9,7 @@
 //! can render, so extensions see exactly the same data as built-in pages.
 
 pub mod download;
+pub mod feed;
 pub mod workshop;
 pub mod hub;
 pub mod ingame;
@@ -18,6 +19,7 @@ mod launch;
 pub mod shaders;
 mod installscript;
 pub mod market;
+pub mod profile_edit;
 pub mod social;
 pub mod cloud;
 pub mod reviews;
@@ -50,7 +52,17 @@ pub mod state;
 pub mod store;
 
 pub use auth::Guard;
-pub use launch::{LaunchArgs, LaunchMode, STEAM_DRM, anti_cheat_headless, mode as launch_mode, mode_cached as launch_mode_cached, mode_peek as launch_mode_peek, proton_builds, proton_override, app_proton, app_protons, default_proton, native_build, NATIVE, DEFAULT_PROTON, safe_connect_args, set_app_proton, set_app_protons, set_anti_cheat_headless, set_prefer_official as launch_through_steam, set_proton_override, set_steam_setting, steam_setting, steam_settings_locked, SteamSetting, apply_steam_prefs, gameplay_downloads, set_gameplay_downloads, spawn_non_steam};
+pub use input_config::{
+    ActionSetSummary, BindingChoice, BindingOption, BindingOrigin, InputConfigReport, app_binding, app_bindings,
+    inspect_local as inspect_input_config_local, parse_vdf_summary, player_config_dir, set_app_binding, set_app_bindings,
+};
+pub use pads::{
+    ConnectionKind, ControllerFamily, ControllerSettings, DetectedController, DetectionSnapshot, FamilyToggles,
+    LiveInput, PadCalibration, SteamInputDecision, app_controller, effective_controller_override, poll_ui as poll_controllers,
+    refresh_ui as refresh_controllers, resolve_steam_input, set_app_controller, set_app_controllers,
+    set_settings as set_controller_settings, settings as controller_settings, trigger_test_rumble,
+};
+pub use launch::{LaunchArgs, LaunchMode, STEAM_DRM, anti_cheat_headless, app_overlay_enabled, mode as launch_mode, mode_cached as launch_mode_cached, mode_peek as launch_mode_peek, overlay_enabled, proton_builds, proton_override, app_proton, app_protons, default_proton, native_build, NATIVE, DEFAULT_PROTON, safe_connect_args, set_app_overlay, set_app_proton, set_app_protons, set_anti_cheat_headless, set_overlay_disabled_apps, set_overlay_enabled, set_overlay_hotkeys, set_prefer_official as launch_through_steam, set_proton_override, set_steam_setting, steam_setting, steam_settings_locked, SteamSetting, apply_steam_prefs, gameplay_downloads, set_gameplay_downloads, spawn_non_steam};
 pub use state::State;
 pub use store::SavedAccount;
 
@@ -173,6 +185,22 @@ pub enum Command {
     /// Steam then asks for confirmation in the Steam Mobile app.
     SellItem { app_id: AppId, context_id: u64, asset_id: u64, amount: u64, receive: u64 },
     LoadMyListings,
+    /// Your profile's editable details, privacy, owned items, themes, and featured badge.
+    LoadProfileEdit { language: String },
+    SaveProfileInfo(Box<model::ProfileEdit>),
+    SaveProfilePrivacy(model::ProfilePrivacy),
+    /// Upload a picture file as your avatar.
+    UploadAvatar { path: std::path::PathBuf },
+    /// Equip a profile item (0 background, 1 mini profile background, 2 avatar
+    /// frame, 3 animated avatar); `id` 0 takes it off.
+    EquipProfileItem { kind: u8, id: u64 },
+    /// Steam's "Full Screen" vs "Original Size" flag for an equipped background.
+    SetBackgroundFullScreen { id: u64, full: bool },
+    /// Feature a community badge on your profile (0 takes it off).
+    SetFavoriteBadge { badge: u32 },
+    SetProfileTheme(String),
+    /// Countries, a country's states, or a state's cities.
+    LoadLocations { country: Option<String>, state: Option<String> },
     /// Your library collections from Steam (Favorites, Hidden, your own).
     LoadSteamCollections,
     /// Write library collections to Steam: `save` are created or replaced
@@ -280,12 +308,23 @@ pub enum Command {
     /// the Downloads page like Steam's "Verify integrity of game files".
     VerifyGame { game: model::InstalledGame, steam_root: PathBuf },
     CancelVerify { app_id: AppId },
+    /// Move an installed game (and its manifest / workshop content) to another library folder.
+    MoveGame { game: model::InstalledGame, dest_library: PathBuf },
+    CancelMove { app_id: AppId },
+    /// Back up an installed game's manifest and files into `dest_dir`.
+    BackupGame { game: model::InstalledGame, dest_dir: PathBuf },
+    CancelBackup { app_id: AppId },
+    /// Restore a game backup (Aurora or standard Steam `.acf` backup) into `dest_library`.
+    RestoreGame { backup_dir: PathBuf, dest_library: PathBuf },
+    CancelRestore,
     /// Add a free-to-play game to the account, like Steam's "Play Game" /
     /// "Add to Library" on a free game's store page.
     RequestFreeLicense { app_id: AppId },
     /// Download every subscribed Workshop item of an installed game that
     /// is missing or outdated (also done before each launch, like Steam).
     SyncWorkshop { app_id: AppId },
+    /// Inspect Steam Input controller configurations (local + Workshop + official) for a game.
+    InspectInputConfig { app_id: AppId, install_dir: PathBuf },
     /// The game's own Workshop tag groups (for filters).
     LoadWorkshopTags { app_id: AppId, language: String },
     LoadWishlist,
@@ -371,6 +410,15 @@ impl std::fmt::Debug for Command {
             Command::MarketPrice { app_id, hash_name, currency, country, full } => f.debug_struct("MarketPrice").field("app_id", app_id).field("hash_name", hash_name).field("currency", currency).field("country", country).field("full", full).finish(),
             Command::SellItem { app_id, context_id, asset_id, amount, receive } => f.debug_struct("SellItem").field("app_id", app_id).field("context_id", context_id).field("asset_id", asset_id).field("amount", amount).field("receive", receive).finish(),
             Command::LoadMyListings => f.write_str("LoadMyListings"),
+            Command::LoadProfileEdit { language } => f.debug_struct("LoadProfileEdit").field("language", language).finish(),
+            Command::SaveProfileInfo(_) => f.write_str("SaveProfileInfo"),
+            Command::SaveProfilePrivacy(p) => f.debug_tuple("SaveProfilePrivacy").field(p).finish(),
+            Command::UploadAvatar { path } => f.debug_struct("UploadAvatar").field("path", path).finish(),
+            Command::EquipProfileItem { kind, id } => f.debug_struct("EquipProfileItem").field("kind", kind).field("id", id).finish(),
+            Command::SetBackgroundFullScreen { id, full } => f.debug_struct("SetBackgroundFullScreen").field("id", id).field("full", full).finish(),
+            Command::SetFavoriteBadge { badge } => f.debug_struct("SetFavoriteBadge").field("badge", badge).finish(),
+            Command::SetProfileTheme(t) => f.debug_tuple("SetProfileTheme").field(t).finish(),
+            Command::LoadLocations { country, state } => f.debug_struct("LoadLocations").field("country", country).field("state", state).finish(),
             Command::LoadSteamCollections => f.write_str("LoadSteamCollections"),
             Command::SaveSteamCollections { save, delete } => f.debug_struct("SaveSteamCollections").field("save", save).field("delete", delete).finish(),
             Command::LoadComments { steam_id, start } => f.debug_struct("LoadComments").field("steam_id", steam_id).field("start", start).finish(),
@@ -434,8 +482,15 @@ impl std::fmt::Debug for Command {
             Command::WorkshopSubscribe { app_id, file_id } => f.debug_struct("WorkshopSubscribe").field("app_id", app_id).field("file_id", file_id).finish(),
             Command::VerifyGame { game, steam_root } => f.debug_struct("VerifyGame").field("game", game).field("steam_root", steam_root).finish(),
             Command::CancelVerify { app_id } => f.debug_struct("CancelVerify").field("app_id", app_id).finish(),
+            Command::MoveGame { game, dest_library } => f.debug_struct("MoveGame").field("app_id", &game.app_id).field("dest_library", dest_library).finish(),
+            Command::CancelMove { app_id } => f.debug_struct("CancelMove").field("app_id", app_id).finish(),
+            Command::BackupGame { game, dest_dir } => f.debug_struct("BackupGame").field("app_id", &game.app_id).field("dest_dir", dest_dir).finish(),
+            Command::CancelBackup { app_id } => f.debug_struct("CancelBackup").field("app_id", app_id).finish(),
+            Command::RestoreGame { backup_dir, dest_library } => f.debug_struct("RestoreGame").field("backup_dir", backup_dir).field("dest_library", dest_library).finish(),
+            Command::CancelRestore => f.write_str("CancelRestore"),
             Command::RequestFreeLicense { app_id } => f.debug_struct("RequestFreeLicense").field("app_id", app_id).finish(),
             Command::SyncWorkshop { app_id } => f.debug_struct("SyncWorkshop").field("app_id", app_id).finish(),
+            Command::InspectInputConfig { app_id, install_dir } => f.debug_struct("InspectInputConfig").field("app_id", app_id).field("install_dir", install_dir).finish(),
             Command::LoadWorkshopTags { app_id, language } => f.debug_struct("LoadWorkshopTags").field("app_id", app_id).field("language", language).finish(),
             Command::LoadWishlist => f.write_str("LoadWishlist"),
             Command::WishlistAdd { app_id } => f.debug_struct("WishlistAdd").field("app_id", app_id).finish(),
@@ -445,6 +500,7 @@ impl std::fmt::Debug for Command {
             Command::CartAdd { package_id, gift, gift_to } => f.debug_struct("CartAdd").field("package_id", package_id).field("gift", gift).field("gift_to", gift_to).finish(),
             Command::CartModify { line_item_id, gift, gift_to } => f.debug_struct("CartModify").field("line_item_id", line_item_id).field("gift", gift).field("gift_to", gift_to).finish(),
             Command::CartRemove { line_item_id } => f.debug_struct("CartRemove").field("line_item_id", line_item_id).finish(),
+            Command::Hub(hub::Request::PostStatus { app_id, .. }) => f.debug_struct("HubPostStatus").field("app_id", app_id).finish_non_exhaustive(),
             Command::Hub(req) => f.debug_tuple("Hub").field(req).finish(),
             Command::LogOut => f.write_str("LogOut"),
         }
@@ -549,6 +605,10 @@ pub enum Event {
     /// Result of [`Command::SellItem`]: `Ok(true)` = needs confirming on your phone.
     ItemListed { asset_id: u64, result: Result<bool, String> },
     MyListings(Result<model::MyListings, String>),
+    ProfileEdit(Result<model::ProfileEdit, String>),
+    ProfileSaved { what: model::ProfileSave, result: Result<(), String> },
+    /// (code, name) for [`Command::LoadLocations`].
+    Locations { country: Option<String>, state: Option<String>, result: Result<Vec<(String, String)>, String> },
     SteamCollections(Result<Vec<model::SteamCollection>, String>),
     /// A `SaveSteamCollections` finished (the same lists, so the library
     /// knows what Steam now has).
@@ -615,10 +675,18 @@ pub enum Event {
     WorkshopSubscribed { file_id: u64, result: Result<(), String> },
     /// A verification ended (its row leaves the Downloads page).
     VerifyFinished { app_id: AppId, result: Result<local::manage::VerifyReport, String> },
+    MoveProgress { app_id: AppId, done_bytes: u64, total_bytes: u64 },
+    MoveFinished { app_id: AppId, result: Result<local::manage::MoveReport, String> },
+    BackupProgress { app_id: AppId, done_bytes: u64, total_bytes: u64 },
+    BackupFinished { app_id: AppId, result: Result<local::manage::BackupReport, String> },
+    RestoreProgress { app_id: AppId, name: String, done_bytes: u64, total_bytes: u64 },
+    RestoreFinished { result: Result<local::manage::RestoreReport, String> },
     /// Answer to [`Command::RequestFreeLicense`].
     FreeLicense { app_id: AppId, result: Result<(), String> },
     /// Workshop items were downloaded (or failed) for a game.
     WorkshopSync { app_id: AppId, result: Result<crate::workshop::Report, String> },
+    /// Controller bindings / action sets inspected for a game.
+    InputConfigInspected(InputConfigReport),
     WorkshopTags { app_id: AppId, result: Result<Vec<model::WorkshopTagCategory>, String> },
     /// (app id, date added)
     Wishlist(Vec<(AppId, u64)>),
@@ -661,6 +729,11 @@ impl Client {
     pub fn spawn(rt: &tokio::runtime::Handle, sink: Sink) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         rt.spawn(session::run(rx, sink));
+        Self { tx }
+    }
+
+    /// Create a client whose commands go to a custom channel (e.g. demo mode or tests).
+    pub fn from_sender(tx: mpsc::UnboundedSender<Command>) -> Self {
         Self { tx }
     }
 

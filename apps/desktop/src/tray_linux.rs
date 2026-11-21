@@ -175,7 +175,7 @@ impl ksni::Tray for Sni {
         menu.extend([
             item(t!("Store"), TrayCmd::Page("store"), true),
             item(t!("Library"), TrayCmd::Page("library"), true),
-            item(t!("Community"), TrayCmd::Page("community"), true),
+            item(t!("Community"), TrayCmd::Page("community_home"), true),
             item(with(t!("Friends"), online), TrayCmd::Friends, false),
             item(t!("Profile"), TrayCmd::Page("profile"), true),
             item(with(t!("Downloads"), d.download.clone()), TrayCmd::Page("downloads"), true),
