@@ -823,7 +823,7 @@ impl Library {
                 }
             };
             if running {
-                item(ui, icons::STOP, t!("Stop"), MenuAct::Stop);
+                item(ui, icons::X, t!("Stop"), MenuAct::Stop);
             } else if let Some(paused) = self.downloading.get(&id) {
                 if *paused {
                     item(ui, icons::PLAY, t!("Resume download"), MenuAct::ResumeDownload);
@@ -1640,7 +1640,7 @@ impl Library {
                                 uninstall_bar(ui, t, p);
                             }
                             Some(_) if playing => {
-                                if w::button(ui, t, Some(icons::STOP), t!("Stop"), w::Kind::Danger, w::Size::Lg).on_hover_text(t!("Close the game")).clicked() {
+                                if w::button(ui, t, Some(icons::X), t!("Stop"), w::Kind::Danger, w::Size::Lg).on_hover_text(t!("Close the game")).clicked() {
                                     ctx.send(Command::StopGame { app_id: id });
                                 }
                             }

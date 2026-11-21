@@ -99,6 +99,7 @@ impl Extension for Settings {
         match arg {
             Some("plugins") => self.section = Section::Plugins,
             Some("family") => self.section = Section::Family,
+            Some("security") => self.section = Section::Security,
             Some(a @ ("history" | "licenses" | "account-details")) => {
                 self.section = Section::Account;
                 self.acct.open(match a {
