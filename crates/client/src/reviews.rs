@@ -5,30 +5,62 @@
 //! signed-in web session).
 
 use crate::market::Web;
-use model::{AppId, AppReview, AppReviews, UserReview};
+use model::{AppId, AppReview, AppReviews, ReviewFilter, ReviewKind, ReviewOrder, ReviewWindow, UserReview};
 use serde_json::Value;
 
 const STORE: &str = "https://store.steampowered.com";
 const API: &str = "https://api.steampowered.com";
 const COMMUNITY: &str = "https://steamcommunity.com";
 
-/// One page (20) of a game's reviews, most helpful first (all time). `cursor`
-/// is the one the last page returned ("*" for the first page). `language`
-/// is a Steam API language name ("english", "russian"…), or "all".
-pub async fn load(app_id: AppId, language: &str, cursor: &str) -> Result<AppReviews, String> {
-    let input = serde_json::json!({
+/// Build the `input_json` query payload for `IUserReviewsService/GetAppReviews/v1/`.
+pub fn request_input(app_id: AppId, language: &str, cursor: &str, filter: ReviewFilter) -> Value {
+    let sort = match filter.order {
+        ReviewOrder::Helpful => 0,
+        ReviewOrder::Recent => 1,
+        ReviewOrder::Funny => 3,
+    };
+    let day_range = match filter.order {
+        ReviewOrder::Helpful => match filter.window {
+            ReviewWindow::AllTime => 0,
+            ReviewWindow::Day => 1,
+            ReviewWindow::Week => 7,
+            ReviewWindow::Month => 30,
+            ReviewWindow::ThreeMonths => 90,
+            ReviewWindow::SixMonths => 180,
+            ReviewWindow::Year => 365,
+        },
+        _ => 0,
+    };
+    let review_type = match filter.kind {
+        ReviewKind::All => 0,
+        ReviewKind::Positive => 1,
+        ReviewKind::Negative => 2,
+    };
+    let lang = if filter.all_languages { "all" } else { language };
+    serde_json::json!({
         "appid": app_id,
-        // Helpful, over the game's whole life (day_range 0).
-        "filter": 0,
-        "day_range": 0,
-        "languages": [language],
-        "display_language": i18n_api_language(language),
+        "filter": sort,
+        "day_range": day_range,
+        "languages": [lang],
+        "display_language": i18n_api_language(lang),
         // All reviews, also from keys bought elsewhere.
-        "review_type": 0,
+        "review_type": review_type,
         "purchase_type": 1,
         "num_per_page": 20,
         "cursor": cursor,
-    });
+    })
+}
+
+/// One page (20) of a game's reviews, most helpful first. `cursor`
+/// is the one the last page returned ("*" for the first page). `language`
+/// is a Steam API language name ("english", "russian"…), or "all".
+pub async fn load(app_id: AppId, language: &str, cursor: &str) -> Result<AppReviews, String> {
+    load_filtered(app_id, language, cursor, ReviewFilter::default()).await
+}
+
+/// Filtered variant of [`load`].
+pub async fn load_filtered(app_id: AppId, language: &str, cursor: &str, filter: ReviewFilter) -> Result<AppReviews, String> {
+    let input = request_input(app_id, language, cursor, filter);
     let resp = crate::http()
         .get(format!("{API}/IUserReviewsService/GetAppReviews/v1/"))
         .query(&[("input_json", input.to_string())])
@@ -207,5 +239,21 @@ mod tests {
     fn reads_post_results() {
         assert!(super::check(&serde_json::json!({"success": true})).is_ok());
         assert_eq!(super::check(&serde_json::json!({"success": false, "strError": "Too short"})), Err("Too short".to_string()));
+    }
+
+    #[test]
+    fn builds_filtered_query() {
+        use model::{ReviewFilter, ReviewKind, ReviewOrder, ReviewWindow};
+        let f = ReviewFilter { kind: ReviewKind::Negative, order: ReviewOrder::Helpful, window: ReviewWindow::Week, all_languages: true };
+        let q = super::request_input(570, "russian", "*", f);
+        assert_eq!((q["filter"].as_i64(), q["day_range"].as_i64(), q["review_type"].as_i64()), (Some(0), Some(7), Some(2)));
+        assert_eq!(q["languages"], serde_json::json!(["all"]));
+        assert_eq!(q["display_language"], "english");
+
+        let f2 = ReviewFilter { kind: ReviewKind::Positive, order: ReviewOrder::Funny, window: ReviewWindow::Month, all_languages: false };
+        let q2 = super::request_input(570, "russian", "*", f2);
+        assert_eq!((q2["filter"].as_i64(), q2["day_range"].as_i64(), q2["review_type"].as_i64()), (Some(3), Some(0), Some(1)));
+        assert_eq!(q2["languages"], serde_json::json!(["russian"]));
+        assert_eq!(q2["display_language"], "russian");
     }
 }

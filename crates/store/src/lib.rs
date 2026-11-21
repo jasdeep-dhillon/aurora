@@ -9,6 +9,7 @@ pub mod disk;
 pub mod gift;
 pub mod events;
 pub mod itad;
+pub mod points;
 pub mod query;
 pub mod html;
 

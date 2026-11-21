@@ -1035,6 +1035,15 @@ impl eframe::App for SteamApp {
             crate::overlay::show(self, &ctx, &mut actions);
             crate::launch_popup::show(self, &ctx);
             crate::tray::show(self, &ctx);
+            let env = Env {
+                state: &self.state,
+                local: &self.local,
+                theme: &self.prefs.theme,
+                zoom: self.prefs.zoom,
+                client: &self.client,
+                actions: &mut actions,
+            };
+            self.registry.tick(env);
             self.apply_actions(&ctx, actions);
             return;
         }
@@ -1203,6 +1212,15 @@ impl eframe::App for SteamApp {
             crate::tray::show(self, &ctx);
         }
 
+        let env = Env {
+            state: &self.state,
+            local: &self.local,
+            theme: &self.prefs.theme,
+            zoom: self.prefs.zoom,
+            client: &self.client,
+            actions: &mut actions,
+        };
+        self.registry.tick(env);
         self.apply_actions(&ctx, actions);
         crate::shell::toasts(self, &ctx);
         if signed_in {

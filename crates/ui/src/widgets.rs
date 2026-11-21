@@ -445,6 +445,11 @@ pub fn icon_button(ui: &mut Ui, t: &Theme, icon: &str, tooltip: &str, active: bo
     icon_button_sized(ui, t, icon, tooltip, active, badge, 32.0)
 }
 
+/// Wishlist toggle button with a heart icon.
+pub fn heart_button(ui: &mut Ui, t: &Theme, on: bool, tooltip: &str) -> Response {
+    icon_button(ui, t, crate::icons::HEART, tooltip, on, 0)
+}
+
 /// [`icon_button`] at another size (the header uses larger controls).
 pub fn icon_button_sized(ui: &mut Ui, t: &Theme, icon: &str, tooltip: &str, active: bool, badge: usize, size: f32) -> Response {
     let size = control_height(t, size);
@@ -472,6 +477,12 @@ pub fn icon_button_sized(ui: &mut Ui, t: &Theme, icon: &str, tooltip: &str, acti
     resp.on_hover_text(tooltip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A clickable row inside a dropdown menu or popup: icon and single-line label,
+/// highlighted when hovered or `selected`. Safe for egui sizing passes.
+pub fn menu_row(ui: &mut Ui, t: &Theme, icon: &str, label: &str, selected: bool) -> Response {
+    menu_row_impl(ui, t, icon, label, None, false, selected)
+}
+
 /// Top navigation tab with an animated underline.
 /// A row in a dropdown menu: icon and label, the full menu width, with a
 /// highlight while hovered so it's clear which item a click will hit.
@@ -481,13 +492,13 @@ pub fn menu_item(ui: &mut Ui, t: &Theme, icon: &str, label: &str) -> Response {
 
 /// [`menu_item`] in its own color, e.g. red for "Uninstall…".
 pub fn menu_item_tinted(ui: &mut Ui, t: &Theme, icon: &str, label: &str, tint: Option<Color32>) -> Response {
-    menu_row(ui, t, icon, label, tint, false)
+    menu_row_impl(ui, t, icon, label, tint, false, false)
 }
 
 /// A menu row that opens a submenu (a caret on the right), shown with
 /// [`egui::containers::menu::SubMenu`].
 pub fn submenu_item(ui: &mut Ui, t: &Theme, icon: &str, label: &str) -> Response {
-    menu_row(ui, t, icon, label, None, true)
+    menu_row_impl(ui, t, icon, label, None, true, false)
 }
 
 /// A thin line between groups of menu rows.
@@ -502,28 +513,38 @@ pub fn menu_spacing(ui: &mut Ui) {
     ui.spacing_mut().item_spacing.y = 2.0;
 }
 
-fn menu_row(ui: &mut Ui, t: &Theme, icon: &str, label: &str, tint: Option<Color32>, sub: bool) -> Response {
-    // As wide as the label needs; the rest of the menu's width otherwise.
-    // Asking for all the available width while egui measures the popup
-    // (its sizing pass) made menus as wide as the screen allowed.
+fn menu_row_impl(ui: &mut Ui, t: &Theme, icon: &str, label: &str, tint: Option<Color32>, sub: bool, selected: bool) -> Response {
+    // As wide as the label needs during egui's sizing pass so popup menus do
+    // not stretch to the whole screen; outside sizing passes, clamp to
+    // available width so bounded dropdowns truncate long labels instead of overflowing.
     let text_w = ui.painter().layout_no_wrap(label.to_string(), font_medium(13.5), t.text).size().x;
-    let natural = 36.0 + text_w + if sub { 40.0 } else { 16.0 };
+    let text_left_pad = if icon.is_empty() { 12.0 } else { 36.0 };
+    let natural = text_left_pad + text_w + if sub { 40.0 } else { 16.0 };
     let width = if ui.is_sizing_pass() { natural } else { ui.available_width().max(natural) };
     let (rect, resp) = ui.allocate_exact_size(vec2(width, control_height(t, 30.0)), Sense::click());
     if ui.is_rect_visible(rect) {
         let open = sub && egui::Popup::is_id_open(ui.ctx(), egui::containers::menu::SubMenu::id_from_widget_id(resp.id));
-        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() || open, 0.08);
+        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() || open || selected, 0.08);
         let p = ui.painter();
         if hover > 0.0 {
-            p.rect_filled(rect, t.corner_small(), t.surface_hover.gamma_multiply(hover));
+            let fill = if selected { active_fill(t) } else { t.surface_hover };
+            p.rect_filled(rect, t.corner_small(), fill.gamma_multiply(hover));
         }
         let y = rect.center().y;
         let (icon_c, text_c) = match tint {
             Some(c) => (c, c),
+            None if selected => (t.accent, t.text),
             None => (mix(t.text_dim, t.text, hover), mix(t.text_dim, t.text, 0.6 + 0.4 * hover)),
         };
-        p.text(pos2(rect.left() + 18.0, y), egui::Align2::CENTER_CENTER, icon, font(14.0), icon_c);
-        p.text(pos2(rect.left() + 36.0, y), egui::Align2::LEFT_CENTER, label, font_medium(13.5), text_c);
+        if !icon.is_empty() {
+            p.text(pos2(rect.left() + 18.0, y), egui::Align2::CENTER_CENTER, icon, font(14.0), icon_c);
+        }
+        let text_left = rect.left() + text_left_pad;
+        let max_w = (rect.right() - if sub { 28.0 } else { 10.0 } - text_left).max(16.0);
+        let mut job = egui::text::LayoutJob::single_section(label.to_string(), egui::TextFormat::simple(font_medium(13.5), text_c));
+        job.wrap = egui::text::TextWrapping { max_width: max_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+        let galley = p.layout_job(job);
+        p.galley(pos2(text_left, y - galley.size().y / 2.0), galley, text_c);
         if sub {
             p.text(pos2(rect.right() - 12.0, y), egui::Align2::CENTER_CENTER, crate::icons::CARET_RIGHT, font(12.0), icon_c);
         }

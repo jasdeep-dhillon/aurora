@@ -111,14 +111,20 @@ fn rebrand(s: &'static str) -> &'static str {
     cache.entry(s).or_insert_with(|| Box::leak(s.replace("SteamInRust", BRAND).into_boxed_str()))
 }
 
-/// Translate a fixed English string.
+fn strip_context(s: &str) -> &str {
+    s.split_once('|').map_or(s, |(text, _)| text)
+}
+
+/// Translate a fixed English string. A trailing `|context` lets homographs
+/// keep distinct translation keys and is stripped when falling back to English.
 pub fn tr(english: &'static str) -> &'static str {
-    rebrand(table(language()).and_then(|t| t.get(english).copied()).unwrap_or(english))
+    let raw = table(language()).and_then(|t| t.get(english).copied()).unwrap_or_else(|| strip_context(english));
+    rebrand(raw)
 }
 
 /// Translate a string only known at runtime (e.g. an error from the engine).
 pub fn tr_dyn(english: &str) -> String {
-    let s = table(language()).and_then(|t| t.get(english).map(|s| s.to_string())).unwrap_or_else(|| english.to_string());
+    let s = table(language()).and_then(|t| t.get(english).map(|s| s.to_string())).unwrap_or_else(|| strip_context(english).to_string());
     s.replace("SteamInRust", BRAND)
 }
 
@@ -150,6 +156,7 @@ mod tests {
         set_language(Lang::English);
         assert_eq!(t!("Sign in"), "Sign in");
         assert_eq!(t!("Playing {game}", game = "Dota 2"), "Playing Dota 2");
+        assert_eq!(t!("Recommended|review"), "Recommended");
         set_language(Lang::Russian);
         assert_eq!(t!("Sign in"), "Войти");
         assert_eq!(t!("Playing {game}", game = "Dota 2"), "Играет в Dota 2");

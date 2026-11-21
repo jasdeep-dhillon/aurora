@@ -540,6 +540,67 @@ fn inventory(me: u64, now: u64) -> Vec<Event> {
     });
     let group = |name: &str, members: &str, online: &str| model::UserGroup { name: name.into(), url: "https://steamcommunity.com/groups/".into(), members: members.into(), online: online.into(), avatar: None };
     out.push(Event::Groups { steam_id: me, result: Ok(vec![group("Aurora Testers", "1,204 Members", "88 Online"), group("Cozy Farmers", "52,310 Members", "3,021 Online")]) });
+
+    // Demo store state: wishlist, empty cart, discovery queue, and offline game reviews.
+    out.push(Event::Wishlist(vec![
+        (1245620, now - 86_400 * 60),
+        (268910, now - 86_400 * 30),
+        (646570, now - 86_400 * 14),
+        (367520, now - 86_400 * 7),
+    ]));
+    out.push(Event::Cart(Vec::new()));
+    out.push(Event::DiscoveryQueue(Ok(vec![1145360, 413150, 367520, 646570, 268910, 477160])));
+    let sample_reviews = model::AppReviews {
+        label: "Overwhelmingly Positive".into(),
+        positive: 98,
+        negative: 2,
+        total: 100,
+        cursor: None,
+        items: vec![
+            model::AppReview {
+                id: "demo-1".into(),
+                author: 76561197960265729 + 100,
+                minutes_played: 5_400,
+                minutes_at_review: 1_800,
+                recommended: true,
+                text: "Crisp combat, reactive writing, and runs effortlessly on every setup I've tried.".into(),
+                created: now - 86_400 * 2,
+                helpful: 142,
+                funny: 12,
+                early_access: false,
+                free: false,
+            },
+            model::AppReview {
+                id: "demo-2".into(),
+                author: 76561197960265729 + 101,
+                minutes_played: 12_200,
+                minutes_at_review: 9_000,
+                recommended: true,
+                text: "One more run turned into 200 hours. Dialogue reactivity stays fresh well past the credits.".into(),
+                created: now - 86_400 * 12,
+                helpful: 89,
+                funny: 64,
+                early_access: false,
+                free: false,
+            },
+            model::AppReview {
+                id: "demo-3".into(),
+                author: 76561197960265729 + 102,
+                minutes_played: 420,
+                minutes_at_review: 360,
+                recommended: false,
+                text: "Love the art and music, though later difficulty spikes require more grinding than I expected.".into(),
+                created: now - 86_400 * 20,
+                helpful: 27,
+                funny: 4,
+                early_access: false,
+                free: false,
+            },
+        ],
+    };
+    for id in [1145360, 413150, 367520, 646570, 268910, 477160, 1245620, 570] {
+        out.push(Event::AppReviews { app_id: id, filter: model::ReviewFilter::default(), more: false, result: Ok(sample_reviews.clone()) });
+    }
     out
 }
 
