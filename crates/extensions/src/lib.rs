@@ -123,6 +123,12 @@ pub enum Action {
     JoinGame { app_id: model::AppId, connect: String },
     /// Switch the interface language (`"en"`, `"ru"`).
     SetLanguage(String),
+    /// Activate an installed theme by id, or `None` to use the default Aurora UI.
+    ActivateTheme(Option<String>),
+    /// Re-scan the themes folder and reload the active theme.
+    ReloadThemes,
+    /// Set a user-configurable option on an installed theme.
+    SetThemeOption { theme_id: String, key: String, value: String },
 }
 
 /// Read-only info about an installed extension.
