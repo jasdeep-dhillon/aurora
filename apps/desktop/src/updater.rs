@@ -274,14 +274,28 @@ pub fn is_installed() -> bool {
     install_dir().is_some_and(|d| d.join("uninstall.exe").exists())
 }
 
-/// "v1.2.3" -> (1, 2, 3, 0); a numeric revision "1.2.3-4" -> (1, 2, 3, 4).
-/// Other suffixes ("-beta", "-test.5") count as no revision.
-fn parse(v: &str) -> (u32, u32, u32, u32) {
+/// Parse a version into a comparable tuple `(major, minor, patch, stage, pre_label, num)`.
+///
+/// - `stage = 0`: prerelease suffixes (`-alpha`, `-beta`, `-rc1`, `-rc.2`, `-test.5`)
+///   sort strictly below the final release of the same `major.minor.patch`.
+/// - `stage = 1`: final release (`1.0.0`, `num = 0`) and post-release numeric
+///   revisions (`0.7.1-1`, `num = 1`), where `1.0.0-rc1 < 1.0.0 < 1.0.0-1`.
+fn parse(v: &str) -> (u32, u32, u32, u8, String, u32) {
     let v = v.trim().trim_start_matches(['v', 'V']);
     let v = v.split('+').next().unwrap_or(v);
-    let (core, rev) = v.split_once('-').unwrap_or((v, ""));
+    let (core, suffix) = v.split_once('-').unwrap_or((v, ""));
     let mut n = core.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
-    (n.next().unwrap_or(0), n.next().unwrap_or(0), n.next().unwrap_or(0), rev.parse().unwrap_or(0))
+    let (maj, min, pat) = (n.next().unwrap_or(0), n.next().unwrap_or(0), n.next().unwrap_or(0));
+    if suffix.is_empty() {
+        return (maj, min, pat, 1, String::new(), 0);
+    }
+    if let Ok(rev) = suffix.parse::<u32>() {
+        return (maj, min, pat, 1, String::new(), rev);
+    }
+    let trimmed = suffix.trim_end_matches(|c: char| c.is_ascii_digit());
+    let num: u32 = suffix[trimmed.len()..].parse().unwrap_or(0);
+    let label = trimmed.trim_end_matches('.').to_ascii_lowercase();
+    (maj, min, pat, 0, label, num)
 }
 
 pub fn is_newer(candidate: &str, current: &str) -> bool {
@@ -751,6 +765,13 @@ mod tests {
         assert!(super::is_newer("v0.7.1-1", "0.7.1"));
         assert!(super::is_newer("0.7.2", "0.7.1-1"));
         assert!(!super::is_newer("0.7.1-test.5", "0.7.1"));
+        assert!(super::is_newer("1.0.0-rc1", "0.9.2"));
+        assert!(super::is_newer("1.0.0-rc2", "1.0.0-rc1"));
+        assert!(super::is_newer("1.0.0-rc10", "1.0.0-rc2"));
+        assert!(super::is_newer("1.0.0-rc.2", "1.0.0-rc.1"));
+        assert!(super::is_newer("1.0.0", "1.0.0-rc1"));
+        assert!(super::is_newer("1.0.0", "1.0.0-rc.1"));
+        assert!(!super::is_newer("1.0.0-rc1", "1.0.0"));
     }
 
     #[test]
