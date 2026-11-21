@@ -3,6 +3,35 @@
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Visuals};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeightPreset {
+    #[default]
+    Heavy,
+    Balanced,
+}
+
+/// Control geometry and interaction treatment, independent of the color palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WidgetStyle {
+    #[default]
+    Aurora,
+    Adwaita,
+}
+
+/// Optional custom font bytes provided by a theme package.
+#[derive(Debug, Clone, Default)]
+pub struct CustomFonts {
+    pub regular: Option<Vec<u8>>,
+    pub bold: Option<Vec<u8>>,
+    pub mono: Option<Vec<u8>>,
+}
+
+fn default_font_scale() -> f32 {
+    1.0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Theme {
@@ -33,6 +62,15 @@ pub struct Theme {
     pub danger: Color32,
     pub discount: Color32,
     pub radius: u8,
+    #[serde(default)]
+    pub weight_preset: WeightPreset,
+    #[serde(default)]
+    pub widget_style: WidgetStyle,
+    /// Live native style data. Saved themes never retain machine-specific data.
+    #[serde(skip)]
+    pub native_metrics: Option<crate::native_style::NativeControlMetrics>,
+    #[serde(default = "default_font_scale")]
+    pub font_scale: f32,
 }
 
 impl Default for Theme {
@@ -48,6 +86,10 @@ const fn hex(rgb: u32) -> Color32 {
 impl Theme {
     pub fn presets() -> Vec<Theme> {
         vec![Self::nevko(), Self::midnight(), Self::aurora(), Self::classic(), Self::oled(), Self::daylight()]
+    }
+
+    pub fn preset_by_name(name: &str) -> Option<Theme> {
+        Self::presets().into_iter().find(|p| p.name.eq_ignore_ascii_case(name))
     }
 
     /// After the NEVKO-UI Steam skin (github.com/dotFelixan/NEVKO-UI): one
@@ -76,6 +118,10 @@ impl Theme {
             danger: hex(0xE64A35),
             discount: hex(0x4C6B22),
             radius: 9,
+            weight_preset: WeightPreset::Heavy,
+            widget_style: WidgetStyle::Aurora,
+            native_metrics: None,
+            font_scale: 1.0,
         }
     }
 
@@ -103,6 +149,10 @@ impl Theme {
             danger: hex(0xF0544F),
             discount: hex(0x4C6B22),
             radius: 12,
+            weight_preset: WeightPreset::Heavy,
+            widget_style: WidgetStyle::Aurora,
+            native_metrics: None,
+            font_scale: 1.0,
         }
     }
 
@@ -187,16 +237,65 @@ impl Theme {
             danger: hex(0xDC2626),
             discount: hex(0x4D7C0F),
             radius: 12,
+            weight_preset: WeightPreset::Heavy,
+            widget_style: WidgetStyle::Aurora,
+            native_metrics: None,
+            font_scale: 1.0,
         }
     }
 
-    /// A saved theme with its preset's current colors. Only the accent colors
-    /// and corner roundness can be edited in Settings, so those are kept; the
-    /// rest comes from the preset, so fixes to a preset (such as the status
-    /// colors) reach themes saved before them. Unknown names stay as saved.
+    /// Adwaita surfaces and semantic colors from libadwaita's CSS variables.
+    ///
+    /// https://gnome.pages.gitlab.gnome.org/libadwaita/doc/main/css-variables.html
+    /// The profile uses flat 34 px controls; desktop preference/accent tracking
+    /// is supplied by the application's theme resolver.
+    pub fn adwaita(dark: bool) -> Self {
+        let bg = if dark { hex(0x222226) } else { hex(0xfafafb) };
+        let text = if dark { Color32::WHITE } else { Color32::from_rgba_unmultiplied(0, 0, 6, 204) };
+        Self {
+            name: "Adwaita".into(),
+            dark,
+            bg,
+            chrome: if dark { hex(0x2e2e32) } else { Color32::WHITE },
+            // Dark cards are white at 8% over the window background.
+            surface: if dark { hex(0x343437) } else { Color32::WHITE },
+            surface_hover: if dark { hex(0x414145) } else { hex(0xebebed) },
+            raised: if dark { hex(0x36363a) } else { Color32::WHITE },
+            border: text.gamma_multiply(0.15),
+            text,
+            text_dim: text.gamma_multiply(0.55),
+            text_faint: text.gamma_multiply(0.5),
+            accent: hex(0x3584e4),
+            accent_2: hex(0x3584e4),
+            on_accent: Color32::WHITE,
+            play: if dark { hex(0x26a269) } else { hex(0x2ec27e) },
+            online: if dark { hex(0x81d0ff) } else { hex(0x0461be) },
+            in_game: if dark { hex(0x78e9ab) } else { hex(0x007c3d) },
+            away: if dark { hex(0xffc252) } else { hex(0x905400) },
+            danger: if dark { hex(0xff938c) } else { hex(0xc30000) },
+            discount: if dark { hex(0x26a269) } else { hex(0x007c3d) },
+            radius: 12,
+            weight_preset: WeightPreset::Balanced,
+            widget_style: WidgetStyle::Adwaita,
+            native_metrics: None,
+            font_scale: 1.0,
+        }
+    }
+
+    /// A saved theme with its preset's current colors. Accent colors, corner
+    /// roundness, and typography overrides are kept; the rest comes from the
+    /// preset, so fixes to a preset reach themes saved before them. Unknown or
+    /// custom theme names stay untouched.
     pub fn refreshed(self) -> Self {
         match Self::presets().into_iter().find(|p| p.name == self.name) {
-            Some(preset) => Self { accent: self.accent, accent_2: self.accent_2, radius: self.radius, ..preset },
+            Some(preset) => Self {
+                accent: self.accent,
+                accent_2: self.accent_2,
+                radius: self.radius,
+                weight_preset: self.weight_preset,
+                font_scale: self.font_scale,
+                ..preset
+            },
             None => self,
         }
     }
@@ -206,7 +305,50 @@ impl Theme {
     }
 
     pub fn corner_small(&self) -> CornerRadius {
-        CornerRadius::same((self.radius * 2 / 3).max(2))
+        if self.widget_style == WidgetStyle::Adwaita {
+            CornerRadius::same(6)
+        } else {
+            CornerRadius::same((self.radius * 2 / 3).max(2))
+        }
+    }
+
+    /// A standalone accent for text on neutral surfaces. Libadwaita's accent
+    /// fill is paired with white text and is deliberately a different color.
+    pub fn accent_text(&self) -> Color32 {
+        if let Some(native) = self.native_metrics.filter(|native| native.accent == self.accent) {
+            return native.accent_text;
+        }
+        if self.widget_style != WidgetStyle::Adwaita {
+            return self.accent;
+        }
+        let rgb = (u32::from(self.accent.r()) << 16) | (u32::from(self.accent.g()) << 8) | u32::from(self.accent.b());
+        let (light, dark) = match rgb {
+            0x3584e4 => (0x0461be, 0x81d0ff),
+            0x2190a4 => (0x007184, 0x7bdff4),
+            0x3a944a => (0x15772e, 0x8de698),
+            0xc88800 => (0x905300, 0xffc057),
+            0xed5b00 => (0xb62200, 0xff9c5b),
+            0xe62d42 => (0xc00023, 0xff888c),
+            0xd56199 => (0xa2326c, 0xffa0d8),
+            0x9141ac => (0x8939a4, 0xfba7ff),
+            0x6f8396 => (0x526678, 0xbbd1e5),
+            // Custom fills have no native standalone counterpart. Keep their
+            // neutral-surface labels legible instead of guessing a tint.
+            _ => return self.text,
+        };
+        hex(if self.dark { dark } else { light })
+    }
+
+    /// Background paired with white text for a destructive action or badge.
+    pub fn danger_fill(&self) -> Color32 {
+        if let Some(native) = self.native_metrics.filter(|native| native.danger == self.danger) {
+            return native.danger_fill;
+        }
+        if self.widget_style == WidgetStyle::Adwaita {
+            hex(if self.dark { 0xc01c28 } else { 0xe01b24 })
+        } else {
+            self.danger
+        }
     }
 
     /// Push these tokens into egui's global style.
@@ -223,9 +365,9 @@ impl Theme {
         v.extreme_bg_color = self.raised;
         v.faint_bg_color = self.surface;
         v.code_bg_color = self.raised;
-        v.hyperlink_color = self.accent;
+        v.hyperlink_color = self.accent_text();
         v.selection.bg_fill = self.accent.linear_multiply(0.35);
-        v.selection.stroke = Stroke::new(1.0, self.accent);
+        v.selection.stroke = Stroke::new(1.0, self.accent_text());
         v.text_cursor.stroke = Stroke::new(2.0, self.accent);
         if self.dark && cfg!(target_os = "linux") {
             // Linux: egui's dark default (2c - c²) thickens every edge pixel,
@@ -256,15 +398,27 @@ impl Theme {
         w.active.expansion = 0.0;
         w.open.weak_bg_fill = self.surface_hover;
         w.open.bg_stroke = Stroke::new(1.0, self.border);
+        if self.widget_style == WidgetStyle::Adwaita {
+            w.inactive.bg_fill = self.chrome;
+            w.inactive.weak_bg_fill = self.chrome;
+            w.inactive.bg_stroke = Stroke::NONE;
+            w.hovered.bg_stroke = Stroke::NONE;
+            w.active.bg_fill = self.surface_hover;
+            w.active.weak_bg_fill = self.surface_hover;
+            w.active.fg_stroke = Stroke::new(1.0, self.text);
+            w.open.bg_fill = self.surface_hover;
+            v.extreme_bg_color = self.native_metrics.map(|m| m.view).unwrap_or_else(|| if self.dark { hex(0x1d1d20) } else { Color32::WHITE });
+        }
         for s in [&mut w.noninteractive, &mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
             s.corner_radius = r;
         }
 
+        let fs = self.font_scale.clamp(0.75, 1.5);
         ctx.set_visuals(v);
         ctx.global_style_mut(|s| {
             s.spacing.item_spacing = egui::vec2(8.0, 8.0);
             s.spacing.button_padding = egui::vec2(14.0, 7.0);
-            s.spacing.interact_size.y = 32.0;
+            s.spacing.interact_size.y = if self.widget_style == WidgetStyle::Adwaita { self.native_metrics.map(|m| m.min_height).unwrap_or(34.0) } else { 32.0 };
             s.spacing.menu_margin = egui::Margin::same(10);
             s.spacing.scroll.bar_width = 6.0;
             s.spacing.scroll.floating = true;
@@ -272,11 +426,11 @@ impl Theme {
             s.interaction.selectable_labels = false;
             use egui::TextStyle::*;
             s.text_styles = [
-                (Heading, FontId::new(24.0, semibold())),
-                (Body, FontId::new(14.0, FontFamily::Proportional)),
-                (Button, FontId::new(14.0, medium())),
-                (Small, FontId::new(12.0, FontFamily::Proportional)),
-                (Monospace, FontId::new(13.0, FontFamily::Monospace)),
+                (Heading, FontId::new(24.0 * fs, semibold())),
+                (Body, FontId::new(14.0 * fs, FontFamily::Proportional)),
+                (Button, FontId::new(14.0 * fs, medium())),
+                (Small, FontId::new(12.0 * fs, FontFamily::Proportional)),
+                (Monospace, FontId::new(13.0 * fs, FontFamily::Monospace)),
             ]
             .into();
         });
@@ -293,10 +447,13 @@ pub fn bold() -> FontFamily {
     FontFamily::Name("bold".into())
 }
 
-// The interface is set in heavy weights, like a desktop using "Inter Bold":
-// body and medium text in Geist Bold, semibold and bold in Geist ExtraBold.
+// Heavy weight preset: body and medium text in Geist Bold, semibold and bold
+// in Geist ExtraBold. Balanced weight preset: Inter Regular/Medium/SemiBold/Bold.
 const GEIST_BOLD: &[u8] = include_bytes!("../assets/fonts/Geist-Bold.ttf");
 const GEIST_EXTRABOLD: &[u8] = include_bytes!("../assets/fonts/Geist-ExtraBold.ttf");
+const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+const INTER_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Inter-Medium.ttf");
+const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
 const INTER_BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-Bold.ttf");
 const PHOSPHOR: &[u8] = include_bytes!("../assets/Phosphor.ttf");
 
@@ -656,7 +813,7 @@ mod linux_fonts {
 /// Install Geist (Bold and ExtraBold, Inter Bold behind it for scripts Geist lacks) plus
 /// the icon font, with grayscale anti-aliasing. Call once at startup.
 pub fn install_fonts(ctx: &egui::Context) {
-    install_fonts_with(ctx, false);
+    install_fonts_for_theme(ctx, false, WeightPreset::Heavy, None);
 }
 
 /// Like [`install_fonts`], but `lcd` renders text and icons with subpixel
@@ -664,16 +821,73 @@ pub fn install_fonts(ctx: &egui::Context) {
 /// by this app's patched glow painter: the in-game overlay hands its meshes
 /// to another renderer and must stay grayscale.
 pub fn install_fonts_with(ctx: &egui::Context, lcd: bool) {
+    install_fonts_for_theme(ctx, lcd, WeightPreset::Heavy, None);
+}
+
+fn valid_custom_font(bytes: &[u8]) -> bool {
+    // Font family creation in epaint panics if its parser rejects a face.
+    // Ignore damaged theme fonts, including those in an already-active package.
+    match skrifa::FontRef::from_index(bytes, 0) {
+        Ok(_) => true,
+        Err(error) => {
+            log::warn!("Ignoring invalid custom font; using bundled fallback: {error}");
+            false
+        }
+    }
+}
+
+/// Install fonts for a theme's [`WeightPreset`] and optional [`CustomFonts`],
+/// keeping Phosphor icons, Linux LCD subpixel rendering, and system CJK
+/// fallbacks intact.
+pub fn install_fonts_for_theme(
+    ctx: &egui::Context,
+    lcd: bool,
+    weight: WeightPreset,
+    custom: Option<&CustomFonts>,
+) {
     use egui::epaint::text::FontTweak;
     use std::sync::Arc;
     let mut fonts = egui::FontDefinitions::default();
-    for (name, bytes) in [
-        ("geist-bold", GEIST_BOLD),
-        ("geist-extrabold", GEIST_EXTRABOLD),
-        ("inter-bold", INTER_BOLD),
-    ] {
-        fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_static(bytes).tweak(text_tweak()).lcd(lcd)));
+    match weight {
+        WeightPreset::Heavy => {
+            for (name, bytes) in [
+                ("geist-bold", GEIST_BOLD),
+                ("geist-extrabold", GEIST_EXTRABOLD),
+                ("inter-bold", INTER_BOLD),
+            ] {
+                fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_static(bytes).tweak(text_tweak()).lcd(lcd)));
+            }
+        }
+        WeightPreset::Balanced => {
+            for (name, bytes) in [
+                ("inter-regular", INTER_REGULAR),
+                ("inter-medium", INTER_MEDIUM),
+                ("inter-semibold", INTER_SEMIBOLD),
+                ("inter-bold", INTER_BOLD),
+            ] {
+                fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_static(bytes).tweak(text_tweak()).lcd(lcd)));
+            }
+        }
     }
+
+    let mut custom_regular = None;
+    let mut custom_bold = None;
+    let mut custom_mono = None;
+    if let Some(cf) = custom {
+        if let Some(bytes) = cf.regular.as_ref().filter(|bytes| valid_custom_font(bytes)) {
+            fonts.font_data.insert("custom-regular".into(), Arc::new(egui::FontData::from_owned(bytes.clone()).tweak(text_tweak()).lcd(lcd)));
+            custom_regular = Some("custom-regular");
+        }
+        if let Some(bytes) = cf.bold.as_ref().filter(|bytes| valid_custom_font(bytes)) {
+            fonts.font_data.insert("custom-bold".into(), Arc::new(egui::FontData::from_owned(bytes.clone()).tweak(text_tweak()).lcd(lcd)));
+            custom_bold = Some("custom-bold");
+        }
+        if let Some(bytes) = cf.mono.as_ref().filter(|bytes| valid_custom_font(bytes)) {
+            fonts.font_data.insert("custom-mono".into(), Arc::new(egui::FontData::from_owned(bytes.clone()).tweak(text_tweak()).lcd(lcd)));
+            custom_mono = Some("custom-mono");
+        }
+    }
+
     // Icons are drawn from their outlines unhinted, exactly as the SVGs
     // would be: the auto-hinter otherwise bends them onto the pixel grid.
     let icon_tweak = if cfg!(target_os = "linux") { FontTweak { hinting: Some(false), ..Default::default() } } else { FontTweak::default() };
@@ -721,19 +935,39 @@ pub fn install_fonts_with(ctx: &egui::Context, lcd: bool) {
     // Phosphor has only private-use glyphs and Inter none, so the icon font
     // can sit right after the text fonts. (Geist's one private-use glyph,
     // U+F8FF, is outside Phosphor's range.)
-    let family = |geist: &str| {
-        let mut v = vec![geist.to_string(), "inter-bold".to_string(), "phosphor".to_string()];
+    let family = |primary: Option<&str>, base: &[&str]| {
+        let mut v = Vec::new();
+        if let Some(p) = primary {
+            v.push(p.to_string());
+        }
+        for b in base {
+            v.push((*b).to_string());
+        }
+        v.push("phosphor".to_string());
         v.extend(fallbacks.iter().cloned());
         v
     };
-    fonts.families.insert(FontFamily::Proportional, family("geist-bold"));
-    fonts.families.insert(medium(), family("geist-bold"));
-    fonts.families.insert(semibold(), family("geist-extrabold"));
-    fonts.families.insert(bold(), family("geist-extrabold"));
+    let bold_primary = custom_bold.or(custom_regular);
+    match weight {
+        WeightPreset::Heavy => {
+            fonts.families.insert(FontFamily::Proportional, family(custom_regular, &["geist-bold", "inter-bold"]));
+            fonts.families.insert(medium(), family(custom_regular, &["geist-bold", "inter-bold"]));
+            fonts.families.insert(semibold(), family(bold_primary, &["geist-extrabold", "inter-bold"]));
+            fonts.families.insert(bold(), family(bold_primary, &["geist-extrabold", "inter-bold"]));
+        }
+        WeightPreset::Balanced => {
+            fonts.families.insert(FontFamily::Proportional, family(custom_regular, &["inter-regular"]));
+            fonts.families.insert(medium(), family(custom_regular, &["inter-medium"]));
+            fonts.families.insert(semibold(), family(bold_primary, &["inter-semibold"]));
+            fonts.families.insert(bold(), family(bold_primary, &["inter-bold"]));
+        }
+    }
     let mono = fonts.families.entry(FontFamily::Monospace).or_default();
+    if let Some(cm) = custom_mono {
+        mono.insert(0, cm.to_string());
+    }
     mono.push("phosphor".into());
-    mono.extend(system);
-    mono.extend(system_emoji);
+    mono.extend(fallbacks);
     ctx.set_fonts(fonts);
 }
 
@@ -891,5 +1125,121 @@ mod tests {
         assert_eq!(first.len(), 12);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn malformed_custom_fonts_fall_back_without_crashing_text_layout() {
+        for bytes in [Vec::new(), b"not a font".to_vec(), INTER_REGULAR[..128].to_vec()] {
+            let ctx = egui::Context::default();
+            let custom = CustomFonts {
+                regular: Some(bytes.clone()),
+                bold: Some(bytes.clone()),
+                mono: Some(bytes),
+            };
+            install_fonts_for_theme(&ctx, false, WeightPreset::Balanced, Some(&custom));
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    ui.label("Regular fallback");
+                    ui.label(egui::RichText::new("Bold fallback").family(bold()));
+                    ui.monospace("Monospace fallback");
+                });
+            });
+            output.textures_delta.clear();
+        }
+    }
+
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let luminance = |color: Color32| {
+            let linear = |channel: u8| {
+                let channel = channel as f32 / 255.0;
+                if channel <= 0.04045 { channel / 12.92 } else { ((channel + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * linear(color.r()) + 0.7152 * linear(color.g()) + 0.0722 * linear(color.b())
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn adwaita_accent_labels_have_readable_contrast_for_every_system_accent() {
+        let ctx = egui::Context::default();
+        for dark in [false, true] {
+            let mut theme = Theme::adwaita(dark);
+            for accent in [0x3584e4, 0x2190a4, 0x3a944a, 0xc88800, 0xed5b00, 0xe62d42, 0xd56199, 0x9141ac, 0x6f8396] {
+                theme.accent = hex(accent);
+                theme.apply(&ctx);
+                let color = ctx.global_style().visuals.hyperlink_color;
+                assert!(contrast(color, theme.bg) >= 4.5, "accent {accent:x}, dark={dark}");
+            }
+        }
+    }
+
+    #[test]
+    fn adwaita_destructive_badge_text_has_readable_contrast() {
+        for dark in [false, true] {
+            let theme = Theme::adwaita(dark);
+            assert!(contrast(Color32::WHITE, theme.danger_fill()) >= 4.5);
+        }
+    }
+
+    #[test]
+    fn adwaita_applies_native_surfaces_and_control_metrics() {
+        let ctx = egui::Context::default();
+        for (dark, bg, chrome) in [(false, 0xfafafb, 0xffffff), (true, 0x222226, 0x2e2e32)] {
+            Theme::adwaita(dark).apply(&ctx);
+            let style = ctx.global_style();
+            assert_eq!(style.visuals.dark_mode, dark);
+            assert_eq!(style.visuals.panel_fill, hex(bg));
+            assert_eq!(style.visuals.widgets.inactive.bg_fill, hex(chrome));
+            assert_eq!(style.spacing.interact_size.y, 34.0);
+            assert_eq!(style.visuals.widgets.inactive.corner_radius, CornerRadius::same(6));
+        }
+    }
+
+    #[test]
+    fn switching_from_adwaita_restores_aurora_style() {
+        let ctx = egui::Context::default();
+        Theme::adwaita(false).apply(&ctx);
+        Theme::midnight().apply(&ctx);
+        let style = ctx.global_style();
+        assert_eq!(style.spacing.interact_size.y, 32.0);
+        assert_eq!(style.visuals.panel_fill, hex(0x0a0d12));
+        assert_eq!(style.visuals.widgets.inactive.corner_radius, CornerRadius::same(8));
+    }
+
+    #[test]
+    fn preset_by_name_is_case_insensitive() {
+        assert_eq!(Theme::preset_by_name("nevko").map(|t| t.name), Some("NEVKO".into()));
+        assert_eq!(Theme::preset_by_name("OLED").map(|t| t.name), Some("OLED".into()));
+        assert!(Theme::preset_by_name("custom-unknown").is_none());
+    }
+
+    #[test]
+    fn refreshed_keeps_unknown_custom_theme_untouched() {
+        let mut custom = Theme::nevko();
+        custom.name = "My Custom Theme".into();
+        custom.bg = Color32::from_rgb(12, 34, 56);
+        custom.weight_preset = WeightPreset::Balanced;
+        custom.font_scale = 1.1;
+
+        assert_eq!(custom.clone().refreshed(), custom);
+    }
+
+    #[test]
+    fn refreshed_updates_preset_colors_while_preserving_overrides() {
+        let mut saved = Theme::nevko();
+        let accent = Color32::from_rgb(255, 100, 50);
+        saved.bg = Color32::from_rgb(1, 2, 3);
+        saved.accent = accent;
+        saved.radius = 4;
+        saved.weight_preset = WeightPreset::Balanced;
+        saved.font_scale = 0.95;
+
+        let out = saved.refreshed();
+        assert_eq!(out.bg, Theme::nevko().bg);
+        assert_eq!(out.accent, accent);
+        assert_eq!(out.radius, 4);
+        assert_eq!(out.weight_preset, WeightPreset::Balanced);
+        assert_eq!(out.font_scale, 0.95);
     }
 }
