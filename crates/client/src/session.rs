@@ -2578,11 +2578,15 @@ impl Online {
                 self.running.insert(app_id, 0);
                 self.official.insert(app_id, dir.to_path_buf());
                 #[cfg(not(windows))]
-                let overlay = self.ipc.overlay_port().map(|port| {
-                    let tok = self.ipc.register(app_id);
-                    self.launch_tokens.insert(app_id, tok.clone());
-                    (port, tok)
-                });
+                let overlay = if launch::app_overlay_enabled(app_id) {
+                    self.ipc.overlay_port().map(|port| {
+                        let tok = self.ipc.register(app_id);
+                        self.launch_tokens.insert(app_id, tok.clone());
+                        (port, tok)
+                    })
+                } else {
+                    None
+                };
                 #[cfg(windows)]
                 let overlay: Option<(u16, String)> = None;
                 let (tx, sink, args, dir2) = (exit_tx.clone(), sink.clone(), args.clone(), dir.to_path_buf());
@@ -2603,7 +2607,18 @@ impl Online {
                 let account_id = model::account_id(self.me);
                 let swapped = dll.as_deref().ok_or_else(|| "steamclient DLL missing".to_string()).and_then(|d| launch::swap_begin(&token, d, is64, account_id));
                 let pads = swapped.is_ok().then(crate::pads::start).flatten();
-                let started = swapped.and_then(|_| launch::spawn_with_steamclient(app, dir, args, &self.ipc.env_value(&token), &self.account, pads.as_deref()));
+                #[cfg(target_os = "linux")]
+                let overlay = if launch::app_overlay_enabled(app_id) {
+                    self.ipc.overlay_port().map(|port| (port, token.clone()))
+                } else {
+                    None
+                };
+                #[cfg(not(target_os = "linux"))]
+                let overlay: Option<(u16, String)> = None;
+                let started = swapped.and_then(|_| {
+                    let ov = overlay.as_ref().map(|(p, t)| (*p, t.as_str()));
+                    launch::spawn_with_steamclient(app, dir, args, &self.ipc.env_value(&token), &self.account, pads.as_deref(), ov)
+                });
                 if started.is_err() && pads.is_some() {
                     crate::pads::stop();
                 }
@@ -2627,10 +2642,34 @@ impl Online {
                     }
                 }
             }
-            crate::LaunchMode::NoSteam { .. } => match launch::spawn(app, dir, args) {
-                Ok(child) => self.track(app_id, dir, child, sink, exit_tx)?,
-                Err(e) => sink(Event::Error(e)),
-            },
+            crate::LaunchMode::NoSteam { .. } => {
+                #[cfg(target_os = "linux")]
+                let overlay = if launch::app_overlay_enabled(app_id) {
+                    self.ipc.overlay_port().map(|port| {
+                        let tok = self.ipc.register(app_id);
+                        (port, tok)
+                    })
+                } else {
+                    None
+                };
+                #[cfg(not(target_os = "linux"))]
+                let overlay: Option<(u16, String)> = None;
+                let ov = overlay.as_ref().map(|(p, t)| (*p, t.as_str()));
+                match launch::spawn(app, dir, args, ov) {
+                    Ok(child) => {
+                        if let Some((_, tok)) = overlay {
+                            self.launch_tokens.insert(app_id, tok);
+                        }
+                        self.track(app_id, dir, child, sink, exit_tx)?;
+                    }
+                    Err(e) => {
+                        if let Some((_, tok)) = overlay {
+                            self.ipc.forget(&tok);
+                        }
+                        sink(Event::Error(e));
+                    }
+                }
+            }
         }
         Ok(())
     }

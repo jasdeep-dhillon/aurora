@@ -35,13 +35,90 @@ mod d3d12;
 #[cfg(windows)]
 mod d3d9;
 #[cfg(windows)]
+mod hook;
+#[cfg(windows)]
 mod input;
 #[cfg(windows)]
 mod opengl;
 #[cfg(windows)]
+mod pad;
+#[cfg(windows)]
 pub(crate) use input::patch_module;
 
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use wire::{Mesh, TexSet};
+
+/// F12 (or configured hotkey) asked for a screenshot; the next frame drawn captures it.
+pub static SHOT: AtomicBool = AtomicBool::new(false);
+
+static OVERLAY_MODS: AtomicU8 = AtomicU8::new(wire::MOD_SHIFT);
+static OVERLAY_VK: AtomicU32 = AtomicU32::new(0x09); // VK_TAB
+static SHOT_MODS: AtomicU8 = AtomicU8::new(0);
+static SHOT_VK: AtomicU32 = AtomicU32::new(0x7B); // VK_F12
+static HOTKEYS_INIT: std::sync::Once = std::sync::Once::new();
+
+fn init_hotkeys() {
+    HOTKEYS_INIT.call_once(|| {
+        let ov = util::parse_hotkey_env(std::env::var("AURORA_OVERLAY_HOTKEY").ok().as_deref(), (wire::MOD_SHIFT, 0x09));
+        let sh = util::parse_hotkey_env(std::env::var("AURORA_SCREENSHOT_KEY").ok().as_deref(), (0, 0x7B));
+        set_hotkeys(ov.0, ov.1, sh.0, sh.1);
+    });
+}
+
+pub fn set_hotkeys(overlay_mods: u8, overlay_vk: u32, shot_mods: u8, shot_vk: u32) {
+    if overlay_vk != 0 {
+        OVERLAY_MODS.store(overlay_mods & 0x07, Ordering::Relaxed);
+        OVERLAY_VK.store(overlay_vk, Ordering::Relaxed);
+    }
+    if shot_vk != 0 {
+        SHOT_MODS.store(shot_mods & 0x07, Ordering::Relaxed);
+        SHOT_VK.store(shot_vk, Ordering::Relaxed);
+    }
+}
+
+#[cfg(windows)]
+pub fn overlay_hotkey() -> (u8, u32) {
+    init_hotkeys();
+    (OVERLAY_MODS.load(Ordering::Relaxed), OVERLAY_VK.load(Ordering::Relaxed))
+}
+
+#[cfg(windows)]
+pub fn screenshot_hotkey() -> (u8, u32) {
+    init_hotkeys();
+    (SHOT_MODS.load(Ordering::Relaxed), SHOT_VK.load(Ordering::Relaxed))
+}
+
+/// The screenshot hotkey was pressed: hooked games get `ScreenshotRequested`,
+/// otherwise the active renderer captures the next frame.
+pub fn screenshot_key() {
+    if !crate::screenshots::game_takes_them() {
+        SHOT.store(true, Ordering::Relaxed);
+    }
+    crate::screenshots::requested_by_key();
+}
+
+/// Tell the app something (dropped if not connected).
+pub fn tell_app(m: wire::FromGame) {
+    #[cfg(windows)]
+    shared::tell(m);
+    #[cfg(not(windows))]
+    let _ = m;
+}
+
+#[cfg(windows)]
+fn is_vk_layer_env() -> bool {
+    std::env::var("AURORA_VK_OVERLAY").ok().as_deref() == Some("1")
+        && std::env::var("DISABLE_AURORA_OVERLAY").ok().as_deref() != Some("1")
+}
+
+/// True on Proton when Linux `libVkLayer_aurora_overlay.so` owns rendering/input
+/// underneath `winevulkan.dll` (DXVK, vkd3d-proton, WineD3D-Vulkan).
+#[cfg(windows)]
+pub fn vk_layer_handles_this() -> bool {
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::core::w;
+    is_vk_layer_env() && unsafe { GetModuleHandleW(w!("winevulkan.dll")).is_ok() }
+}
 
 /// What the app last asked to draw.
 pub struct Frame {
@@ -61,10 +138,13 @@ pub fn start() {
         use std::sync::Once;
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            if std::env::var_os("STEAMINRUST_NO_INGAME_OVERLAY").is_some() {
-                crate::log!("overlay: turned off by STEAMINRUST_NO_INGAME_OVERLAY");
+            if std::env::var_os("STEAMINRUST_NO_INGAME_OVERLAY").is_some()
+                || std::env::var("AURORA_DISABLE_OVERLAY").ok().as_deref() == Some("1")
+            {
+                crate::log!("overlay: disabled for this launch");
                 return;
             }
+            init_hotkeys();
             let Some((pipe, token)) = crate::ipc::target() else { return };
             // Proton games reach the Linux app over loopback; an older app
             // without an overlay port can't draw it.
@@ -90,7 +170,9 @@ fn install_pending_hooks() {
     let _ = d3d12::install_if_loaded();
     let _ = d3d9::install_if_loaded();
     let _ = opengl::install_if_loaded();
-    let _ = vulkan::install_if_loaded();
+    if !is_vk_layer_env() {
+        let _ = vulkan::install_if_loaded();
+    }
 }
 
 /// The first game frame came through our hook.
@@ -164,6 +246,10 @@ mod shared {
     pub fn push_input(modifiers: u8, e: Input) {
         with(|s| {
             s.modifiers = modifiers;
+            // Only the latest pointer position matters.
+            if let (Input::Move { .. }, Some(Input::Move { .. })) = (&e, s.input.last()) {
+                s.input.pop();
+            }
             s.input.push(e);
         });
         WAKE.notify_one();
@@ -171,6 +257,23 @@ mod shared {
 
     pub fn cursor() -> u8 {
         with(|s| s.cursor)
+    }
+
+    pub fn is_open() -> bool {
+        with(|s| s.open)
+    }
+
+    /// Queue an outgoing message for the app if connected.
+    pub fn tell(m: FromGame) {
+        let queued = with(|s| {
+            if s.connected {
+                s.out.push(m);
+            }
+            s.connected
+        });
+        if queued {
+            WAKE.notify_one();
+        }
     }
 
     pub fn take_for_present() -> (Vec<TexOp>, Option<Arc<Frame>>) {
@@ -250,6 +353,8 @@ mod shared {
                 s.frame = Some(Arc::new(Frame { pixels_per_point, meshes }));
             }),
             ToGame::SetOpen(open) => set_open(open, false, false),
+            ToGame::Config { overlay_mods, overlay_vk, shot_mods, shot_vk } => super::set_hotkeys(overlay_mods, overlay_vk, shot_mods, shot_vk),
+            ToGame::TakeScreenshot => super::screenshot_key(),
         }
         Ok(())
     }

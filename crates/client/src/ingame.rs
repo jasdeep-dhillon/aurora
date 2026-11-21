@@ -39,6 +39,11 @@ impl Conn {
         self.to_game.send(m.encode()).is_ok()
     }
 
+    /// Queue an already encoded message.
+    pub fn send_encoded(&self, body: Vec<u8>) -> bool {
+        self.to_game.send(body).is_ok()
+    }
+
     pub fn is_closed(&self) -> bool {
         self.to_game.is_closed()
     }
@@ -62,6 +67,11 @@ fn wake() {
 /// Connections made since the last call.
 pub fn take_new() -> Vec<Conn> {
     std::mem::take(&mut *NEW.lock().unwrap())
+}
+
+/// A game connected and nobody picked it up yet.
+pub fn has_new() -> bool {
+    !NEW.lock().unwrap().is_empty()
 }
 
 /// Accept overlay connections on `<pipe>-overlay`. `app_for` checks a
@@ -166,6 +176,127 @@ where
     wake();
 }
 
+/// A saved local screenshot (main JPEG/PNG and optional 200px thumbnail).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalScreenshot {
+    pub path: std::path::PathBuf,
+    pub thumb: Option<std::path::PathBuf>,
+    pub name: String,
+    pub modified: u64,
+}
+
+/// Folder where screenshots for `app_id` live (Steam's `userdata` folder when
+/// available, otherwise Aurora's own config data folder).
+pub fn screenshots_dir(steam_root: &std::path::Path, account_id: u32, app_id: AppId) -> std::path::PathBuf {
+    if !steam_root.as_os_str().is_empty() && account_id != 0 {
+        steam_root
+            .join("userdata")
+            .join(account_id.to_string())
+            .join("760")
+            .join("remote")
+            .join(app_id.to_string())
+            .join("screenshots")
+    } else {
+        crate::store::config_dir().join("screenshots").join(app_id.to_string())
+    }
+}
+
+fn screenshot_dirs_for(steam_root: &std::path::Path, account_id: u32, app_id: AppId) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if !steam_root.as_os_str().is_empty() && account_id != 0 {
+        dirs.push(screenshots_dir(steam_root, account_id, app_id));
+    }
+    let fallback = crate::store::config_dir().join("screenshots").join(app_id.to_string());
+    if !dirs.contains(&fallback) {
+        dirs.push(fallback);
+    }
+    dirs
+}
+
+fn screenshot_filename(dir: &std::path::Path) -> std::path::PathBuf {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + (m <= 2) as i64;
+    let stamp = format!("{y:04}{m:02}{d:02}{:02}{:02}{:02}", rem / 3600, rem / 60 % 60, rem % 60);
+    (1..).map(|n| dir.join(format!("{stamp}_{n}.jpg"))).find(|p| !p.exists()).unwrap_or_else(|| dir.join(format!("{stamp}.jpg")))
+}
+
+/// Encode an RGB frame as JPEG + 200px wide thumbnail into Steam's screenshot library.
+pub fn save_screenshot_rgb(steam_root: &std::path::Path, account_id: u32, app_id: AppId, width: u32, height: u32, rgb: Vec<u8>) -> Result<std::path::PathBuf, String> {
+    save_screenshot_rgb_in(&screenshots_dir(steam_root, account_id, app_id), width, height, rgb)
+}
+
+fn save_screenshot_rgb_in(dir: &std::path::Path, width: u32, height: u32, rgb: Vec<u8>) -> Result<std::path::PathBuf, String> {
+    const THUMB_WIDTH: u32 = 200;
+    if width == 0 || height == 0 {
+        return Err("empty screenshot dimensions".into());
+    }
+    let expected = (width as usize).checked_mul(height as usize).and_then(|px| px.checked_mul(3)).ok_or("screenshot dimensions overflow")?;
+    if rgb.len() != expected {
+        return Err(format!("bad screenshot buffer size: {} != {expected}", rgb.len()));
+    }
+    std::fs::create_dir_all(dir.join("thumbnails")).map_err(|e| e.to_string())?;
+    let img = image::RgbImage::from_raw(width, height, rgb).ok_or("bad image size")?;
+    let path = screenshot_filename(dir);
+    img.save_with_format(&path, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?;
+    let th = THUMB_WIDTH.min(width).max(1);
+    let thumb = image::imageops::thumbnail(&img, th, (height as u64 * th as u64 / width.max(1) as u64).max(1) as u32);
+    let _ = thumb.save_with_format(dir.join("thumbnails").join(path.file_name().unwrap_or_default()), image::ImageFormat::Jpeg);
+    Ok(path)
+}
+
+/// List local screenshots for `app_id` (newest first).
+pub fn list_screenshots(steam_root: &std::path::Path, account_id: u32, app_id: AppId) -> Vec<LocalScreenshot> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for dir in screenshot_dirs_for(steam_root, account_id, app_id) {
+        collect_screenshots_in(&dir, &mut seen, &mut out);
+    }
+    out.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.name.cmp(&a.name)));
+    out
+}
+
+fn collect_screenshots_in(dir: &std::path::Path, seen: &mut std::collections::BTreeSet<std::path::PathBuf>, out: &mut Vec<LocalScreenshot>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if !matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
+            continue;
+        }
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let thumb_path = dir.join("thumbnails").join(&name);
+        let thumb = thumb_path.is_file().then_some(thumb_path);
+        let modified = entry.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+        out.push(LocalScreenshot { path, thumb, name, modified });
+    }
+}
+
+/// Delete a screenshot and its thumbnail from disk.
+pub fn delete_screenshot(path: &std::path::Path) -> Result<(), String> {
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        let thumb = parent.join("thumbnails").join(name);
+        if thumb.is_file() {
+            let _ = std::fs::remove_file(thumb);
+        }
+    }
+    std::fs::remove_file(path).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +341,24 @@ mod tests {
             let finished = tokio::time::timeout(std::time::Duration::from_millis(300), task2).await;
             assert!(finished.is_ok(), "serve must terminate immediately on >64KiB post-Hello frame");
         });
+    }
+
+    #[test]
+    fn saves_lists_and_deletes_screenshots() {
+        let root = std::env::temp_dir().join(format!("aurora-shots-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = screenshots_dir(&root, 12345, 553850);
+        assert!(dir.ends_with("userdata/12345/760/remote/553850/screenshots"));
+
+        let saved = save_screenshot_rgb(&root, 12345, 553850, 320, 180, vec![180; 320 * 180 * 3]).unwrap();
+        assert!(saved.is_file());
+        let list = list_screenshots(&root, 12345, 553850);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].path, saved);
+        assert!(list[0].thumb.as_ref().is_some_and(|t| t.is_file()));
+
+        delete_screenshot(&saved).unwrap();
+        assert!(list_screenshots(&root, 12345, 553850).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

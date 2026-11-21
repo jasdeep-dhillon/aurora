@@ -93,17 +93,17 @@ jobs:
       # app and the steamhost helper (the headless Steam host for DRM games);
       # tests for the crates that are platform-neutral.
       - name: Test
-        run: cargo test --release --locked -p i18n -p ui -p vdf -p model -p store
+        run: cargo test --release --locked -p i18n -p ui -p vdf -p model -p store -p vk_overlay
 
       - name: Build
-        run: cargo build --release --locked -p aurora -p steamhost
+        run: cargo build --release --locked -p aurora -p steamhost -p vk_overlay
 
       # Ubuntu 22.04 has glibc 2.35, so the binaries also start on older
       # distros (Ubuntu 22.04, Mint 21, Debian 12). Fail if one needs newer.
       - name: Check the glibc the binaries need
         run: |
           max=2.35
-          for f in target/release/aurora target/release/steamhost; do
+          for f in target/release/aurora target/release/steamhost target/release/libVkLayer_aurora_overlay.so; do
             need=$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n1)
             echo "$f needs glibc $need"
             if [ "$(printf '%s\n%s\n' "$need" "$max" | sort -V | tail -n1)" != "$max" ]; then
@@ -115,7 +115,7 @@ jobs:
         run: |
           name=Aurora-Linux-x86_64
           mkdir -p dist/$name
-          cp target/release/aurora target/release/steamhost README.md LICENSE assets/icon-256.png dist/$name/
+          cp target/release/aurora target/release/steamhost target/release/libVkLayer_aurora_overlay.so README.md LICENSE assets/icon-256.png dist/$name/
           tar -C dist -czf dist/$name.tar.gz $name
           (cd dist && sha256sum $name.tar.gz > $name.tar.gz.sha256)
 
@@ -256,7 +256,7 @@ jobs:
           rm -rf work-deb deb && mkdir -p work-deb && tar -C work-deb -xzf dist/$name.tar.gz
           install -d $root/DEBIAN $root/opt/aurora $root/usr/bin $root/usr/share/applications \
             $root/usr/share/icons/hicolor/256x256/apps $root/usr/share/doc/aurora
-          install -m755 $src/aurora $src/steamhost $root/opt/aurora/
+          install -m755 $src/aurora $src/steamhost $src/libVkLayer_aurora_overlay.so $root/opt/aurora/
           for dll in steamclient64.dll steamclient32.dll; do
             if [ -f $src/$dll ]; then install -m644 $src/$dll $root/opt/aurora/; fi
           done

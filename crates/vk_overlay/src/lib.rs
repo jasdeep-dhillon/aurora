@@ -25,15 +25,29 @@ mod vk_abi;
 
 #[cfg(target_os = "linux")]
 mod layer {
-    use crate::input;
+    use crate::input::{self, SurfaceKind};
     use crate::net;
     use crate::renderer::OverlayRenderer;
     use crate::vk_abi::*;
+    use crate::wire::FromGame;
     use std::collections::HashMap;
     use std::ffi::{CStr, c_char, c_void};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{LazyLock, Mutex};
+    use std::time::Instant;
+
+    #[derive(Clone, Copy)]
+    enum SurfaceTarget {
+        X11(u64),
+        Wayland,
+    }
+
+    struct QueueInfo {
+        family: u32,
+        device_key: usize,
+    }
 
     struct DeviceState {
         dd: DeviceDispatch,
@@ -49,6 +63,7 @@ mod layer {
         device_key: usize,
         surface: VkSurfaceKHR,
         format: i32,
+        can_copy_src: bool,
         width: u32,
         height: u32,
         renderer: Option<OverlayRenderer>,
@@ -56,11 +71,18 @@ mod layer {
     }
     unsafe impl Send for SwapchainState {}
 
+    struct FpsTracker {
+        frames: u32,
+        since: Instant,
+    }
+
     static INSTANCES: LazyLock<Mutex<HashMap<usize, InstanceDispatch>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
     static DEVICES: LazyLock<Mutex<HashMap<usize, DeviceState>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-    static QUEUES: LazyLock<Mutex<HashMap<usize, u32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-    static SURFACES: LazyLock<Mutex<HashMap<VkSurfaceKHR, u64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    static QUEUES: LazyLock<Mutex<HashMap<usize, QueueInfo>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    static SURFACES: LazyLock<Mutex<HashMap<VkSurfaceKHR, SurfaceTarget>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
     static SWAPCHAINS: LazyLock<Mutex<HashMap<VkSwapchainKHR, SwapchainState>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    static FPS: LazyLock<Mutex<Option<FpsTracker>>> = LazyLock::new(|| Mutex::new(None));
+    static LAST_FPS: AtomicU32 = AtomicU32::new(0);
 
     unsafe fn load_inst_fn<T>(gipa: PFN_vkGetInstanceProcAddr, inst: VkInstance, name: &CStr) -> Option<T> {
         let p = unsafe { gipa(inst, name.as_ptr()) }?;
@@ -149,7 +171,13 @@ mod layer {
 
     unsafe extern "C" fn hooked_destroy_instance(instance: VkInstance, p_allocator: *const c_void) {
         let key = unsafe { dispatch_key(instance) };
-        let id = INSTANCES.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        let (id, empty) = {
+            let mut g = INSTANCES.lock().unwrap_or_else(|e| e.into_inner());
+            (g.remove(&key), g.is_empty())
+        };
+        if empty {
+            net::shared().shutdown();
+        }
         if let Some(id) = id {
             unsafe { (id.destroy_instance)(instance, p_allocator) };
         }
@@ -168,7 +196,7 @@ mod layer {
         if res == VK_SUCCESS && !p_create_info.is_null() && !p_surface.is_null() {
             let win = unsafe { (*p_create_info).window as u64 };
             let surf = unsafe { *p_surface };
-            SURFACES.lock().unwrap_or_else(|e| e.into_inner()).insert(surf, win);
+            SURFACES.lock().unwrap_or_else(|e| e.into_inner()).insert(surf, SurfaceTarget::X11(win));
         }
         res
     }
@@ -186,7 +214,7 @@ mod layer {
         if res == VK_SUCCESS && !p_create_info.is_null() && !p_surface.is_null() {
             let win = unsafe { (*p_create_info).window as u64 };
             let surf = unsafe { *p_surface };
-            SURFACES.lock().unwrap_or_else(|e| e.into_inner()).insert(surf, win);
+            SURFACES.lock().unwrap_or_else(|e| e.into_inner()).insert(surf, SurfaceTarget::X11(win));
         }
         res
     }
@@ -200,7 +228,12 @@ mod layer {
         let key = unsafe { dispatch_key(instance) };
         let f = INSTANCES.lock().unwrap_or_else(|e| e.into_inner()).get(&key).and_then(|d| d.create_wayland_surface);
         let Some(f) = f else { return -3 };
-        unsafe { f(instance, p_create_info, p_allocator, p_surface) }
+        let res = unsafe { f(instance, p_create_info, p_allocator, p_surface) };
+        if res == VK_SUCCESS && !p_surface.is_null() {
+            let surf = unsafe { *p_surface };
+            SURFACES.lock().unwrap_or_else(|e| e.into_inner()).insert(surf, SurfaceTarget::Wayland);
+        }
+        res
     }
 
     unsafe extern "C" fn hooked_destroy_surface(
@@ -343,6 +376,7 @@ mod layer {
 
                 cmd_pipeline_barrier: load_dev_fn(gdpa, dev, c"vkCmdPipelineBarrier")?,
                 cmd_copy_buffer_to_image: load_dev_fn(gdpa, dev, c"vkCmdCopyBufferToImage")?,
+                cmd_copy_image_to_buffer: load_dev_fn(gdpa, dev, c"vkCmdCopyImageToBuffer"),
                 cmd_begin_render_pass: load_dev_fn(gdpa, dev, c"vkCmdBeginRenderPass")?,
                 cmd_end_render_pass: load_dev_fn(gdpa, dev, c"vkCmdEndRenderPass")?,
                 cmd_bind_pipeline: load_dev_fn(gdpa, dev, c"vkCmdBindPipeline")?,
@@ -373,6 +407,7 @@ mod layer {
                 }
             });
         }
+        QUEUES.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, info| info.device_key != key);
         let state = DEVICES.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
         if let Some(state) = state {
             unsafe { (state.dd.destroy_device)(device, p_allocator) };
@@ -391,7 +426,7 @@ mod layer {
             unsafe { f(device, queue_family_index, queue_index, p_queue) };
             if !p_queue.is_null() {
                 let q = unsafe { *p_queue } as usize;
-                QUEUES.lock().unwrap_or_else(|e| e.into_inner()).insert(q, queue_family_index);
+                QUEUES.lock().unwrap_or_else(|e| e.into_inner()).insert(q, QueueInfo { family: queue_family_index, device_key: key });
             }
         }
     }
@@ -408,7 +443,7 @@ mod layer {
             if !p_queue.is_null() && !p_queue_info.is_null() {
                 let q = unsafe { *p_queue } as usize;
                 let fam = unsafe { (*p_queue_info).queueFamilyIndex };
-                QUEUES.lock().unwrap_or_else(|e| e.into_inner()).insert(q, fam);
+                QUEUES.lock().unwrap_or_else(|e| e.into_inner()).insert(q, QueueInfo { family: fam, device_key: key });
             }
         }
     }
@@ -431,9 +466,10 @@ mod layer {
         }
 
         let mut ci = unsafe { *p_create_info };
-        // Ensure COLOR_ATTACHMENT_BIT is enabled if the surface supports it so our
-        // overlay render pass can attach the swapchain image.
-        if (ci.imageUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0 {
+        // Ensure COLOR_ATTACHMENT_BIT (drawing overlay) and TRANSFER_SRC_BIT (F12 screenshot copy)
+        // are enabled when the surface supports them.
+        let need_bits = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        if (ci.imageUsage & need_bits) != need_bits {
             let caps_fn = INSTANCES
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -441,10 +477,8 @@ mod layer {
                 .and_then(|d| d.get_physical_device_surface_capabilities);
             if let Some(caps_fn) = caps_fn {
                 let mut caps: VkSurfaceCapabilitiesKHR = unsafe { std::mem::zeroed() };
-                if unsafe { caps_fn(phys, ci.surface, &mut caps) } == VK_SUCCESS
-                    && (caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0
-                {
-                    ci.imageUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+                if unsafe { caps_fn(phys, ci.surface, &mut caps) } == VK_SUCCESS {
+                    ci.imageUsage |= caps.supportedUsageFlags & need_bits;
                 }
             }
         }
@@ -459,6 +493,7 @@ mod layer {
                     device_key: dev_key,
                     surface: ci.surface,
                     format: ci.imageFormat,
+                    can_copy_src: (ci.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0,
                     width: ci.imageExtent.width,
                     height: ci.imageExtent.height,
                     renderer: None,
@@ -516,7 +551,7 @@ mod layer {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(&(queue as usize))
-                .copied();
+                .map(|i| i.family);
 
             let mut sws = SWAPCHAINS.lock().unwrap_or_else(|e| e.into_inner());
             let sw = sws.get_mut(&sw_handle)?;
@@ -526,15 +561,33 @@ mod layer {
                 return None;
             }
 
-            if let Some(&x11_win) = SURFACES.lock().unwrap_or_else(|e| e.into_inner()).get(&sw.surface) {
-                input::set_active_window(x11_win);
+            if let Some(&target) = SURFACES.lock().unwrap_or_else(|e| e.into_inner()).get(&sw.surface) {
+                input::set_surface(match target {
+                    SurfaceTarget::X11(win) => SurfaceKind::X11(win),
+                    SurfaceTarget::Wayland => SurfaceKind::Wayland,
+                });
             }
             input::ensure_started();
             net::shared().update_size(sw.width, sw.height);
 
+            // Emit FPS once a second for Aurora's FPS counter overlay.
+            if let Ok(mut g) = FPS.lock() {
+                let st = g.get_or_insert_with(|| FpsTracker { frames: 0, since: Instant::now() });
+                st.frames += 1;
+                let elapsed = st.since.elapsed().as_secs_f32();
+                if elapsed >= 1.0 {
+                    let fps = (st.frames as f32 / elapsed).round() as u32;
+                    LAST_FPS.store(fps, Ordering::Relaxed);
+                    net::shared().send(FromGame::Fps(fps));
+                    st.frames = 0;
+                    st.since = Instant::now();
+                }
+            }
+
+            let take_shot = net::shared().take_screenshot_request();
             let frame = net::shared().current_frame();
-            let tex_ops = net::shared().drain_tex_ops();
-            if frame.is_none() && tex_ops.is_empty() {
+            let mut tex_ops = net::shared().drain_tex_ops();
+            if frame.is_none() && tex_ops.is_empty() && !take_shot {
                 return None;
             }
 
@@ -545,16 +598,32 @@ mod layer {
                 };
                 if let Some((dd, mem_props, default_qf)) = dev_info {
                     let qf = queue_family.unwrap_or(default_qf);
-                    sw.renderer = OverlayRenderer::new(sw.device, dd, mem_props, qf, sw_handle, sw.format, sw.width, sw.height);
-                    if sw.renderer.is_none() {
+                    sw.renderer = OverlayRenderer::new(sw.device, dd, mem_props, qf, sw_handle, sw.format, sw.can_copy_src, sw.width, sw.height);
+                    if sw.renderer.is_some() {
+                        // Seed the freshly created swapchain renderer with every live
+                        // texture (especially egui's font atlas id=0) before applying deltas.
+                        let mut seeded = net::shared().snapshot_tex_ops();
+                        seeded.append(&mut tex_ops);
+                        tex_ops = seeded;
+                    } else {
                         sw.init_failed = true;
                     }
                 }
             }
 
-            let renderer = sw.renderer.as_mut()?;
-            let done_sem = renderer.draw(queue, img_idx, wait_sems, frame.as_deref(), tex_ops)?;
-            Some((pi, done_sem))
+            let Some(renderer) = sw.renderer.as_mut() else {
+                if take_shot {
+                    net::shared().send(FromGame::Screenshot(false));
+                }
+                return None;
+            };
+            let (done_sem, shot_res) = renderer.process_present(queue, img_idx, wait_sems, frame.as_ref(), tex_ops, take_shot);
+            match shot_res {
+                Some(Ok((w, h, rgb))) => net::shared().send_screenshot_rgb(w, h, rgb),
+                Some(Err(())) => net::shared().send(FromGame::Screenshot(false)),
+                None => {}
+            }
+            done_sem.map(|sem| (pi, sem))
         }))
         .ok()
         .flatten();
@@ -589,6 +658,12 @@ mod layer {
             b"vkDestroySurfaceKHR" => Some(hooked_destroy_surface as *const ()),
             b"vkCreateDevice" => Some(hooked_create_device as *const ()),
             b"vkGetDeviceProcAddr" => Some(vkGetDeviceProcAddr as *const ()),
+            b"vkDestroyDevice" => Some(hooked_destroy_device as *const ()),
+            b"vkGetDeviceQueue" => Some(hooked_get_device_queue as *const ()),
+            b"vkGetDeviceQueue2" => Some(hooked_get_device_queue2 as *const ()),
+            b"vkCreateSwapchainKHR" => Some(hooked_create_swapchain as *const ()),
+            b"vkDestroySwapchainKHR" => Some(hooked_destroy_swapchain as *const ()),
+            b"vkQueuePresentKHR" => Some(hooked_queue_present as *const ()),
             _ => None,
         };
         if let Some(p) = intercepted {
@@ -670,6 +745,40 @@ mod tests {
         assert_eq!(input::keysym_to_vk(0xff0d), Some(0x0D)); // Enter
         assert_eq!(input::keysym_to_vk(b'a' as u64), Some(b'A' as u32));
         assert_eq!(input::keysym_to_vk(b'5' as u64), Some(b'5' as u32));
+        for vk in [0x09, 0x1B, 0x20, 0x70, 0x7B, b'A' as u32, b'Z' as u32, b'0' as u32, 0xC0] {
+            let sym = input::vk_to_keysym(vk).expect("vk_to_keysym");
+            assert_eq!(input::keysym_to_vk(sym), Some(vk));
+        }
+    }
+
+    #[test]
+    fn converts_vulkan_swapchain_pixels_to_rgb() {
+        use renderer::{PixelKind, vk_pixel_kind, vk_pixels_to_rgb};
+        assert_eq!(vk_pixel_kind(vk_abi::VK_FORMAT_B8G8R8A8_SRGB), Some(PixelKind::Bgra8));
+        assert_eq!(vk_pixel_kind(vk_abi::VK_FORMAT_R8G8B8A8_UNORM), Some(PixelKind::Rgba8));
+        assert_eq!(vk_pixel_kind(vk_abi::VK_FORMAT_A2B10G10R10_UNORM_PACK32), Some(PixelKind::Rgb10a2));
+        assert_eq!(vk_pixel_kind(vk_abi::VK_FORMAT_A2R10G10B10_UNORM_PACK32), Some(PixelKind::Bgr10a2));
+        assert_eq!(vk_pixel_kind(vk_abi::VK_FORMAT_R16G16B16A16_SFLOAT), Some(PixelKind::Half));
+
+        assert_eq!(vk_pixels_to_rgb(PixelKind::Rgba8, &[10, 20, 30, 255], 1, 1), vec![10, 20, 30]);
+        assert_eq!(vk_pixels_to_rgb(PixelKind::Bgra8, &[10, 20, 30, 255], 1, 1), vec![30, 20, 10]);
+        assert_eq!(vk_pixels_to_rgb(PixelKind::Rgb10a2, &(1023u32 | (512 << 20)).to_le_bytes(), 1, 1), vec![255, 0, 128]);
+        assert_eq!(vk_pixels_to_rgb(PixelKind::Bgr10a2, &(1023u32 | (512 << 20)).to_le_bytes(), 1, 1), vec![128, 0, 255]);
+        assert_eq!(vk_pixels_to_rgb(PixelKind::Half, &[0x00, 0x3C, 0x00, 0x00, 0x00, 0x38, 0x00, 0x3C], 1, 1), vec![255, 0, 188]);
+    }
+
+    #[test]
+    fn hotkey_env_parsing_and_proc_interception() {
+        assert_eq!(net::parse_hotkey_env(Some("2:120"), (1, 9)), (2, 120));
+        assert_eq!(net::parse_hotkey_env(Some("bad"), (1, 9)), (1, 9));
+        assert_eq!(net::parse_hotkey_env(Some("1:0"), (1, 9)), (1, 9));
+
+        unsafe {
+            assert!(layer::vkGetInstanceProcAddr(std::ptr::null_mut(), c"vkQueuePresentKHR".as_ptr()).is_some());
+            assert!(layer::vkGetInstanceProcAddr(std::ptr::null_mut(), c"vkCreateSwapchainKHR".as_ptr()).is_some());
+            assert!(layer::vkGetInstanceProcAddr(std::ptr::null_mut(), c"vkCreateWaylandSurfaceKHR".as_ptr()).is_some());
+            assert!(layer::vkGetDeviceProcAddr(std::ptr::null_mut(), c"vkQueuePresentKHR".as_ptr()).is_some());
+        }
     }
 
     #[test]

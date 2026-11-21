@@ -35,6 +35,10 @@ pub struct Prefs {
     pub page: String,
     pub friends_open: bool,
     pub overlay_enabled: bool,
+    #[serde(default)]
+    pub fps_counter: crate::builtin::settings::FpsCorner,
+    #[serde(default)]
+    pub fps_high_contrast: bool,
     /// Account to sign in automatically at startup (cleared on log out).
     pub auto_login: Option<String>,
     /// Interface language code; `None` follows the system.
@@ -112,6 +116,8 @@ impl Default for Prefs {
             page: "library".into(),
             friends_open: true,
             overlay_enabled: true,
+            fps_counter: crate::builtin::settings::FpsCorner::Off,
+            fps_high_contrast: false,
             auto_login: None,
             language: None,
             language_asked: false,
@@ -303,6 +309,9 @@ impl SteamApp {
             toast_notifications: prefs.toast_notifications,
             scroll_speed: prefs.scroll_speed,
             drm_host_ack: prefs.drm_host_ack,
+            overlay_enabled: prefs.overlay_enabled,
+            fps_counter: prefs.fps_counter,
+            fps_high_contrast: prefs.fps_high_contrast,
         }));
         client::set_proton_override(prefs.proton_override.clone());
         client::set_app_protons(prefs.proton_per_app.clone());
@@ -969,6 +978,9 @@ impl eframe::App for SteamApp {
             self.prefs.toast_notifications = f.toast_notifications;
             self.prefs.scroll_speed = f.scroll_speed;
             self.prefs.drm_host_ack = f.drm_host_ack;
+            self.prefs.overlay_enabled = f.overlay_enabled;
+            self.prefs.fps_counter = f.fps_counter;
+            self.prefs.fps_high_contrast = f.fps_high_contrast;
             self.prefs.proton_override = client::proton_override();
             self.prefs.proton_per_app = client::app_protons();
             self.prefs.anti_cheat_headless = client::anti_cheat_headless();

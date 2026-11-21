@@ -1909,6 +1909,21 @@
 "Ban {name} from this group?" = "¿Vetar a {name} de este grupo?"
 "Ban" = "Vetar"
 
+# In-game overlay: screenshots, FPS counter, persistent notes
+"Screenshot saved" = "Captura de pantalla guardada"
+"Couldn't save screenshot" = "No se pudo guardar la captura de pantalla"
+"Jot things down while you play. Saved automatically for this game." = "Anota cosas mientras juegas. Se guardan automáticamente para este juego."
+"Take screenshot (F12)" = "Tomar captura (F12)"
+"No screenshots for this game yet. Press F12 while playing to capture one." = "Aún no hay capturas de pantalla para este juego. Pulsa F12 mientras juegas para tomar una."
+"Off" = "Desactivado"
+"Top-left" = "Arriba a la izquierda"
+"Top-right" = "Arriba a la derecha"
+"Bottom-left" = "Abajo a la izquierda"
+"Bottom-right" = "Abajo a la derecha"
+"Press Shift+Tab (or the controller Guide button) while playing to open the overlay: friends, chat, achievements, guides, discussions, screenshots and per-game notes. Press F12 to take a screenshot." = "Pulsa Mayús+Tab (o el botón Guía del mando) mientras juegas para abrir la interfaz: amigos, chat, logros, guías, discusiones, capturas y notas por juego. Pulsa F12 para tomar una captura."
+"Enable the in-game overlay" = "Activar la interfaz en el juego"
+"In-game FPS counter" = "Contador de FPS en el juego"
+"High contrast color" = "Color de alto contraste"
 # Declarative theme library controls and activity groups.
 "Manage Downloads" = "Gestionar descargas"
 "TIME PLAYED" = "TIEMPO DE JUEGO"

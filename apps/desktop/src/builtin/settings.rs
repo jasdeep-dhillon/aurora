@@ -51,6 +51,30 @@ const SECTIONS: [Option<(Section, &str, &str)>; 19] = [
 ];
 
 /// App-level options the Settings page edits (owned by the app, shared here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum FpsCorner {
+    #[default]
+    Off,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl FpsCorner {
+    pub const ALL: [FpsCorner; 5] = [FpsCorner::Off, FpsCorner::TopLeft, FpsCorner::TopRight, FpsCorner::BottomLeft, FpsCorner::BottomRight];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FpsCorner::Off => t!("Off"),
+            FpsCorner::TopLeft => t!("Top-left"),
+            FpsCorner::TopRight => t!("Top-right"),
+            FpsCorner::BottomLeft => t!("Bottom-left"),
+            FpsCorner::BottomRight => t!("Bottom-right"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AppFlags {
     pub close_to_tray: bool,
@@ -66,6 +90,12 @@ pub struct AppFlags {
     pub scroll_speed: f32,
     /// The one-time Steam-DRM launch notice has been shown and accepted.
     pub drm_host_ack: bool,
+    /// Enable the in-game overlay.
+    pub overlay_enabled: bool,
+    /// Where to draw the in-game FPS counter.
+    pub fps_counter: FpsCorner,
+    /// High-contrast green color for the in-game FPS counter.
+    pub fps_high_contrast: bool,
 }
 
 pub type SharedFlags = std::sync::Arc<std::sync::Mutex<AppFlags>>;
@@ -182,7 +212,7 @@ impl Extension for Settings {
                             ctx.settings_for("store", ui);
                         });
                     }
-                    Section::Overlay => overlay(ui, &t, ctx),
+                    Section::Overlay => overlay(ui, &t, ctx, &self.flags),
                     Section::Folders => folders(ui, &t, ctx),
                     Section::About => about(ui, &t),
                 });
@@ -1058,19 +1088,39 @@ fn interface(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, flags: &SharedFlags, handler
     });
 }
 
-fn overlay(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+fn overlay(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, flags: &SharedFlags) {
     w::page_title(ui, t, t!("In-game overlay"), None);
+    let mut f = flags.lock().unwrap();
     w::card(t).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.label(w::text_semibold(t!("Shift+Tab"), 15.0, t.text));
         ui.add(egui::Label::new(w::text(
-            t!("While a game you started from Aurora is running, press Shift+Tab to open the overlay: friends, quick chat and notes. It's a separate always-on-top window that never touches the game's process, so it's safe with anti-cheat. It shows over windowed and borderless games; exclusive fullscreen hides it."),
+            t!("Press Shift+Tab (or the controller Guide button) while playing to open the overlay: friends, chat, achievements, guides, discussions, screenshots and per-game notes. Press F12 to take a screenshot."),
             13.5,
             t.text_dim,
         )).wrap());
         ui.add_space(10.0);
+        ui.checkbox(&mut f.overlay_enabled, t!("Enable the in-game overlay"));
+        ui.add_space(10.0);
         if w::button(ui, t, Some(icons::EYE), t!("Preview overlay"), w::Kind::Secondary, w::Size::Md).clicked() {
             ctx.act(Action::ToggleOverlay);
+        }
+    });
+    ui.add_space(14.0);
+    w::card(t).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(w::text_semibold(t!("In-game FPS counter"), 15.0, t.text));
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            for corner in FpsCorner::ALL {
+                if w::chip(ui, t, corner.label(), f.fps_counter == corner).clicked() {
+                    f.fps_counter = corner;
+                }
+            }
+        });
+        if f.fps_counter != FpsCorner::Off {
+            ui.add_space(8.0);
+            ui.checkbox(&mut f.fps_high_contrast, t!("High contrast color"));
         }
     });
 }
