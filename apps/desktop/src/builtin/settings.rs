@@ -22,13 +22,14 @@ enum Section {
     Folders,
     Cloud,
     Overlay,
+    Controller,
     Accessibility,
     Plugins,
     About,
 }
 
 /// Steam's settings list, in Steam's order; `None` draws a divider.
-const SECTIONS: [Option<(Section, &str, &str)>; 19] = [
+const SECTIONS: [Option<(Section, &str, &str)>; 20] = [
     Some((Section::Account, icons::USER_CIRCLE, "Account")),
     Some((Section::Friends, icons::USERS, "Friends & Chat")),
     Some((Section::Family, icons::USERS_THREE, "Family")),
@@ -43,6 +44,7 @@ const SECTIONS: [Option<(Section, &str, &str)>; 19] = [
     Some((Section::Folders, icons::DRIVES, "Storage")),
     Some((Section::Cloud, icons::CLOUD_CHECK, "Cloud")),
     Some((Section::Overlay, icons::CONTROLLER, "In game")),
+    Some((Section::Controller, icons::CONTROLLER, "Controller")),
     Some((Section::Accessibility, icons::EYE, "Accessibility")),
     None,
     Some((Section::Plugins, icons::PLUGS, "Plugins")),
@@ -104,6 +106,7 @@ pub struct Settings {
     section: Section,
     /// Account details, purchase history, licenses, family.
     acct: super::settings_account::AccountPages,
+    controller: super::settings_controller::ControllerPage,
     flags: SharedFlags,
     themes: crate::app::SharedThemeManager,
     confirm_uninstall: Option<String>,
@@ -117,6 +120,7 @@ impl Settings {
         Self {
             section: Section::default(),
             acct: Default::default(),
+            controller: Default::default(),
             flags,
             themes,
             confirm_uninstall: None,
@@ -140,6 +144,10 @@ impl Extension for Settings {
         match arg {
             Some("plugins") => self.section = Section::Plugins,
             Some("family") => self.section = Section::Family,
+            Some(a) if a == "controller" || a.starts_with("controller:") => {
+                self.section = Section::Controller;
+                self.controller.open_arg(a);
+            }
             Some(a @ ("history" | "licenses" | "account-details")) => {
                 self.section = Section::Account;
                 self.acct.open(match a {
@@ -150,6 +158,10 @@ impl Extension for Settings {
             }
             _ => {}
         }
+    }
+
+    fn on_event(&mut self, event: &client::Event, _ctx: &mut Ctx) {
+        self.controller.on_event(event);
     }
 
     fn page(&mut self, _page: &str, ui: &mut Ui, ctx: &mut Ctx) {
@@ -213,6 +225,7 @@ impl Extension for Settings {
                         });
                     }
                     Section::Overlay => overlay(ui, &t, ctx, &self.flags),
+                    Section::Controller => self.controller.show(ui, &t, ctx),
                     Section::Folders => folders(ui, &t, ctx),
                     Section::About => about(ui, &t),
                 });

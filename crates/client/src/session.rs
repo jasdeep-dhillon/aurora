@@ -816,6 +816,18 @@ async fn online(
                     }
                 }
                 Some(Command::SyncWorkshop { app_id }) => st.sync_workshop(app_id, Vec::new(), sink),
+                Some(Command::InspectInputConfig { app_id, install_dir }) => {
+                    let root = st
+                        .steam_root
+                        .clone()
+                        .or_else(|| launch::reg_string("Software\\Valve\\Steam", "SteamPath").map(|p| std::path::PathBuf::from(p.replace('/', "\\"))))
+                        .unwrap_or_default();
+                    let (conn, me, sink) = (st.conn.clone(), st.me, sink.clone());
+                    tokio::spawn(async move {
+                        let report = crate::input_config::inspect(&conn, app_id, me, &root, &install_dir).await;
+                        sink(Event::InputConfigInspected(report));
+                    });
+                }
                 Some(Command::LaunchWithoutCloud { app_id, install_dir, args }) => launch_now!(app_id, install_dir, args),
                 Some(Command::SkipShaderCompile { app_id }) => {
                     if let Some(cancel) = st.shader_jobs.get(&app_id) {
@@ -2606,7 +2618,11 @@ impl Online {
                 let dll = launch::steamclient_dll(is64);
                 let account_id = model::account_id(self.me);
                 let swapped = dll.as_deref().ok_or_else(|| "steamclient DLL missing".to_string()).and_then(|d| launch::swap_begin(&token, d, is64, account_id));
-                let pads = swapped.is_ok().then(crate::pads::start).flatten();
+                let ctrl_override = crate::pads::effective_controller_override(app_id, args.controller);
+                let input_decision = crate::pads::resolve_steam_input(ctrl_override, &crate::pads::settings().families);
+                let pads = (swapped.is_ok() && input_decision.enabled && input_decision.use_shm_bridge)
+                    .then(crate::pads::start)
+                    .flatten();
                 #[cfg(target_os = "linux")]
                 let overlay = if launch::app_overlay_enabled(app_id) {
                     self.ipc.overlay_port().map(|port| (port, token.clone()))

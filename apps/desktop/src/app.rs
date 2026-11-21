@@ -86,6 +86,12 @@ pub struct Prefs {
     /// Steam's "Allow downloads during gameplay", set before every game.
     #[serde(default)]
     pub gameplay_downloads: bool,
+    /// Global controller & Steam Input settings (Settings → Controller).
+    #[serde(default)]
+    pub controller: client::ControllerSettings,
+    /// Per-game selected Steam Input configuration (Auto, LocalFile, Workshop).
+    #[serde(default)]
+    pub controller_bindings: std::collections::BTreeMap<model::AppId, client::BindingChoice>,
     /// The main window's last size, position and maximized state, restored on
     /// the next run (the sign-in and splash windows always center small).
     #[serde(default)]
@@ -137,6 +143,8 @@ impl Default for Prefs {
             anti_cheat_headless: false,
             precompile_shaders: true,
             gameplay_downloads: false,
+            controller: client::ControllerSettings::default(),
+            controller_bindings: Default::default(),
             win_size: None,
             win_pos: None,
             win_maximized: false,
@@ -317,6 +325,8 @@ impl SteamApp {
         client::set_app_protons(prefs.proton_per_app.clone());
         client::set_anti_cheat_headless(prefs.anti_cheat_headless);
         client::set_gameplay_downloads(prefs.gameplay_downloads);
+        client::set_controller_settings(prefs.controller.clone());
+        client::set_app_bindings(prefs.controller_bindings.clone());
         #[cfg(not(windows))]
         client::shaders::set_precompile(prefs.precompile_shaders);
         let mut registry = crate::builtin::registry(rt.handle().clone(), cc.egui_ctx.clone(), flags.clone(), themes.clone(), library_layout.clone());
@@ -985,6 +995,8 @@ impl eframe::App for SteamApp {
             self.prefs.proton_per_app = client::app_protons();
             self.prefs.anti_cheat_headless = client::anti_cheat_headless();
             self.prefs.gameplay_downloads = client::gameplay_downloads();
+            self.prefs.controller = client::controller_settings();
+            self.prefs.controller_bindings = client::app_bindings();
             #[cfg(not(windows))]
             {
                 self.prefs.precompile_shaders = client::shaders::precompile();
@@ -1266,5 +1278,34 @@ fn sync_texture(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Prefs;
+
+    #[test]
+    fn prefs_controller_defaults_and_roundtrip() {
+        let legacy: Prefs = serde_json::from_str("{}").unwrap();
+        assert!(legacy.controller.families.xbox);
+        assert!(legacy.controller.families.playstation);
+        assert!(legacy.controller.families.switch_pro);
+        assert!(legacy.controller.families.generic);
+        assert_eq!(legacy.controller.calibration, client::PadCalibration::default());
+        assert!(legacy.controller_bindings.is_empty());
+
+        let mut prefs = Prefs::default();
+        prefs.controller.families.xbox = false;
+        prefs.controller.families.switch_pro = false;
+        prefs.controller.calibration.left_deadzone = 0.24;
+        prefs.controller.calibration.nintendo_layout = true;
+        prefs.controller.calibration.rumble_enabled = false;
+        prefs.controller_bindings.insert(620, client::BindingChoice::Workshop(987654));
+
+        let json = serde_json::to_string(&prefs).unwrap();
+        let restored: Prefs = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.controller, prefs.controller);
+        assert_eq!(restored.controller_bindings, prefs.controller_bindings);
     }
 }

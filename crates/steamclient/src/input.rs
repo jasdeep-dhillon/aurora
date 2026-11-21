@@ -13,7 +13,8 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use crate::ifaces::{This, text};
-use crate::pads::Pad;
+use crate::pads::{Pad, SteamInputPad};
+use crate::pads_shm::{self, PadCalibration};
 use crate::protocol::{Reply, Request};
 use crate::state::{Bytes, lock};
 use crate::vt::Fp;
@@ -183,7 +184,7 @@ impl Bindings {
 }
 
 /// Is `input` of a group on `source` pressed?
-fn pressed(p: &Pad, source: &str, mode: &str, input: &str) -> bool {
+fn pressed(p: &Pad, source: &str, mode: &str, input: &str, trigger_edge: u8) -> bool {
     let stick = |x: i16, y: i16| (x as f32 / 32767.0, y as f32 / 32767.0);
     let dir = |(x, y): (f32, f32), input: &str| match input {
         "dpad_north" => y > 0.5,
@@ -213,24 +214,25 @@ fn pressed(p: &Pad, source: &str, mode: &str, input: &str) -> bool {
         ("right_joystick", i) => dir(stick(p.rx, p.ry), i),
         ("left_trigger", "click") => p.lt > 216,
         ("right_trigger", "click") => p.rt > 216,
-        ("left_trigger", "edge") => p.lt > 30,
-        ("right_trigger", "edge") => p.rt > 30,
+        ("left_trigger", "edge") => p.lt > trigger_edge,
+        ("right_trigger", "edge") => p.rt > trigger_edge,
         _ => false,
     }
 }
 
 /// (EInputSourceMode, x, y) of a source driving an analog action.
-fn analog_value(p: &Pad, source: &str, mode: &str) -> (i32, f32, f32) {
-    let dead = |(x, y): (f32, f32)| {
-        let m = (x * x + y * y).sqrt();
-        if m < 0.15 { (0.0, 0.0) } else { let k = ((m - 0.15) / 0.85).min(1.0) / m; (x * k, y * k) }
+fn analog_value(p: &Pad, source: &str, mode: &str, cal: &PadCalibration, already_calibrated: bool) -> (i32, f32, f32) {
+    let (l_dz, r_dz, trig_th) = if already_calibrated {
+        (0.0, 0.0, 0.0)
+    } else {
+        (cal.left_deadzone, cal.right_deadzone, cal.trigger_threshold)
     };
-    let v = |x: i16, y: i16| dead((x as f32 / 32767.0, y as f32 / 32767.0));
+    let v = |x: i16, y: i16, dz: f32| pads_shm::apply_stick_f32((x as f32 / 32767.0).clamp(-1.0, 1.0), (y as f32 / 32767.0).clamp(-1.0, 1.0), dz);
     let (x, y) = match source {
-        "left_joystick" => v(p.lx, p.ly),
-        "right_joystick" => v(p.rx, p.ry),
-        "left_trigger" => (p.lt as f32 / 255.0, 0.0),
-        "right_trigger" => (p.rt as f32 / 255.0, 0.0),
+        "left_joystick" => v(p.lx, p.ly, l_dz),
+        "right_joystick" => v(p.rx, p.ry, r_dz),
+        "left_trigger" => (pads_shm::apply_trigger_f32(p.lt as f32 / 255.0, trig_th), 0.0),
+        "right_trigger" => (pads_shm::apply_trigger_f32(p.rt as f32 / 255.0, trig_th), 0.0),
         "dpad" => (((p.buttons & RIGHT != 0) as i32 - (p.buttons & LEFT != 0) as i32) as f32, ((p.buttons & UP != 0) as i32 - (p.buttons & DOWN != 0) as i32) as f32),
         _ => (0.0, 0.0),
     };
@@ -313,13 +315,15 @@ fn origin_text(o: i32) -> &'static str {
 struct Input {
     bindings: Option<Bindings>,
     loading: bool,
+    disabled_logged: bool,
     /// Interned names: handle = index + 1.
     sets: Vec<String>,
     actions: Vec<String>,
     /// Per controller: active set and layers.
     active: HashMap<u64, (u64, Vec<u64>)>,
-    pads: [Option<Pad>; 4],
+    pads: [Option<SteamInputPad>; 4],
     polled: Option<Instant>,
+    cal: Option<PadCalibration>,
 }
 
 static I: LazyLock<Mutex<Input>> = LazyLock::new(|| Mutex::new(Input::default()));
@@ -328,8 +332,20 @@ fn st() -> MutexGuard<'static, Input> {
     I.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+fn cal(s: &mut Input) -> PadCalibration {
+    *s.cal.get_or_insert_with(crate::pads::calibration)
+}
+
 /// Ask Aurora for the bindings once (in the background).
 fn load() {
+    if !crate::pads::steam_input_enabled() {
+        let mut s = st();
+        if !s.disabled_logged {
+            s.disabled_logged = true;
+            crate::log!("input: Steam Input disabled for this game");
+        }
+        return;
+    }
     {
         let mut s = st();
         if s.bindings.is_some() || s.loading {
@@ -359,11 +375,15 @@ fn has_bindings(s: &Input) -> bool {
 
 /// Read the pads (pads.rs asks empty XInput slots only once a second).
 fn poll(s: &mut Input) {
+    if !crate::pads::steam_input_enabled() {
+        s.pads = [None; 4];
+        return;
+    }
     if s.polled.is_some_and(|t| t.elapsed() < Duration::from_millis(2)) {
         return;
     }
     s.polled = Some(Instant::now());
-    s.pads = crate::pads::all();
+    s.pads = crate::pads::steam_input_pads();
 }
 
 fn intern(list: &mut Vec<String>, name: &str) -> u64 {
@@ -378,13 +398,17 @@ fn intern(list: &mut Vec<String>, name: &str) -> u64 {
 
 const ALL: u64 = u64::MAX;
 
-/// The pad, the active set's name and active layers for a controller.
-fn context(s: &mut Input, handle: u64) -> Option<(Pad, String, Vec<String>)> {
+/// The pad, the active set's name, active layers, and calibration context for a controller.
+fn context(s: &mut Input, handle: u64) -> Option<(Pad, bool, PadCalibration, String, Vec<String>)> {
     poll(s);
-    let pad = s.pads.get(handle.checked_sub(1)? as usize).copied().flatten()?;
+    let mut entry = s.pads.get(handle.checked_sub(1)? as usize).copied().flatten()?;
+    let c = cal(s);
+    if !entry.calibrated && c.nintendo_layout {
+        entry.pad.buttons = pads_shm::swap_nintendo_buttons(entry.pad.buttons);
+    }
     let (set, layers) = s.active.get(&handle).or_else(|| s.active.get(&ALL)).cloned().unwrap_or((1, Vec::new()));
     let name = |h: u64| s.sets.get(h.saturating_sub(1) as usize).cloned().unwrap_or_default();
-    Some((pad, name(set), layers.into_iter().map(name).collect()))
+    Some((entry.pad, entry.calibrated, c, name(set), layers.into_iter().map(name).collect()))
 }
 
 // ----------------------------------------------------------------- exports
@@ -399,6 +423,9 @@ extern "C" fn run_frame(_t: This) {
 }
 
 extern "C" fn connected(_t: This, out: *mut u64) -> i32 {
+    if !crate::pads::steam_input_enabled() {
+        return 0;
+    }
     load();
     let mut s = st();
     if !has_bindings(&s) {
@@ -483,13 +510,14 @@ extern "C" fn digital_data(_t: This, ret: *mut u8, handle: u64, action: u64) -> 
     let mut s = st();
     let name = s.actions.get(action.saturating_sub(1) as usize).cloned().unwrap_or_default();
     let (mut state, mut active) = (false, false);
-    if let Some((pad, set, layers)) = context(&mut s, handle) {
+    if let Some((pad, calibrated, cal, set, layers)) = context(&mut s, handle) {
+        let edge = if calibrated { 0 } else { (cal.trigger_threshold * 255.0).round().max(1.0) as u8 };
         if let Some(b) = s.bindings.as_ref() {
             for (source, g) in b.active(&set, &layers) {
                 for (input, acts) in &g.inputs {
                     if acts.contains(&name) {
                         active = true;
-                        state |= pressed(&pad, source, &g.mode, input);
+                        state |= pressed(&pad, source, &g.mode, input, edge);
                     }
                 }
             }
@@ -506,10 +534,15 @@ extern "C" fn analog_data(_t: This, ret: *mut u8, handle: u64, action: u64) -> *
     let mut s = st();
     let name = s.actions.get(action.saturating_sub(1) as usize).cloned().unwrap_or_default();
     let mut b = Bytes::new(16);
-    if let Some((pad, set, layers)) = context(&mut s, handle) {
+    if let Some((pad, calibrated, cal, set, layers)) = context(&mut s, handle) {
         if let Some(bind) = s.bindings.as_ref() {
             // The strongest source wins when several drive the action.
-            let best = bind.active(&set, &layers).into_iter().filter(|(_, g)| g.analog.contains(&name)).map(|(src, g)| analog_value(&pad, src, &g.mode)).max_by(|a, b| (a.1.abs() + a.2.abs()).total_cmp(&(b.1.abs() + b.2.abs())));
+            let best = bind
+                .active(&set, &layers)
+                .into_iter()
+                .filter(|(_, g)| g.analog.contains(&name))
+                .map(|(src, g)| analog_value(&pad, src, &g.mode, &cal, calibrated))
+                .max_by(|a, b| (a.1.abs() + a.2.abs()).total_cmp(&(b.1.abs() + b.2.abs())));
             if let Some((mode, x, y)) = best {
                 b.i32(0, mode).u32(4, x.to_bits()).u32(8, y.to_bits()).u8(12, 1);
             }
@@ -593,6 +626,9 @@ extern "C" fn motion_data(_t: This, ret: *mut u8, handle: u64) -> *mut u8 {
 
 /// ESteamInputType: 3 = Xbox One controller.
 extern "C" fn input_type(_t: This, handle: u64) -> i32 {
+    if !crate::pads::steam_input_enabled() {
+        return 0;
+    }
     let mut s = st();
     poll(&mut s);
     if s.pads.get(handle.saturating_sub(1) as usize).copied().flatten().is_some() { 3 } else { 0 }
@@ -640,13 +676,18 @@ mod tests {
         let b = Bindings::parse(CONFIG).unwrap();
         assert_eq!(b.layers, vec!["Aim"]);
         let pad = Pad { buttons: A, rt: 255, lx: 32767, ..Default::default() };
+        let cal = PadCalibration::default();
         let act = b.active("InGame", &[]);
-        let jump = act.iter().any(|(s, g)| g.inputs.iter().any(|(i, a)| a.contains(&"jump".to_string()) && pressed(&pad, s, &g.mode, i)));
-        let fire = act.iter().any(|(s, g)| g.inputs.iter().any(|(i, a)| a.contains(&"fire".to_string()) && pressed(&pad, s, &g.mode, i)));
+        let jump = act.iter().any(|(s, g)| g.inputs.iter().any(|(i, a)| a.contains(&"jump".to_string()) && pressed(&pad, s, &g.mode, i, 30)));
+        let fire = act.iter().any(|(s, g)| g.inputs.iter().any(|(i, a)| a.contains(&"fire".to_string()) && pressed(&pad, s, &g.mode, i, 30)));
         assert!(jump && fire);
-        let (mode, x, _) = act.iter().find(|(_, g)| g.analog.contains(&"Move".to_string())).map(|(s, g)| analog_value(&pad, s, &g.mode)).unwrap();
+        let (mode, x, _) = act.iter().find(|(_, g)| g.analog.contains(&"Move".to_string())).map(|(s, g)| analog_value(&pad, s, &g.mode, &cal, false)).unwrap();
         assert_eq!(mode, 6);
         assert!(x > 0.99);
+        // Deadzone filters small stick movement on uncalibrated pads, skips double-deadzone on calibrated pads.
+        let small = Pad { lx: 4000, ..Default::default() };
+        assert_eq!(analog_value(&small, "left_joystick", "joystick_move", &cal, false).1, 0.0);
+        assert!(analog_value(&small, "left_joystick", "joystick_move", &cal, true).1 > 0.1);
         // The layer replaces button_diamond: A now selects.
         let layered = b.active("InGame", &["Aim".to_string()]);
         assert!(layered.iter().any(|(s, g)| *s == "button_diamond" && g.inputs.iter().any(|(_, a)| a.contains(&"select".to_string()))));
