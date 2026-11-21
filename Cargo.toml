@@ -55,7 +55,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 
 # Async + network
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "http2", "query", "form", "cookies"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "http2", "query", "form", "multipart", "cookies"] }
 
 # Common
 serde = { version = "1", features = ["derive"] }

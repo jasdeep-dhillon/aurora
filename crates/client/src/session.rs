@@ -1126,6 +1126,72 @@ async fn online(
                 Some(Command::MarketPrice { app_id, hash_name, currency, country, full }) => st.market_price(app_id, hash_name, currency, country, full, sink),
                 Some(Command::SellItem { app_id, context_id, asset_id, amount, receive }) => st.sell_item(app_id, context_id, asset_id, amount, receive, sink),
                 Some(Command::LoadMyListings) => st.my_listings(sink),
+                Some(Command::LoadProfileEdit { language }) => {
+                    let conn = st.conn.clone();
+                    st.with_web(sink, move |web, sink| async move {
+                        let r = match web {
+                            Ok(w) => crate::profile_edit::load(&w, &conn, &language).await,
+                            Err(e) => Err(e),
+                        };
+                        sink(Event::ProfileEdit(r));
+                    })
+                }
+                Some(Command::SaveProfileInfo(e)) => st.with_web(sink, move |web, sink| async move {
+                    let result = match web {
+                        Ok(w) => crate::profile_edit::save_info(&w, &e).await,
+                        Err(e) => Err(e),
+                    };
+                    sink(Event::ProfileSaved { what: model::ProfileSave::Info, result });
+                }),
+                Some(Command::SaveProfilePrivacy(p)) => st.with_web(sink, move |web, sink| async move {
+                    let result = match web {
+                        Ok(w) => crate::profile_edit::save_privacy(&w, &p).await,
+                        Err(e) => Err(e),
+                    };
+                    sink(Event::ProfileSaved { what: model::ProfileSave::Privacy, result });
+                }),
+                Some(Command::UploadAvatar { path }) => st.with_web(sink, move |web, sink| async move {
+                    let result = match web {
+                        Ok(w) => match crate::profile_edit::read_avatar_file(&path) {
+                            Ok((bytes, name)) => crate::profile_edit::upload_avatar(&w, bytes, &name).await,
+                            Err(e) => Err(e),
+                        },
+                        Err(e) => Err(e),
+                    };
+                    sink(Event::ProfileSaved { what: model::ProfileSave::Avatar, result });
+                }),
+                Some(Command::EquipProfileItem { kind, id }) => {
+                    let (conn, sink) = (st.conn.clone(), sink.clone());
+                    tokio::spawn(async move {
+                        let result = crate::profile_edit::equip(&conn, kind, id).await;
+                        sink(Event::ProfileSaved { what: model::ProfileSave::Item, result });
+                    });
+                }
+                Some(Command::SetBackgroundFullScreen { id, full }) => {
+                    let (conn, sink) = (st.conn.clone(), sink.clone());
+                    tokio::spawn(async move {
+                        let result = crate::profile_edit::set_background_full(&conn, id, full).await;
+                        sink(Event::ProfileSaved { what: model::ProfileSave::BackgroundFlags, result });
+                    });
+                }
+                Some(Command::SetFavoriteBadge { badge }) => {
+                    let (conn, sink) = (st.conn.clone(), sink.clone());
+                    tokio::spawn(async move {
+                        let result = crate::profile_edit::set_favorite_badge(&conn, badge).await;
+                        sink(Event::ProfileSaved { what: model::ProfileSave::Badge, result });
+                    });
+                }
+                Some(Command::SetProfileTheme(theme)) => {
+                    let (conn, sink) = (st.conn.clone(), sink.clone());
+                    tokio::spawn(async move {
+                        let result = crate::profile_edit::set_theme(&conn, &theme).await;
+                        sink(Event::ProfileSaved { what: model::ProfileSave::Theme, result });
+                    });
+                }
+                Some(Command::LoadLocations { country, state }) => st.with_web(sink, move |web, sink| async move {
+                    let result = crate::profile_edit::locations(web.as_deref().ok(), country.as_deref(), state.as_deref()).await;
+                    sink(Event::Locations { country, state, result });
+                }),
                 Some(Command::LoadSteamCollections) => {
                     let (conn, sink) = (conn.clone(), sink.clone());
                     tokio::spawn(async move {
@@ -2392,12 +2458,26 @@ impl Online {
                     i.as_ref().map(|i| i.image_large()).filter(|s| !s.is_empty()).map(model::art::community_item)
                 };
                 info.background = url(&items.profile_background);
+                info.background_full = items.profile_background.as_ref().is_some_and(|i| i.equipped_flags() & 1 != 0);
+                info.mini_background = url(&items.mini_profile_background);
+                info.animated_avatar = items
+                    .animated_avatar
+                    .as_ref()
+                    .map(|i| i.image_small())
+                    .filter(|s| !s.is_empty())
+                    .map(model::art::community_item);
                 info.avatar_frame = items
                     .avatar_frame
                     .as_ref()
                     .map(|i| i.image_small())
                     .filter(|s| !s.is_empty())
                     .map(model::art::community_item);
+            }
+            let custom: Result<CPlayerGetProfileCustomizationResponse, _> = conn
+                .call("Player.GetProfileCustomization#1", &CPlayerGetProfileCustomizationRequest { steamid: Some(steam_id), ..Default::default() })
+                .await;
+            if let Ok(c) = custom {
+                info.theme = c.profile_theme.as_ref().map(|t| t.theme_id().to_string()).unwrap_or_default();
             }
             let reply = conn
                 .request(emsg::CLIENT_FRIEND_PROFILE_INFO, &CMsgClientFriendProfileInfo { steamid_friend: Some(steam_id) })

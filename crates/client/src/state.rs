@@ -36,6 +36,9 @@ pub struct State {
     /// Market prices by (app, market hash name).
     pub market_prices: HashMap<(AppId, String), Result<model::MarketPrice, String>>,
     pub my_listings: Option<Result<model::MyListings, String>>,
+    pub profile_edit: Option<Result<model::ProfileEdit, String>>,
+    /// Location lists by (country, state).
+    pub locations: HashMap<(Option<String>, Option<String>), Vec<(String, String)>>,
     /// Names of games not in your library.
     pub app_names: HashMap<AppId, String>,
     pub email: Option<(String, bool)>,
@@ -222,6 +225,11 @@ impl State {
                 self.market_prices.insert((*app_id, hash_name.clone()), result);
             }
             Event::MyListings(r) => self.my_listings = Some(r.clone()),
+            Event::ProfileEdit(r) => self.profile_edit = Some(r.clone()),
+            Event::Locations { country, state, result: Ok(l) } => {
+                self.locations.insert((country.clone(), state.clone()), l.clone());
+            }
+            Event::Locations { .. } | Event::ProfileSaved { .. } => {}
             Event::Comments { steam_id, result } => {
                 self.comments.insert(*steam_id, result.clone());
             }
