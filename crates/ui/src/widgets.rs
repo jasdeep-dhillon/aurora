@@ -1,7 +1,7 @@
 //! Reusable widgets. Everything takes the [`Theme`] explicitly so plugins,
 //! extensions and built-in pages all look the same.
 
-use crate::Theme;
+use crate::{Theme, WidgetStyle};
 use crate::theme::{bold, medium, semibold};
 use egui::{
     Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Margin, Rect, Response, RichText, Sense,
@@ -62,11 +62,11 @@ pub fn font_bold(size: f32) -> FontId {
     FontId::new(size, bold())
 }
 
-/// Linear blend between two colors.
+/// Blend premultiplied color channels, preserving translucent endpoints.
 pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgba_unmultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
+    Color32::from_rgba_premultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
 }
 
 // ---------- painting ----------
@@ -304,7 +304,9 @@ pub fn skeleton(ui: &Ui, t: &Theme, rect: Rect, radius: CornerRadius) {
 pub fn placeholder(ui: &Ui, t: &Theme, rect: Rect, title: &str, radius: CornerRadius) {
     let p = ui.painter();
     p.rect_filled(rect, radius, t.surface_hover);
-    gradient(&ui.painter_at(rect.shrink(1.0)), rect.shrink(1.0), t.accent.gamma_multiply(0.10), t.accent_2.gamma_multiply(0.05), false);
+    if t.widget_style != WidgetStyle::Adwaita {
+        gradient(&ui.painter_at(rect.shrink(1.0)), rect.shrink(1.0), t.accent.gamma_multiply(0.10), t.accent_2.gamma_multiply(0.05), false);
+    }
     let galley = p.layout(title.to_string(), font_semibold(15.0), t.text_dim, rect.width() - 24.0);
     p.galley(rect.center() - galley.size() / 2.0, galley, t.text_dim);
 }
@@ -375,6 +377,17 @@ pub enum Size {
     Lg,
 }
 
+/// Adwaita uses a 34 px minimum target even for compact controls.
+fn control_height(t: &Theme, height: f32) -> f32 {
+    if t.widget_style == WidgetStyle::Adwaita { height.max(t.native_metrics.map(|m| m.min_height).unwrap_or(34.0)) } else { height }
+}
+
+fn focus_ring(ui: &Ui, t: &Theme, response: &Response, rect: Rect) {
+    if t.widget_style == WidgetStyle::Adwaita && response.has_focus() && ui.is_enabled() {
+        ui.painter().rect_stroke(rect.expand(2.0), t.corner_small(), Stroke::new(2.0, t.accent), StrokeKind::Outside);
+    }
+}
+
 /// The one button. `icon` is a glyph from [`crate::icons`].
 pub fn button(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, kind: Kind, size: Size) -> Response {
     let (h, fs, pad) = match size {
@@ -382,6 +395,8 @@ pub fn button(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, kind: Kin
         Size::Md => (34.0, 13.5, 16.0),
         Size::Lg => (44.0, 15.0, 22.0),
     };
+    let h = control_height(t, h);
+    let pad = t.native_metrics.map(|m| m.padding[1].max(m.padding[3])).unwrap_or(pad);
     let text = match icon {
         Some(i) if !label.is_empty() => format!("{i}  {label}"),
         Some(i) => i.to_string(),
@@ -391,7 +406,7 @@ pub fn button(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, kind: Kin
         Kind::Primary => (t.accent, t.on_accent, Color32::TRANSPARENT),
         Kind::Play => (t.play, Color32::WHITE, Color32::TRANSPARENT),
         Kind::Danger => (t.danger.gamma_multiply(0.16), t.danger, Color32::TRANSPARENT),
-        Kind::Secondary => (t.raised, t.text, Color32::TRANSPARENT),
+        Kind::Secondary => (if t.widget_style == WidgetStyle::Adwaita { t.chrome } else { t.raised }, t.text, Color32::TRANSPARENT),
         Kind::Ghost => (Color32::TRANSPARENT, t.text_dim, Color32::TRANSPARENT),
     };
     let galley = ui.painter().layout_no_wrap(text, font_medium(fs), fg);
@@ -411,12 +426,16 @@ pub fn button(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, kind: Kin
         let r = t.corner_small();
         // Flat: one fill, no drop shadow, no gloss.
         let p = ui.painter();
-        p.rect_filled(rect, r, fill);
+        let native = t.widget_style == WidgetStyle::Adwaita
+            && kind == Kind::Secondary
+            && crate::native_style::paint_button(ui, t.dark, rect, resp.hovered(), pressed, enabled);
+        if !native { p.rect_filled(rect, r, fill); }
         if border != Color32::TRANSPARENT {
             p.rect_stroke(rect, r, Stroke::new(1.0, border), StrokeKind::Inside);
         }
         let fg = if enabled { mix(fg, if kind == Kind::Ghost { t.text } else { fg }, hover) } else { fg.gamma_multiply(0.6) };
         p.galley(rect.center() - galley.size() / 2.0, galley, fg);
+        focus_ring(ui, t, &resp, rect);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -428,13 +447,17 @@ pub fn icon_button(ui: &mut Ui, t: &Theme, icon: &str, tooltip: &str, active: bo
 
 /// [`icon_button`] at another size (the header uses larger controls).
 pub fn icon_button_sized(ui: &mut Ui, t: &Theme, icon: &str, tooltip: &str, active: bool, badge: usize, size: f32) -> Response {
+    let size = control_height(t, size);
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     let enabled = ui.is_enabled();
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() && enabled, 0.12);
     let p = ui.painter();
-    let bg = if active { active_fill(t) } else { mix(t.raised, t.surface_hover, hover) };
-    p.rect_filled(rect, t.corner_small(), if enabled { bg } else { bg.gamma_multiply(0.5) });
-    let color = if active { t.accent } else { mix(t.text_dim, t.text, hover) };
+    let base = if t.widget_style == WidgetStyle::Adwaita { Color32::TRANSPARENT } else { t.raised };
+    let bg = if active { active_fill(t) } else { mix(base, t.surface_hover, hover) };
+    let native = t.widget_style == WidgetStyle::Adwaita && !active && resp.hovered()
+        && crate::native_style::paint_button(ui, t.dark, rect, true, resp.is_pointer_button_down_on(), enabled);
+    if !native { p.rect_filled(rect, t.corner_small(), if enabled { bg } else { bg.gamma_multiply(0.5) }); }
+    let color = if active { if t.widget_style == WidgetStyle::Adwaita { t.text } else { t.accent_text() } } else { mix(t.text_dim, t.text, hover) };
     let color = if enabled { color } else { color.gamma_multiply(0.45) };
     p.text(rect.center(), Align2::CENTER_CENTER, icon, font(size / 2.0), color);
     if badge > 0 {
@@ -442,9 +465,10 @@ pub fn icon_button_sized(ui: &mut Ui, t: &Theme, icon: &str, tooltip: &str, acti
         let label = if badge > 99 { "99+".to_string() } else { badge.to_string() };
         let w = (label.len() as f32 * 6.0 + 8.0).max(16.0);
         let b = Rect::from_center_size(c, vec2(w, 16.0));
-        p.rect_filled(b, CornerRadius::same(8), t.danger);
+        p.rect_filled(b, CornerRadius::same(8), t.danger_fill());
         p.text(c, Align2::CENTER_CENTER, label, font_bold(10.0), Color32::WHITE);
     }
+    focus_ring(ui, t, &resp, rect);
     resp.on_hover_text(tooltip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -485,7 +509,7 @@ fn menu_row(ui: &mut Ui, t: &Theme, icon: &str, label: &str, tint: Option<Color3
     let text_w = ui.painter().layout_no_wrap(label.to_string(), font_medium(13.5), t.text).size().x;
     let natural = 36.0 + text_w + if sub { 40.0 } else { 16.0 };
     let width = if ui.is_sizing_pass() { natural } else { ui.available_width().max(natural) };
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, control_height(t, 30.0)), Sense::click());
     if ui.is_rect_visible(rect) {
         let open = sub && egui::Popup::is_id_open(ui.ctx(), egui::containers::menu::SubMenu::id_from_widget_id(resp.id));
         let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() || open, 0.08);
@@ -503,6 +527,7 @@ fn menu_row(ui: &mut Ui, t: &Theme, icon: &str, label: &str, tint: Option<Color3
         if sub {
             p.text(pos2(rect.right() - 12.0, y), egui::Align2::CENTER_CENTER, crate::icons::CARET_RIGHT, font(12.0), icon_c);
         }
+        focus_ring(ui, t, &resp, rect);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -513,7 +538,11 @@ pub fn nav_tab(ui: &mut Ui, t: &Theme, label: &str, selected: bool, height: f32)
 
 /// Fill of an active control: the accent at low strength over the chrome.
 pub fn active_fill(t: &Theme) -> Color32 {
-    mix(t.chrome, t.accent, 0.15)
+    if t.widget_style == WidgetStyle::Adwaita {
+        if t.dark { mix(t.chrome, Color32::WHITE, 0.2) } else { Color32::WHITE }
+    } else {
+        mix(t.chrome, t.accent, 0.15)
+    }
 }
 
 /// Navigation button: a 32 px filled tab with an optional icon, centered in
@@ -530,7 +559,8 @@ pub fn nav_tab_icon(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, sel
     let sel = ui.ctx().animate_bool_with_time(resp.id.with("sel"), selected, 0.15);
     let pill = Rect::from_center_size(rect.center(), vec2(w, height.min(CONTROL_LG)));
     let fill = mix(mix(t.raised, t.surface_hover, hover), active_fill(t), sel);
-    let color = mix(mix(t.text_dim, t.text, hover), t.accent, sel);
+    let selected_color = if t.widget_style == WidgetStyle::Adwaita { t.text } else { t.accent_text() };
+    let color = mix(mix(t.text_dim, t.text, hover), selected_color, sel);
     let p = ui.painter();
     p.rect_filled(pill, t.corner_small(), fill);
     let mut x = pill.left() + 12.0;
@@ -539,6 +569,7 @@ pub fn nav_tab_icon(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, sel
         x += icon_w;
     }
     p.galley(pos2(x, pill.center().y - galley.size().y / 2.0), galley, color);
+    focus_ring(ui, t, &resp, pill);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -568,19 +599,19 @@ fn chip_impl(ui: &mut Ui, t: &Theme, label: &str, tint: Option<Color32>, selecte
     let galley = ui.painter().layout_no_wrap(label.to_string(), font_medium(13.0), Color32::PLACEHOLDER);
     let dot = if tint.is_some() { 14.0 } else { 0.0 };
     let natural = galley.size().x + 24.0 + dot;
-    let (rect, resp) = ui.allocate_exact_size(vec2(width.map_or(natural, |w| w.max(natural)), 28.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(width.map_or(natural, |w| w.max(natural)), control_height(t, 28.0)), Sense::click());
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
     let p = ui.painter();
     let r = t.corner_small();
     let accent = tint.unwrap_or(t.accent);
     if selected {
-        p.rect_filled(rect, r, mix(t.chrome, accent, 0.18));
+        p.rect_filled(rect, r, if t.widget_style == WidgetStyle::Adwaita && tint.is_none() { active_fill(t) } else { mix(t.chrome, accent, 0.18) });
     } else {
         p.rect_filled(rect, r, mix(t.raised, t.surface_hover, hover));
     }
     let color = match (tint, selected) {
         (Some(c), _) => mix(c, t.text, if selected { 0.25 } else { 0.1 + hover * 0.2 }),
-        (None, true) => t.accent,
+        (None, true) => if t.widget_style == WidgetStyle::Adwaita { t.text } else { t.accent_text() },
         (None, false) => mix(t.text_dim, t.text, hover),
     };
     if let Some(c) = tint {
@@ -589,6 +620,7 @@ fn chip_impl(ui: &mut Ui, t: &Theme, label: &str, tint: Option<Color32>, selecte
     let x = if width.is_some() { rect.center().x - galley.size().x / 2.0 } else { rect.left() + 12.0 + dot };
     let pos = egui::pos2(x, rect.center().y - galley.size().y / 2.0);
     p.galley(pos, galley, color);
+    focus_ring(ui, t, &resp, rect);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -620,12 +652,13 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, t: &Theme, value: &mut T, opt
         for (opt, label) in options {
             let on = *value == *opt;
             let galley = ui.painter().layout_no_wrap(label.to_string(), font_medium(13.0), Color32::PLACEHOLDER);
-            let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 24.0, 30.0), Sense::click());
+            let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 24.0, control_height(t, 30.0)), Sense::click());
             let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
             let fill = if on { active_fill(t) } else { mix(t.raised, t.surface_hover, hover) };
             ui.painter().rect_filled(rect, t.corner_small(), fill);
-            let c = if on { t.accent } else { mix(t.text_dim, t.text, hover) };
+            let c = if on { if t.widget_style == WidgetStyle::Adwaita { t.text } else { t.accent_text() } } else { mix(t.text_dim, t.text, hover) };
             ui.painter().galley(rect.center() - galley.size() / 2.0, galley, c);
+            focus_ring(ui, t, &resp, rect);
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !on {
                 *value = *opt;
                 changed = true;
@@ -645,9 +678,14 @@ pub fn search(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, width: f32
 
 /// [`search`] at another height.
 pub fn search_sized(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, width: f32, height: f32) -> Response {
+    let height = control_height(t, height);
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     let r = t.corner_small();
-    ui.painter().rect_filled(rect, r, t.raised);
+    let fill = if t.widget_style == WidgetStyle::Adwaita { ui.visuals().extreme_bg_color } else { t.raised };
+    ui.painter().rect_filled(rect, r, fill);
+    if t.widget_style == WidgetStyle::Adwaita {
+        ui.painter().rect_stroke(rect, r, Stroke::new(1.0, t.border), StrokeKind::Inside);
+    }
     ui.painter().text(rect.left_center() + vec2(15.0, 0.0), Align2::CENTER_CENTER, crate::icons::SEARCH, font(14.0), t.text_faint);
     let clear_w = if value.is_empty() { 0.0 } else { 26.0 };
     let field = Rect::from_min_max(pos2(rect.left() + 30.0, rect.top()), pos2(rect.right() - 12.0 - clear_w, rect.bottom()));
@@ -661,7 +699,9 @@ pub fn search_sized(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, widt
             .align(Align2::LEFT_CENTER)
             .desired_width(field.width()),
     ).with_edit_menu();
-    if resp.has_focus() {
+    if t.widget_style == WidgetStyle::Adwaita {
+        focus_ring(ui, t, &resp, rect);
+    } else if resp.has_focus() {
         ui.painter().rect_stroke(rect, r, Stroke::new(1.0, t.accent.gamma_multiply(0.6)), StrokeKind::Inside);
     }
     if !value.is_empty() {
@@ -679,13 +719,15 @@ pub fn search_sized(ui: &mut Ui, t: &Theme, value: &mut String, hint: &str, widt
 pub fn field(ui: &mut Ui, t: &Theme, label: &str, value: &mut String, password: bool) -> Response {
     ui.label(text_medium(label, 12.5, t.text_dim));
     ui.add_space(-2.0);
-    ui.add(
+    let resp = ui.add(
         egui::TextEdit::singleline(value)
             .password(password)
             .font(font(15.0))
             .desired_width(f32::INFINITY)
-            .margin(vec2(12.0, 10.0)),
-    ).with_edit_menu()
+            .margin(if t.widget_style == WidgetStyle::Adwaita { vec2(9.0, 7.0) } else { vec2(12.0, 10.0) }),
+    ).with_edit_menu();
+    focus_ring(ui, t, &resp, resp.rect);
+    resp
 }
 
 // ---------- people ----------
@@ -994,7 +1036,7 @@ pub fn image_chip(ui: &mut Ui, t: &Theme, image: Option<&str>, label: &str, sele
             skeleton(ui, t, img, ir);
         }
     }
-    let color = if selected { t.accent } else { mix(t.text_dim, t.text, hover) };
+    let color = if selected { if t.widget_style == WidgetStyle::Adwaita { t.text } else { t.accent_text() } } else { mix(t.text_dim, t.text, hover) };
     ui.painter().galley(egui::pos2(rect.left() + lead, rect.center().y - galley.size().y / 2.0), galley, color);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -1091,6 +1133,46 @@ pub fn markup_label(ui: &mut Ui, text: &str, size: f32, color: Color32) -> Respo
 
 #[cfg(test)]
 mod markup_tests {
+    #[test]
+    fn mix_preserves_translucent_endpoints_and_premultiplied_midpoint() {
+        let a = egui::Color32::from_rgba_premultiplied(20, 40, 60, 80);
+        let b = egui::Color32::from_rgba_premultiplied(100, 120, 140, 160);
+        assert_eq!(super::mix(a, b, 0.0), a);
+        assert_eq!(super::mix(a, b, 1.0), b);
+        assert_eq!(super::mix(a, b, 0.5), egui::Color32::from_rgba_premultiplied(60, 80, 100, 120));
+        assert_eq!(super::mix(egui::Color32::from_rgb(20, 40, 60), egui::Color32::from_rgb(100, 120, 140), 0.5), egui::Color32::from_rgb(60, 80, 100));
+    }
+
+    #[test]
+    fn adwaita_notification_badge_uses_destructive_fill() {
+        let ctx = egui::Context::default();
+        crate::install_fonts(&ctx);
+        let theme = crate::Theme::adwaita(true);
+        theme.apply(&ctx);
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            super::icon_button(ui, &theme, crate::icons::CHECK, "Notifications", false, 1);
+        });
+        output.textures_delta.clear();
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.rect.height() == 16.0 && rect.fill == egui::Color32::from_rgb(0xc0, 0x1c, 0x28))));
+    }
+
+    #[test]
+    fn adwaita_shared_controls_have_native_minimum_height() {
+        let ctx = egui::Context::default();
+        crate::install_fonts(&ctx);
+        let theme = crate::Theme::adwaita(false);
+        theme.apply(&ctx);
+        let mut value = String::new();
+        let mut enabled = false;
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            assert_eq!(super::button(ui, &theme, None, "OK", super::Kind::Secondary, super::Size::Sm).rect.height(), 34.0);
+            assert_eq!(super::icon_button(ui, &theme, crate::icons::CHECK, "OK", false, 0).rect.height(), 34.0);
+            assert_eq!(super::toggle_chip(ui, &theme, "Enabled", &mut enabled).rect.height(), 34.0);
+            assert_eq!(super::search(ui, &theme, &mut value, "Search", 200.0).rect.height(), 34.0);
+        });
+        output.textures_delta.clear();
+    }
+
     #[test]
     fn reads_steam_markup() {
         let job = super::markup("Skin for [color=#ffdba5]Jacket[/color]. [b]Breaks[/b] into 1 x Cloth<br>Tradable", 12.0, egui::Color32::WHITE, 300.0);
