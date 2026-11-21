@@ -77,11 +77,12 @@ pub struct Settings {
     flags: SharedFlags,
     /// Cached "are we the steam:// handler?" (registry lookups are slow).
     handler: Option<bool>,
+    restore: Option<super::storage_ui::StorageDialog>,
 }
 
 impl Settings {
     pub fn new(flags: SharedFlags) -> Self {
-        Self { section: Section::default(), acct: Default::default(), flags, handler: None }
+        Self { section: Section::default(), acct: Default::default(), flags, handler: None, restore: None }
     }
 }
 
@@ -172,7 +173,7 @@ impl Extension for Settings {
                         });
                     }
                     Section::Overlay => overlay(ui, &t, ctx),
-                    Section::Folders => folders(ui, &t, ctx),
+                    Section::Folders => folders(ui, &t, ctx, &mut self.restore),
                     Section::About => about(ui, &t),
                 });
                 ui.add_space(40.0);
@@ -728,7 +729,7 @@ fn add_library_folder(ctx: &mut Ctx) {
     }
 }
 
-fn folders(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+fn folders(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, restore: &mut Option<super::storage_ui::StorageDialog>) {
     // Saved pictures (store and library art), like Steam's web browser cache.
     w::card(t).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -754,8 +755,24 @@ fn folders(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
     });
     ui.add_space(14.0);
     w::page_title(ui, t, t!("Library folders"), Some(t!("Folders where games are installed: your Steam setup's, and any you add here.")));
-    if w::button(ui, t, Some(icons::FOLDER), t!("Add library folder…"), w::Kind::Secondary, w::Size::Sm).clicked() {
-        add_library_folder(ctx);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+        if w::button(ui, t, Some(icons::FOLDER), t!("Add library folder…"), w::Kind::Secondary, w::Size::Sm).clicked() {
+            add_library_folder(ctx);
+        }
+        if w::button(ui, t, Some(icons::RESTORE), t!("Restore game backup…"), w::Kind::Secondary, w::Size::Sm).clicked() {
+            *restore = Some(super::storage_ui::StorageDialog::Restore(super::storage_ui::RestoreDialog::new(ctx)));
+        }
+    });
+    if let Some(r) = &ctx.state.restoring {
+        ui.add_space(8.0);
+        super::storage_ui::restore_progress_card(ui, t, ctx, r);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    if let Some(mut dlg) = restore.take()
+        && dlg.show(ui, t, ctx, "settings")
+    {
+        *restore = Some(dlg);
     }
     ui.add_space(8.0);
     if ctx.local.libraries.is_empty() {

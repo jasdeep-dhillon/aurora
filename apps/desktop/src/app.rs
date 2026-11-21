@@ -429,6 +429,11 @@ impl SteamApp {
                         self.local = l;
                     }
                 }
+                Event::MoveFinished { result: Ok(_), .. } | Event::RestoreFinished { result: Ok(_), .. } => {
+                    if let Ok(l) = local::load(Some(self.local.steam_root.clone())) {
+                        self.local = l;
+                    }
+                }
                 Event::Error(msg) => {
                     match self.launch_popup.as_mut().filter(|p| matches!(p.stage, crate::launch_popup::Stage::Launching)) {
                         Some(p) => p.stage = crate::launch_popup::Stage::Failed(msg.clone()),

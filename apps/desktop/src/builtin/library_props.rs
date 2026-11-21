@@ -51,6 +51,7 @@ pub struct Props {
     pub ws_selected: std::collections::BTreeSet<u64>,
     pub ws_confirm: bool,
     pub dlc_search: String,
+    pub(super) storage_dialog: Option<super::super::storage_ui::StorageDialog>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -129,6 +130,19 @@ impl Library {
                     }
                 });
             });
+            if ctx.state.moving.contains_key(&app_id)
+                || ctx.state.backing_up.contains_key(&app_id)
+                || ctx.state.restoring.is_some()
+            {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            if let Some(mut dlg) = self.props.as_mut().and_then(|p| p.storage_dialog.take()) {
+                if dlg.show(ui, t, ctx, "props")
+                    && let Some(p) = &mut self.props
+                {
+                    p.storage_dialog = Some(dlg);
+                }
+            }
         });
         if close {
             self.props = None;
@@ -522,11 +536,34 @@ impl Library {
         }
         let Some(g) = installed else {
             ui.label(w::text(t!("This game isn't installed."), 14.0, t.text_dim));
-            if w::button(ui, t, Some(icons::DOWNLOAD), t!("Install"), w::Kind::Primary, w::Size::Md).clicked() {
-                self.install_dialog = Some(super::InstallDialog::new(app, ctx));
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                if w::button(ui, t, Some(icons::DOWNLOAD), t!("Install"), w::Kind::Primary, w::Size::Md).clicked() {
+                    self.install_dialog = Some(super::InstallDialog::new(app, ctx));
+                }
+                if w::button(ui, t, Some(icons::RESTORE), t!("Restore game backup…"), w::Kind::Secondary, w::Size::Md).clicked() {
+                    let dlg = super::super::storage_ui::StorageDialog::Restore(super::super::storage_ui::RestoreDialog::new(ctx));
+                    if let Some(p) = &mut self.props {
+                        p.storage_dialog = Some(dlg);
+                    }
+                }
+            });
+            if let Some(r) = &ctx.state.restoring {
+                ui.add_space(8.0);
+                super::super::storage_ui::restore_progress_card(ui, t, ctx, r);
             }
             return;
         };
+        let game_name = ctx
+            .state
+            .app_name(app)
+            .map(String::from)
+            .unwrap_or_else(|| g.name.clone());
+        let op_busy = ctx.state.playing == Some(app)
+            || ctx.state.moving.contains_key(&app)
+            || ctx.state.backing_up.contains_key(&app)
+            || ctx.state.downloads.get(&app).is_some_and(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed));
         w::panel(t).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(w::text_semibold(t!("Size of installation: {size}", size = ui::bytes(g.size_on_disk)), 15.0, t.text));
@@ -541,11 +578,31 @@ impl Library {
                 if w::button(ui, t, Some(icons::SHIELD), t!("Verify integrity of game files"), w::Kind::Secondary, w::Size::Sm).clicked() {
                     self.start_verify(ctx, g);
                 }
+                if ui.add_enabled_ui(!op_busy, |ui| w::button(ui, t, Some(icons::DRIVES), t!("Move install folder…"), w::Kind::Secondary, w::Size::Sm)).inner.clicked() {
+                    let dlg = super::super::storage_ui::StorageDialog::Move(super::super::storage_ui::MoveDialog::new(g.clone(), game_name.clone(), ctx));
+                    if let Some(p) = &mut self.props {
+                        p.storage_dialog = Some(dlg);
+                    }
+                }
+                if ui.add_enabled_ui(!op_busy, |ui| w::button(ui, t, Some(icons::PACKAGE), t!("Back up game files…"), w::Kind::Secondary, w::Size::Sm)).inner.clicked() {
+                    let dlg = super::super::storage_ui::StorageDialog::Backup(super::super::storage_ui::BackupDialog::new(g.clone(), game_name.clone()));
+                    if let Some(p) = &mut self.props {
+                        p.storage_dialog = Some(dlg);
+                    }
+                }
                 if w::button(ui, t, Some(icons::DESKTOP), t!("Add desktop shortcut"), w::Kind::Secondary, w::Size::Sm).clicked() {
                     self.add_shortcut(ctx, app, g);
                 }
             });
         });
+        if let Some(mp) = ctx.state.moving.get(&app) {
+            ui.add_space(8.0);
+            super::super::storage_ui::move_progress_panel(ui, t, ctx, app, mp);
+        }
+        if let Some(bp) = ctx.state.backing_up.get(&app) {
+            ui.add_space(8.0);
+            super::super::storage_ui::backup_progress_panel(ui, t, ctx, app, bp);
+        }
         if let Some(d) = ctx.state.downloads.get(&app).filter(|d| d.verifying()) {
             ui.add_space(8.0);
             ui.label(w::text(t!("Verifying files…"), 13.5, t.text_dim));

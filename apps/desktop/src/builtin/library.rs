@@ -163,6 +163,9 @@ enum MenuAct {
     Shortcut,
     Browse,
     Verify,
+    Move,
+    Backup,
+    Restore,
     Uninstall,
     Store,
     Help,
@@ -281,6 +284,7 @@ pub struct Library {
     /// Games to put on the desktop once installed, with their library folder.
     shortcut_after_install: BTreeMap<AppId, std::path::PathBuf>,
     seen_finished: BTreeSet<AppId>,
+    storage_dialog: Option<super::storage_ui::StorageDialog>,
 }
 
 impl Extension for Library {
@@ -296,6 +300,11 @@ impl Extension for Library {
         self.custom_selected = None;
         self.dialog = None;
         self.reader = None;
+        if arg == Some("restore") {
+            self.selected = None;
+            self.pending = Some("restore".into());
+            return;
+        }
         // Links can ask for an action: "install:ID", "uninstall:ID", "verify:ID".
         match arg.and_then(|a| a.split_once(':')) {
             Some((action, id)) => {
@@ -314,6 +323,40 @@ impl Extension for Library {
         }
         match event {
             client::Event::VerifyFinished { app_id, result } => self.verify_finished(ctx, *app_id, result),
+            client::Event::MoveFinished { app_id, result } => {
+                let name = ctx
+                    .state
+                    .app_name(*app_id)
+                    .map(String::from)
+                    .or_else(|| ctx.local.games.iter().find(|g| g.app_id == *app_id).map(|g| g.name.clone()))
+                    .unwrap_or_else(|| app_id.to_string());
+                match result {
+                    Ok(rep) => {
+                        ctx.toast(t!("{name} moved to {path}", name = name, path = rep.to_library.display()));
+                        ctx.act(extensions::Action::ReloadLocal);
+                    }
+                    Err(e) => ctx.toast(i18n::tr_dyn(e)),
+                }
+            }
+            client::Event::BackupFinished { app_id, result } => {
+                let name = ctx
+                    .state
+                    .app_name(*app_id)
+                    .map(String::from)
+                    .or_else(|| ctx.local.games.iter().find(|g| g.app_id == *app_id).map(|g| g.name.clone()))
+                    .unwrap_or_else(|| app_id.to_string());
+                match result {
+                    Ok(rep) => ctx.toast(t!("{name} backed up to {path}", name = name, path = rep.backup_dir.display())),
+                    Err(e) => ctx.toast(i18n::tr_dyn(e)),
+                }
+            }
+            client::Event::RestoreFinished { result } => match result {
+                Ok(rep) => {
+                    ctx.toast(t!("{name} restored to {path}", name = rep.name, path = rep.library.display()));
+                    ctx.act(extensions::Action::ReloadLocal);
+                }
+                Err(e) => ctx.toast(i18n::tr_dyn(e)),
+            },
             client::Event::LoggedIn { steam_id, .. } => {
                 self.account = Some(*steam_id);
                 self.collections_loaded = false;
@@ -389,7 +432,11 @@ impl Extension for Library {
     fn page(&mut self, _page: &str, ui: &mut Ui, ctx: &mut Ctx) {
         let t = ctx.theme.clone();
         self.finish_uninstalls(ctx);
-        if !self.uninstalling.is_empty() {
+        if !self.uninstalling.is_empty()
+            || !ctx.state.moving.is_empty()
+            || !ctx.state.backing_up.is_empty()
+            || ctx.state.restoring.is_some()
+        {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
         self.downloading = ctx.state.downloads.values().filter(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)).map(|d| (d.app_id, d.paused)).collect();
@@ -416,6 +463,11 @@ impl Extension for Library {
         self.run_pending(ctx);
         self.cloud_conflict_dialog(ui, &t, ctx);
         self.naming_dialog(ui, &t);
+        if let Some(mut dlg) = self.storage_dialog.take()
+            && dlg.show(ui, &t, ctx, "library")
+        {
+            self.storage_dialog = Some(dlg);
+        }
         if let Some(r) = &mut self.reviews {
             if !r.show(ui, &t, ctx) {
                 self.reviews = None;
@@ -505,6 +557,11 @@ impl Extension for Library {
 impl Library {
     /// Act on a link request once the library knows the game.
     fn run_pending(&mut self, ctx: &mut Ctx) {
+        if self.pending.as_deref() == Some("restore") {
+            self.pending = None;
+            self.storage_dialog = Some(super::storage_ui::StorageDialog::Restore(super::storage_ui::RestoreDialog::new(ctx)));
+            return;
+        }
         let (Some(action), Some(id)) = (self.pending.clone(), self.selected) else { return };
         if ctx.state.apps.is_none() && ctx.local.games.iter().all(|g| g.app_id != id) {
             return; // wait for the library to load
@@ -849,6 +906,9 @@ impl Library {
                     item(ui, icons::DESKTOP, t!("Add desktop shortcut"), MenuAct::Shortcut);
                     item(ui, icons::FOLDER, t!("Browse local files"), MenuAct::Browse);
                     item(ui, icons::SHIELD, t!("Verify game files"), MenuAct::Verify);
+                    item(ui, icons::DRIVES, t!("Move install folder…"), MenuAct::Move);
+                    item(ui, icons::PACKAGE, t!("Back up game files…"), MenuAct::Backup);
+                    item(ui, icons::RESTORE, t!("Restore game backup…"), MenuAct::Restore);
                     #[cfg(not(windows))]
                     proton_submenu(ui, t, ctx, id);
                     w::menu_separator(ui, t);
@@ -857,6 +917,8 @@ impl Library {
                         ui.close();
                     }
                 });
+            } else {
+                item(ui, icons::RESTORE, t!("Restore game backup…"), MenuAct::Restore);
             }
             if !self.hide_collections {
                 let add = w::submenu_item(ui, t, icons::STACK, t!("Add to collection"));
@@ -924,6 +986,21 @@ impl Library {
                 if let Some(g) = local {
                     self.start_verify(ctx, &g);
                 }
+            }
+            MenuAct::Move => {
+                if let Some(g) = local {
+                    let name = ctx.state.app_name(id).map(String::from).unwrap_or_else(|| g.name.clone());
+                    self.storage_dialog = Some(super::storage_ui::StorageDialog::Move(super::storage_ui::MoveDialog::new(g, name, ctx)));
+                }
+            }
+            MenuAct::Backup => {
+                if let Some(g) = local {
+                    let name = ctx.state.app_name(id).map(String::from).unwrap_or_else(|| g.name.clone());
+                    self.storage_dialog = Some(super::storage_ui::StorageDialog::Backup(super::storage_ui::BackupDialog::new(g, name)));
+                }
+            }
+            MenuAct::Restore => {
+                self.storage_dialog = Some(super::storage_ui::StorageDialog::Restore(super::storage_ui::RestoreDialog::new(ctx)));
             }
             MenuAct::Uninstall => {
                 self.selected = Some(id);
@@ -1639,6 +1716,14 @@ impl Library {
                                 let p = self.uninstalling[&id].progress.fraction();
                                 uninstall_bar(ui, t, p);
                             }
+                            Some(_) if ctx.state.moving.contains_key(&id) => {
+                                let p = ctx.state.moving[&id].fraction();
+                                busy_bar(ui, t, t!("Moving… {pct}%", pct = (p * 100.0).round() as u32), p);
+                            }
+                            Some(_) if ctx.state.backing_up.contains_key(&id) => {
+                                let p = ctx.state.backing_up[&id].fraction();
+                                busy_bar(ui, t, t!("Backing up… {pct}%", pct = (p * 100.0).round() as u32), p);
+                            }
                             Some(_) if playing => {
                                 if w::button(ui, t, Some(icons::STOP), t!("Stop"), w::Kind::Danger, w::Size::Lg).on_hover_text(t!("Close the game")).clicked() {
                                     ctx.send(Command::StopGame { app_id: id });
@@ -1853,6 +1938,17 @@ impl Library {
             if item(ui, icons::SHIELD, t!("Verify game files"), t.text) {
                 self.start_verify(ctx, g);
             }
+            if item(ui, icons::DRIVES, t!("Move install folder…"), t.text) {
+                let name = ctx.state.app_name(id).map(String::from).unwrap_or_else(|| g.name.clone());
+                self.storage_dialog = Some(super::storage_ui::StorageDialog::Move(super::storage_ui::MoveDialog::new(g.clone(), name, ctx)));
+            }
+            if item(ui, icons::PACKAGE, t!("Back up game files…"), t.text) {
+                let name = ctx.state.app_name(id).map(String::from).unwrap_or_else(|| g.name.clone());
+                self.storage_dialog = Some(super::storage_ui::StorageDialog::Backup(super::storage_ui::BackupDialog::new(g.clone(), name)));
+            }
+        }
+        if item(ui, icons::RESTORE, t!("Restore game backup…"), t.text) {
+            self.storage_dialog = Some(super::storage_ui::StorageDialog::Restore(super::storage_ui::RestoreDialog::new(ctx)));
         }
         #[cfg(not(windows))]
         proton_submenu(ui, t, ctx, id);

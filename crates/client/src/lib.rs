@@ -268,6 +268,15 @@ pub enum Command {
     /// the Downloads page like Steam's "Verify integrity of game files".
     VerifyGame { game: model::InstalledGame, steam_root: PathBuf },
     CancelVerify { app_id: AppId },
+    /// Move an installed game (and its manifest / workshop content) to another library folder.
+    MoveGame { game: model::InstalledGame, dest_library: PathBuf },
+    CancelMove { app_id: AppId },
+    /// Back up an installed game's manifest and files into `dest_dir`.
+    BackupGame { game: model::InstalledGame, dest_dir: PathBuf },
+    CancelBackup { app_id: AppId },
+    /// Restore a game backup (Aurora or standard Steam `.acf` backup) into `dest_library`.
+    RestoreGame { backup_dir: PathBuf, dest_library: PathBuf },
+    CancelRestore,
     /// Add a free-to-play game to the account, like Steam's "Play Game" /
     /// "Add to Library" on a free game's store page.
     RequestFreeLicense { app_id: AppId },
@@ -413,6 +422,12 @@ impl std::fmt::Debug for Command {
             Command::WorkshopSubscribe { app_id, file_id } => f.debug_struct("WorkshopSubscribe").field("app_id", app_id).field("file_id", file_id).finish(),
             Command::VerifyGame { game, steam_root } => f.debug_struct("VerifyGame").field("game", game).field("steam_root", steam_root).finish(),
             Command::CancelVerify { app_id } => f.debug_struct("CancelVerify").field("app_id", app_id).finish(),
+            Command::MoveGame { game, dest_library } => f.debug_struct("MoveGame").field("app_id", &game.app_id).field("dest_library", dest_library).finish(),
+            Command::CancelMove { app_id } => f.debug_struct("CancelMove").field("app_id", app_id).finish(),
+            Command::BackupGame { game, dest_dir } => f.debug_struct("BackupGame").field("app_id", &game.app_id).field("dest_dir", dest_dir).finish(),
+            Command::CancelBackup { app_id } => f.debug_struct("CancelBackup").field("app_id", app_id).finish(),
+            Command::RestoreGame { backup_dir, dest_library } => f.debug_struct("RestoreGame").field("backup_dir", backup_dir).field("dest_library", dest_library).finish(),
+            Command::CancelRestore => f.write_str("CancelRestore"),
             Command::RequestFreeLicense { app_id } => f.debug_struct("RequestFreeLicense").field("app_id", app_id).finish(),
             Command::SyncWorkshop { app_id } => f.debug_struct("SyncWorkshop").field("app_id", app_id).finish(),
             Command::LoadWorkshopTags { app_id, language } => f.debug_struct("LoadWorkshopTags").field("app_id", app_id).field("language", language).finish(),
@@ -583,6 +598,12 @@ pub enum Event {
     WorkshopSubscribed { file_id: u64, result: Result<(), String> },
     /// A verification ended (its row leaves the Downloads page).
     VerifyFinished { app_id: AppId, result: Result<local::manage::VerifyReport, String> },
+    MoveProgress { app_id: AppId, done_bytes: u64, total_bytes: u64 },
+    MoveFinished { app_id: AppId, result: Result<local::manage::MoveReport, String> },
+    BackupProgress { app_id: AppId, done_bytes: u64, total_bytes: u64 },
+    BackupFinished { app_id: AppId, result: Result<local::manage::BackupReport, String> },
+    RestoreProgress { app_id: AppId, name: String, done_bytes: u64, total_bytes: u64 },
+    RestoreFinished { result: Result<local::manage::RestoreReport, String> },
     /// Answer to [`Command::RequestFreeLicense`].
     FreeLicense { app_id: AppId, result: Result<(), String> },
     /// Workshop items were downloaded (or failed) for a game.
