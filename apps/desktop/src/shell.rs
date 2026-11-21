@@ -507,34 +507,87 @@ pub fn notification_text(state: &client::State, n: &model::Notification) -> (&'s
     (icon, text)
 }
 
-/// Where clicking a notification takes you.
-fn open_notification(state: &client::State, n: &model::Notification, actions: &mut Vec<Action>) {
-    let nav = |page: &str, arg: Option<String>| Action::Navigate { page: page.into(), arg };
-    let web = |url: String| {
-        crate::links::open_http(&url);
-    };
+#[derive(Debug)]
+enum NotificationTarget {
+    Action(Action),
+    Web(String),
+    None,
+}
+
+fn notification_steam_url(n: &model::Notification) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(&n.data).ok()?;
+    let url = v.get("url").and_then(|u| u.as_str()).map(str::trim)?;
+    if url.starts_with("https://steamcommunity.com/") {
+        Some(url.to_string())
+    } else {
+        None
+    }
+}
+
+fn notification_target(state: &client::State, n: &model::Notification) -> NotificationTarget {
+    let nav = |page: &str, arg: Option<String>| NotificationTarget::Action(Action::Navigate { page: page.into(), arg });
+    let web = |url: String| NotificationTarget::Web(url);
     let me = state.steam_id;
     let app = n.app_id.filter(|a| *a != 0 && *a != 753);
     match n.kind {
-        2 => web(format!("https://steamcommunity.com/profiles/{me}/inventory/#pending_gifts")),
-        3 => actions.push(nav("profile", Some(me.to_string()))),
-        4 => actions.push(nav("inventory", Some(format!("{me}/{}", n.app_id.unwrap_or(753))))),
-        5 => actions.push(match n.from {
-            Some(id) => nav("profile", Some(id.to_string())),
-            None => nav("community", None),
-        }),
-        13 => {
-            if let Some(id) = n.from {
-                actions.push(Action::OpenChat(id));
+        2 => {
+            if me != 0 {
+                web(format!("https://steamcommunity.com/profiles/{me}/inventory/#pending_gifts"))
+            } else {
+                NotificationTarget::None
             }
         }
-        6 => actions.push(nav("store", None)),
-        7 | 12 | 22 | 24 => actions.push(nav("library", app.map(|a| a.to_string()))),
-        8 | 27 | 28 => actions.push(nav("store", app.map(|a| format!("app:{a}")))),
-        9 | 29 => web(format!("https://steamcommunity.com/profiles/{me}/tradeoffers/")),
-        11 => actions.push(nav("support", n.ticket.as_ref().map(|t| format!("ticket:{t}")))),
-        15..=21 => web("https://store.steampowered.com/account/familymanagement".into()),
-        _ => {}
+        3 => {
+            if let Some(url) = notification_steam_url(n).filter(|u| u.contains("/discussions/") || u.contains("/app/")) {
+                nav("thread", Some(url))
+            } else if n.from.is_some_and(|id| id != me) {
+                match app {
+                    Some(a) => nav("discussions", Some(a.to_string())),
+                    None => nav("profile", (me != 0).then(|| me.to_string())),
+                }
+            } else {
+                nav("profile", (me != 0).then(|| me.to_string()))
+            }
+        }
+        4 => nav("inventory", Some(format!("{me}/{}", n.app_id.filter(|a| *a != 0).unwrap_or(753)))),
+        5 => match n.from {
+            Some(id) if state.friends.get(&id) != Some(&model::Relationship::RequestRecipient) => nav("profile", Some(id.to_string())),
+            _ => nav("community", Some("invites".into())),
+        },
+        6 => nav("store", None),
+        7 | 12 | 22 | 24 => nav("library", app.map(|a| a.to_string())),
+        8 => nav("store", Some(app.map_or_else(|| "wishlist".to_string(), |a| format!("app:{a}")))),
+        9 | 29 => {
+            if me != 0 {
+                web(format!("https://steamcommunity.com/profiles/{me}/tradeoffers/"))
+            } else {
+                NotificationTarget::None
+            }
+        }
+        11 => nav("support", n.ticket.as_ref().map(|t| format!("ticket:{t}"))),
+        13 => match n.from {
+            Some(id) => NotificationTarget::Action(Action::OpenChat(id)),
+            None => nav("community", None),
+        },
+        15..=21 => nav("settings", Some("family".into())),
+        25 | 26 => nav("settings", Some("security".into())),
+        27 => match app {
+            Some(a) => nav("hub", Some(format!("{a}/news"))),
+            None => nav("store", None),
+        },
+        28 => nav("store", app.map(|a| format!("app:{a}"))),
+        _ => NotificationTarget::None,
+    }
+}
+
+/// Where clicking a notification takes you.
+fn open_notification(state: &client::State, n: &model::Notification, actions: &mut Vec<Action>) {
+    match notification_target(state, n) {
+        NotificationTarget::Action(a) => actions.push(a),
+        NotificationTarget::Web(url) => {
+            crate::links::open_http(&url);
+        }
+        NotificationTarget::None => {}
     }
 }
 
@@ -1425,5 +1478,194 @@ pub fn friend_dialogs(app: &mut SteamApp, ctx: &egui::Context) {
         app.friend_dialog = None;
     } else if let Some((_, d)) = &mut app.friend_dialog {
         *d = keep;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state(me: u64) -> client::State {
+        let mut s = client::State::default();
+        s.steam_id = me;
+        s
+    }
+
+    fn assert_nav(target: NotificationTarget, expected_page: &str, expected_arg: Option<&str>) {
+        match target {
+            NotificationTarget::Action(Action::Navigate { page, arg }) => {
+                assert_eq!(page, expected_page);
+                assert_eq!(arg.as_deref(), expected_arg);
+            }
+            other => panic!("expected Navigate({expected_page:?}, {expected_arg:?}), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn family_notifications_route_natively_to_settings_family() {
+        let state = test_state(76561197960265729);
+        for kind in 15..=21 {
+            let n = model::Notification { kind, ..Default::default() };
+            assert_nav(notification_target(&state, &n), "settings", Some("family"));
+            let mut actions = Vec::new();
+            open_notification(&state, &n, &mut actions);
+            assert_eq!(actions.len(), 1);
+            match &actions[0] {
+                Action::Navigate { page, arg } => {
+                    assert_eq!(page, "settings");
+                    assert_eq!(arg.as_deref(), Some("family"));
+                }
+                other => panic!("expected Navigate, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn native_notifications_route_to_expected_pages_and_dialogs() {
+        let me = 76561197960265729;
+        let friend = 76561197960265828;
+        let mut state = test_state(me);
+        state.friends.insert(friend, model::Relationship::Friend);
+        let requester = 76561197960265829;
+        state.friends.insert(requester, model::Relationship::RequestRecipient);
+
+        // Kind 3: profile comment vs discussion reply vs thread URL.
+        assert_nav(
+            notification_target(&state, &model::Notification { kind: 3, from: Some(me), ..Default::default() }),
+            "profile",
+            Some(&me.to_string()),
+        );
+        assert_nav(
+            notification_target(&state, &model::Notification { kind: 3, from: Some(friend), app_id: Some(570), ..Default::default() }),
+            "discussions",
+            Some("570"),
+        );
+        assert_nav(
+            notification_target(
+                &state,
+                &model::Notification {
+                    kind: 3,
+                    from: Some(friend),
+                    data: r#"{"url":"https://steamcommunity.com/app/570/discussions/0/123/"}"#.into(),
+                    ..Default::default()
+                },
+            ),
+            "thread",
+            Some("https://steamcommunity.com/app/570/discussions/0/123/"),
+        );
+
+        // Kind 4: inventory item (handles None and Some(0) cleanly).
+        assert_nav(
+            notification_target(&state, &model::Notification { kind: 4, app_id: Some(730), ..Default::default() }),
+            "inventory",
+            Some(&format!("{me}/730")),
+        );
+        assert_nav(
+            notification_target(&state, &model::Notification { kind: 4, app_id: Some(0), ..Default::default() }),
+            "inventory",
+            Some(&format!("{me}/753")),
+        );
+
+        // Kind 5: friend request summary or pending invite -> community/invites; accepted friend -> profile.
+        assert_nav(
+            notification_target(&state, &model::Notification { kind: 5, ..Default::default() }),
+            "community",
+            Some("invites"),
+        );
+        assert_nav(
+            notification_target(&state, &model::Notification { kind: 5, from: Some(requester), ..Default::default() }),
+            "community",
+            Some("invites"),
+        );
+        assert_nav(
+            notification_target(&state, &model::Notification { kind: 5, from: Some(friend), ..Default::default() }),
+            "profile",
+            Some(&friend.to_string()),
+        );
+
+        // Kind 6: store sale.
+        assert_nav(notification_target(&state, &model::Notification { kind: 6, ..Default::default() }), "store", None);
+
+        // Kind 7, 12, 22, 24: library game page.
+        for kind in [7, 12, 22, 24] {
+            assert_nav(
+                notification_target(&state, &model::Notification { kind, app_id: Some(1145360), ..Default::default() }),
+                "library",
+                Some("1145360"),
+            );
+        }
+
+        // Kind 8: wishlist sale (specific app or wishlist page).
+        assert_nav(
+            notification_target(&state, &model::Notification { kind: 8, app_id: Some(1145360), ..Default::default() }),
+            "store",
+            Some("app:1145360"),
+        );
+        assert_nav(
+            notification_target(&state, &model::Notification { kind: 8, ..Default::default() }),
+            "store",
+            Some("wishlist"),
+        );
+
+        // Kind 11: support ticket.
+        assert_nav(
+            notification_target(&state, &model::Notification { kind: 11, ticket: Some("HTDEMO".into()), ..Default::default() }),
+            "support",
+            Some("ticket:HTDEMO"),
+        );
+
+        // Kind 13: chat message (specific friend opens chat; missing sender opens community).
+        match notification_target(&state, &model::Notification { kind: 13, from: Some(friend), ..Default::default() }) {
+            NotificationTarget::Action(Action::OpenChat(id)) => assert_eq!(id, friend),
+            other => panic!("expected OpenChat, got {other:?}"),
+        }
+        assert_nav(notification_target(&state, &model::Notification { kind: 13, ..Default::default() }), "community", None);
+
+        // Kind 25, 26: Steam Guard sign-in / mobile confirmation alerts -> settings/security.
+        for kind in [25, 26] {
+            assert_nav(
+                notification_target(&state, &model::Notification { kind, ..Default::default() }),
+                "settings",
+                Some("security"),
+            );
+        }
+
+        // Kind 27: game event -> hub news (or store when app missing).
+        assert_nav(
+            notification_target(&state, &model::Notification { kind: 27, app_id: Some(570), ..Default::default() }),
+            "hub",
+            Some("570/news"),
+        );
+        assert_nav(notification_target(&state, &model::Notification { kind: 27, ..Default::default() }), "store", None);
+
+        // Kind 28: playtest invite -> store app page.
+        assert_nav(
+            notification_target(&state, &model::Notification { kind: 28, app_id: Some(1145360), ..Default::default() }),
+            "store",
+            Some("app:1145360"),
+        );
+    }
+
+    #[test]
+    fn web_fallback_and_noop_notifications() {
+        let me = 76561197960265729;
+        let state = test_state(me);
+
+        match notification_target(&state, &model::Notification { kind: 2, ..Default::default() }) {
+            NotificationTarget::Web(url) => assert_eq!(url, format!("https://steamcommunity.com/profiles/{me}/inventory/#pending_gifts")),
+            other => panic!("expected Web, got {other:?}"),
+        }
+        for kind in [9, 29] {
+            match notification_target(&state, &model::Notification { kind, ..Default::default() }) {
+                NotificationTarget::Web(url) => assert_eq!(url, format!("https://steamcommunity.com/profiles/{me}/tradeoffers/")),
+                other => panic!("expected Web, got {other:?}"),
+            }
+        }
+        for kind in [1, 10, 14, 23, 30, 999] {
+            assert!(matches!(
+                notification_target(&state, &model::Notification { kind, ..Default::default() }),
+                NotificationTarget::None
+            ));
+        }
     }
 }

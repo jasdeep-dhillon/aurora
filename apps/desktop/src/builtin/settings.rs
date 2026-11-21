@@ -144,6 +144,7 @@ impl Extension for Settings {
         match arg {
             Some("plugins") => self.section = Section::Plugins,
             Some("family") => self.section = Section::Family,
+            Some("security") => self.section = Section::Security,
             Some(a) if a == "controller" || a.starts_with("controller:") => {
                 self.section = Section::Controller;
                 self.controller.open_arg(a);
