@@ -25,6 +25,13 @@ mod updater;
 mod wayland_activate;
 
 fn main() -> eframe::Result {
+    if std::env::args().any(|arg| arg == "--adwaita-helper") {
+        if let Err(error) = themes::adwaita::run_adwaita_helper() {
+            eprintln!("Native Adwaita helper: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     tune_malloc();
     // A `steam://` link (or a plain second launch) goes to the running copy.
     let link = std::env::args().skip(1).find(|a| a.starts_with("steam://"));

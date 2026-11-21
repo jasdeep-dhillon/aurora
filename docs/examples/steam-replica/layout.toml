@@ -5,19 +5,19 @@
 # SHELL
 # ============================================================================
 
-# Top two-row Steam header (66px)
+# Top two-row Steam header (80px)
 [[shell]]
 type = "panel"
 side = "top"
-size = 66
+size = 80
 drag_window = true
-style = { bg = "$chrome", border_bottom = { width = 1, color = "#0E1116" } }
+style = { bg = "$chrome", border_bottom = { width = 1, color = "$border" } }
 
-# Row 1 (28px): logo + Steam/View/Friends/Games/Help menus + account & window controls
+# Row 1 (32px): logo + Aurora/View/Friends/Games/Help menus + account & window controls
 [[shell.children]]
 type = "row"
 align = "center"
-style = { height = 28, padding = [2, 6, 0, 10], gap = 4 }
+style = { height = 32, padding = [0, 6, 0, 14], gap = 4 }
 
 [[shell.children.children]]
 type = "logo"
@@ -25,8 +25,8 @@ size = 16
 
 [[shell.children.children]]
 type = "menu"
-label = "Steam"
-style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 6] }
+label = "Aurora"
+style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 2] }
 items = [
     { label = "Settings", action = "navigate:settings" },
     { label = "Downloads", action = "navigate:downloads" },
@@ -42,7 +42,7 @@ items = [
 [[shell.children.children]]
 type = "menu"
 label = "View"
-style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 6] }
+style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 2] }
 items = [
     { label = "Library", action = "navigate:library" },
     { label = "Store", action = "navigate:store" },
@@ -54,7 +54,7 @@ items = [
 [[shell.children.children]]
 type = "menu"
 label = "Friends"
-style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 6] }
+style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 2] }
 items = [
     { label = "Friends & Chat", action = "open_friends" },
     { label = "All Friends", action = "navigate:friends" },
@@ -63,7 +63,7 @@ items = [
 [[shell.children.children]]
 type = "menu"
 label = "Games"
-style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 6] }
+style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 2] }
 items = [
     { label = "View Games Library", action = "navigate:library" },
     { label = "Activate a Product...", action = "activate_product" },
@@ -73,7 +73,7 @@ items = [
 [[shell.children.children]]
 type = "menu"
 label = "Help"
-style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 6] }
+style = { font_size = 12, color = "$text_dim", hover_color = "$text", padding = [2, 6, 2, 2] }
 items = [
     { label = "Steam Support", action = "open_url:https://help.steampowered.com" },
     { label = "Check for Updates...", action = "check_updates" },
@@ -85,14 +85,15 @@ flex = true
 
 [[shell.children.children]]
 type = "friends_button"
+icon = "users"
 size = 24
-style = { width = 40, bg = "#1A9FFF", color = "#FFFFFF", radius = 2 }
+style = { width = 40, bg = "$accent", color = "$on_accent", radius = 2 }
 
 [[shell.children.children]]
 type = "notifications"
 size = 24
-highlight_unread_bg = "#5B7A28"
-style = { width = 40, bg = "#24282F", radius = 2 }
+highlight_unread_bg = "$discount"
+style = { width = 40, bg = "$bg", radius = 2 }
 
 [[shell.children.children]]
 type = "account"
@@ -101,22 +102,22 @@ show_name = true
 show_wallet = true
 show_caret = true
 avatar_size = 24
-style = { height = 24, bg = "#222730", radius = 2, padding = [0, 8, 0, 0] }
+style = { height = 24, font_size = 12, bg = "$bg", radius = 2, padding = [0, 8, 0, 0] }
 
 [[shell.children.children]]
 type = "window_controls"
 variant = "windows"
-height = 28
+height = 32
 
-# Row 2 (38px): back/forward arrows + bold uppercase underline navigation tabs
+# Row 2 (48px): back/forward arrows + bold uppercase underline navigation tabs
 [[shell.children]]
 type = "row"
 align = "center"
-style = { height = 38, padding = [0, 12, 0, 10], gap = 10 }
+style = { height = 36, padding = [0, 12, 12, 10], gap = 8 }
 
 [[shell.children.children]]
 type = "back_forward"
-size = 22
+size = 24
 
 [[shell.children.children]]
 type = "nav_tabs"
@@ -126,15 +127,15 @@ uppercase = true
 profile_as_username = true
 indicator = "underline"
 indicator_height = 2.5
-tab_gap = 16
-style = { font_size = 16, font_weight = "bold", color = "#DCDEDF", hover_color = "#FFFFFF", active_color = "#1A9FFF" }
+tab_gap = 12
+style = { font_size = 18, font_weight = "bold", color = "$text", hover_color = "$text", active_color = "$accent" }
 
-# Bottom Steam status bar (34px)
+# Bottom Aurora status bar (40px)
 [[shell]]
 type = "panel"
 side = "bottom"
-size = 34
-style = { bg = "$chrome", border_top = { width = 1, color = "#0E1116" }, padding = [0, 14, 0, 14] }
+size = 40
+style = { bg = "$chrome", border_top = { width = 1, color = "$border" }, padding = [0, 14, 0, 14] }
 
 [[shell.children]]
 type = "row"
@@ -154,7 +155,8 @@ flex = true
 
 [[shell.children.children]]
 type = "downloads_bar"
-width = 360
+width = 420
+style = { height = 32 }
 
 [[shell.children.children]]
 type = "spacer"
@@ -185,30 +187,35 @@ type = "page_content"
 # LIBRARY
 # ============================================================================
 
-# Left compact Steam library sidebar (254px)
+# Left compact Steam library sidebar (276px).
+# Every color follows semantic palette roles so all Steam eras stay coherent.
 [[library]]
 type = "panel"
 side = "left"
-size = 254
-style = { bg = "#22252C", border_right = { width = 1, color = "#12151B" }, padding = [8, 8, 8, 8], gap = 6 }
+size = 276
+style = { bg = "$bg", border_right = { width = 1, color = "$border" }, padding = [4, 6, 0, 6], gap = 6 }
 
 [[library.children]]
 type = "row"
 align = "center"
-style = { gap = 6 }
+style = { height = 32, gap = 4 }
 
 [[library.children.children]]
 type = "button"
 label = "Home"
 action = "navigate:library"
-style = { width = "fill", height = 32, bg = "#323740", hover_bg = "#3D434E", radius = 2, align = "start", padding = [0, 10, 0, 10], font_size = 13.5, font_weight = "medium", color = "$text" }
+style = { width = "fill", height = 32, bg = "$raised", active_bg = "$surface_hover", hover_bg = "$surface_hover", radius = 2, align = "start", padding = [0, 10, 0, 10], font_size = 13.5, font_weight = "medium", color = "$text" }
 
 [[library.children.children]]
 type = "button"
 label = ""
 icon = "grid"
-action = "navigate:library"
-style = { width = 32, height = 32, bg = "#323740", hover_bg = "#3D434E", radius = 2, align = "center", font_size = 15, color = "$text_dim", hover_color = "$text" }
+action = "library:collections"
+style = { width = 32, height = 32, bg = "$surface", hover_bg = "$surface_hover", radius = 2, align = "center", font_size = 15, color = "$text_dim", hover_color = "$text" }
+
+[[library.children]]
+type = "spacer"
+size = 9
 
 [[library.children]]
 type = "library_filters"
@@ -218,15 +225,20 @@ variant = "dropdown_icons"
 type = "library_search"
 placeholder = "Search"
 show_filter_button = true
-style = { bg = "#181B22", radius = 2, height = 28 }
+style = { bg = "$chrome", radius = 0, height = 32 }
+
+[[library.children]]
+type = "spacer"
+size = 2
 
 [[library.children]]
 type = "library_list"
-row_height = 24
-icon_size = 18
+group_by = "last_played"
+row_height = 25
+icon_size = 20
 group_headers = true
 show_counts = true
-style = { font_size = 12.5 }
+style = { font_size = 13 }
 
 # Center library home shelves / game detail host
 [[library]]
@@ -241,35 +253,35 @@ type = "library_home_or_detail"
 type = "scroll"
 direction = "vertical"
 
-# Darker What's New band
+# Raised news band fades into the selected era's chrome.
 [[library.children.children.children]]
 type = "box"
-style = { bg = "#1E222B", border_bottom = { width = 1, color = "#14171D" }, padding = [10, 22, 12, 22] }
+style = { bg_gradient = { from = "$raised", to = "$chrome", direction = "vertical" }, border_bottom = { width = 1, color = "$border" }, padding = [16, 24, 28, 24] }
 
 [[library.children.children.children.children]]
 type = "whats_new_shelf"
 title = "What's New"
-card_width = 270
-card_height = 148
+card_width = 318
+card_height = 179
 card_radius = 4
 date_above = true
-max_items = 5
-gap = 14
+max_items = 12
+gap = 16
 
-# Main cool-slate gradient shelves area (Recent Games + All Games)
+# The main shelves keep the selected era's surface-to-background depth.
 [[library.children.children.children]]
 type = "box"
-style = { bg_gradient = { from = "#262B34", to = "#1E222A", direction = "vertical" }, padding = [16, 22, 24, 22], gap = 22 }
+style = { bg_gradient = { from = "$surface", to = "$bg", direction = "vertical" }, padding = [43, 24, 24, 24], gap = 40 }
 
 [[library.children.children.children.children]]
 type = "recent_games_shelf"
 title = "Recent Games"
 featured_first = true
-featured_width = 385
-capsule_width = 178
+featured_width = 376
+capsule_width = 179
 capsule_height = 268
 card_radius = 0
-gap = 14
+gap = 16
 
 [[library.children.children.children.children]]
 type = "all_games_grid"
@@ -277,7 +289,7 @@ title = "All Games"
 show_count = true
 show_sort = true
 card_aspect = "capsule"
-card_width = 190
-card_height = 285
+card_width = 224
+card_height = 336
 card_radius = 0
-gap = 14
+gap = 16

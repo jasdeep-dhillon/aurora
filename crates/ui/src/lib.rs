@@ -4,10 +4,11 @@
 pub mod brand;
 pub mod icons;
 pub mod native;
+pub mod native_style;
 pub mod theme;
 pub mod widgets;
 
-pub use theme::{CustomFonts, Theme, WeightPreset, install_fonts, install_fonts_for_theme, install_fonts_with};
+pub use theme::{CustomFonts, Theme, WeightPreset, WidgetStyle, install_fonts, install_fonts_for_theme, install_fonts_with};
 
 use i18n::t;
 
@@ -49,8 +50,8 @@ pub fn ago(unix: u64) -> String {
     }
 }
 
-/// A unix time as a short date, e.g. "7 Oct 2026" (UTC, month names translated).
-pub fn date(unix: u64) -> String {
+/// A Unix timestamp as a Gregorian (year, month, day) in UTC.
+pub fn calendar_date(unix: u64) -> (i64, u32, u32) {
     let days = (unix / 86_400) as i64;
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -62,6 +63,23 @@ pub fn date(unix: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d as u32)
+}
+
+/// A unix time as a short date, e.g. "7 Oct 2026" (UTC, month names translated).
+pub fn date(unix: u64) -> String {
+    let (y, m, d) = calendar_date(unix);
     let months = [t!("Jan"), t!("Feb"), t!("Mar"), t!("Apr"), t!("May"), t!("Jun"), t!("Jul"), t!("Aug"), t!("Sep"), t!("Oct"), t!("Nov"), t!("Dec")];
     format!("{d} {} {y}", months[(m - 1) as usize])
+}
+
+#[cfg(test)]
+mod calendar_tests {
+    #[test]
+    fn calendar_handles_epoch_leap_day_and_year_boundary() {
+        assert_eq!(super::calendar_date(0), (1970, 1, 1));
+        assert_eq!(super::calendar_date(1_582_934_400), (2020, 2, 29));
+        assert_eq!(super::calendar_date(1_767_225_599), (2025, 12, 31));
+        assert_eq!(super::calendar_date(1_767_225_600), (2026, 1, 1));
+    }
 }

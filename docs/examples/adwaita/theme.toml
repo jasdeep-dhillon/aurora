@@ -1,0 +1,110 @@
+[meta]
+id = "adwaita"
+name = "Adwaita"
+version = "1.2.1"
+author = "Aurora; inspired by tkashkin's Adwaita for Steam"
+description = "AdwSteamGtk-inspired header and footer around Aurora's default library, with native GTK4/libadwaita styling and system appearance preferences."
+
+[fonts]
+regular = "assets/fonts/AdwaitaSans-Regular.ttf"
+bold = "assets/fonts/AdwaitaSans-Bold.ttf"
+
+[native]
+provider = "adwaita"
+color_scheme = "system"
+accent = "system"
+
+[theme]
+radius = 12
+weight_preset = "balanced"
+font_scale = 1.0
+
+[options.appearance]
+kind = "select"
+label = "Appearance"
+description = "Follow GNOME's appearance or choose a fixed Adwaita palette."
+default = "system"
+
+[[options.appearance.choices]]
+value = "system"
+label = "System"
+[options.appearance.choices.overrides.native]
+color_scheme = "system"
+
+[[options.appearance.choices]]
+value = "dark"
+label = "Dark"
+[options.appearance.choices.overrides.native]
+color_scheme = "dark"
+
+[[options.appearance.choices]]
+value = "light"
+label = "Light"
+[options.appearance.choices.overrides.native]
+color_scheme = "light"
+
+[options.accent]
+kind = "select"
+label = "Accent Color"
+description = "Follow GNOME's accent or choose one of Adwaita's nine colors."
+default = "system"
+
+[[options.accent.choices]]
+value = "system"
+label = "System"
+[options.accent.choices.overrides.native]
+accent = "system"
+
+[[options.accent.choices]]
+value = "blue"
+label = "Blue"
+[options.accent.choices.overrides.native]
+accent = "blue"
+
+[[options.accent.choices]]
+value = "teal"
+label = "Teal"
+[options.accent.choices.overrides.native]
+accent = "teal"
+
+[[options.accent.choices]]
+value = "green"
+label = "Green"
+[options.accent.choices.overrides.native]
+accent = "green"
+
+[[options.accent.choices]]
+value = "yellow"
+label = "Yellow"
+[options.accent.choices.overrides.native]
+accent = "yellow"
+
+[[options.accent.choices]]
+value = "orange"
+label = "Orange"
+[options.accent.choices.overrides.native]
+accent = "orange"
+
+[[options.accent.choices]]
+value = "red"
+label = "Red"
+[options.accent.choices.overrides.native]
+accent = "red"
+
+[[options.accent.choices]]
+value = "pink"
+label = "Pink"
+[options.accent.choices.overrides.native]
+accent = "pink"
+
+[[options.accent.choices]]
+value = "purple"
+label = "Purple"
+[options.accent.choices.overrides.native]
+accent = "purple"
+
+[[options.accent.choices]]
+value = "slate"
+label = "Slate"
+[options.accent.choices.overrides.native]
+accent = "slate"

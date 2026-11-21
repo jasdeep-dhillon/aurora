@@ -8,6 +8,8 @@
 pub mod color;
 pub mod install;
 pub mod manifest;
+pub mod native;
+pub mod adwaita;
 pub mod script;
 pub mod tree;
 
@@ -28,7 +30,7 @@ pub use manifest::{
 pub use script::{DrawCmd, ThemeScript, paint_draw_cmds, theme_to_rhai_map};
 pub use tree::{
     AlignMode, BorderEdge, Direction, Edges, FontWeight, GradientSpec, IndicatorStyle, Justify,
-    LayoutTree, MenuItemSpec, Node, NodeStyle, PanelSide, SizeVal, WinCtrlVariant,
+    LayoutTree, LibraryGrouping, MenuItemSpec, Node, NodeStyle, PanelSide, SizeVal, WinCtrlVariant,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -101,6 +103,8 @@ pub struct ThemeManager {
     pub resolved: Option<ResolvedTheme>,
     active_layout_file: Option<String>,
     last_mtime: Option<SystemTime>,
+    native_appearance: native::NativeAppearance,
+    active_option_values: BTreeMap<String, OptionValue>,
 }
 
 impl ThemeManager {
@@ -114,6 +118,8 @@ impl ThemeManager {
             resolved: None,
             active_layout_file: None,
             last_mtime: None,
+            native_appearance: native::NativeAppearance::default(),
+            active_option_values: BTreeMap::new(),
         }
     }
 
@@ -125,6 +131,7 @@ impl ThemeManager {
 
         let Ok(entries) = fs::read_dir(&self.themes_dir) else {
             self.resolved = None;
+            self.active_option_values.clear();
             return;
         };
 
@@ -178,6 +185,7 @@ impl ThemeManager {
                 self.resolved = None;
                 self.active_layout_file = None;
                 self.last_mtime = None;
+                self.active_option_values.clear();
             }
         }
     }
@@ -190,6 +198,7 @@ impl ThemeManager {
                 self.resolved = None;
                 self.active_layout_file = None;
                 self.last_mtime = None;
+                self.active_option_values.clear();
                 Ok(())
             }
             Some(theme_id) => {
@@ -206,6 +215,23 @@ impl ThemeManager {
             .iter()
             .find(|t| t.manifest.meta.id == id)
             .map(|t| &t.manifest)
+    }
+
+    pub fn uses_native_appearance(&self) -> bool {
+        self.active_manifest().is_some_and(|manifest| manifest.native.is_some())
+    }
+
+    /// Update palette tokens from cached manifest/options only. Assets and file
+    /// reload timestamps stay untouched; desktop changes never read packages.
+    pub fn set_native_appearance(&mut self, appearance: native::NativeAppearance) -> bool {
+        if self.native_appearance == appearance { return false; }
+        self.native_appearance = appearance;
+        let Some(manifest) = self.active_manifest().filter(|manifest| manifest.native.is_some()) else { return false; };
+        let theme = manifest.resolve_tokens_with_native(&self.active_option_values, appearance).theme;
+        let Some(resolved) = self.resolved.as_mut() else { return false; };
+        if resolved.theme == theme { return false; }
+        resolved.theme = theme;
+        true
     }
 
     pub fn get(&self, id: &str) -> Option<&InstalledTheme> {
@@ -319,7 +345,7 @@ impl ThemeManager {
             .clone();
 
         let user_options = self.load_option_values(theme_id);
-        let parts = installed.manifest.resolve_tokens(&user_options);
+        let parts = installed.manifest.resolve_tokens_with_native(&user_options, self.native_appearance);
 
         // Load declarative LayoutTree:
         // 1. Explicit `layout_file` (from manifest or option override), else
@@ -364,6 +390,7 @@ impl ThemeManager {
 
         self.active_layout_file = Some(layout_rel.to_string());
         self.last_mtime = theme_dir_mtime(&installed.dir, Some(layout_rel));
+        self.active_option_values = user_options;
         self.resolved = Some(ResolvedTheme {
             meta: installed.manifest.meta,
             dir: installed.dir,
@@ -427,6 +454,123 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    #[test]
+    fn native_adwaita_light_manifest_uses_adwaita_window_palette() {
+        let manifest = ThemeManifest::parse("[meta]\nid = 'native-test'\nname = 'Native test'\n[native]\nprovider = 'adwaita'\ncolor_scheme = 'light'\naccent = 'red'\n").unwrap();
+        let resolved = manifest.resolve_tokens(&BTreeMap::new());
+        assert!(!resolved.theme.dark);
+        assert_eq!(resolved.theme.bg, Color32::from_rgb(0xfa, 0xfa, 0xfb));
+        assert_eq!(resolved.theme.accent, Color32::from_rgb(0xe6, 0x2d, 0x42));
+    }
+
+    #[test]
+    fn native_package_options_keep_manual_and_system_preferences_independent() {
+        use native::NativeAppearance;
+        let manifest = ThemeManifest::parse(include_str!("../../../docs/examples/adwaita/theme.toml")).unwrap();
+        let desktop = NativeAppearance { dark: Some(false), accent: Some(Color32::from_rgb(0x91, 0x41, 0xac)), high_contrast: false, ..Default::default() };
+        let mut options = BTreeMap::new();
+        let system = manifest.resolve_tokens_with_native(&options, desktop);
+        assert!(!system.theme.dark);
+        assert_eq!(system.theme.accent, Color32::from_rgb(0x91, 0x41, 0xac));
+        options.insert("appearance".into(), OptionValue::Text("dark".into()));
+        let manual_dark = manifest.resolve_tokens_with_native(&options, desktop);
+        assert!(manual_dark.theme.dark);
+        assert_eq!(manual_dark.theme.accent, Color32::from_rgb(0x91, 0x41, 0xac));
+        options.insert("accent".into(), OptionValue::Text("yellow".into()));
+        options.insert("appearance".into(), OptionValue::Text("system".into()));
+        let manual_accent = manifest.resolve_tokens_with_native(&options, desktop);
+        assert!(!manual_accent.theme.dark);
+        assert_eq!(manual_accent.theme.accent, Color32::from_rgb(0xc8, 0x88, 0x00));
+        assert_eq!(manual_accent.theme.on_accent, Color32::WHITE);
+    }
+
+    #[test]
+    fn native_fallback_high_contrast_and_explicit_tokens_resolve_in_order() {
+        let manifest = ThemeManifest::parse("[meta]\nid = 'native-test'\nname = 'Native test'\n[native]\nprovider = 'adwaita'\n[theme]\nbg = '#123456'\n").unwrap();
+        let fallback = manifest.resolve_tokens(&BTreeMap::new());
+        assert!(!fallback.theme.dark);
+        assert_eq!(fallback.theme.accent, Color32::from_rgb(0x35, 0x84, 0xe4));
+        assert_eq!(fallback.theme.bg, Color32::from_rgb(0x12, 0x34, 0x56));
+        let contrast = manifest.resolve_tokens_with_native(&BTreeMap::new(), native::NativeAppearance { dark: Some(false), high_contrast: true, ..Default::default() });
+        assert_eq!(contrast.theme.text_dim, Color32::BLACK);
+        assert_eq!(contrast.theme.border, Color32::BLACK);
+        assert_eq!(contrast.theme.bg, Color32::from_rgb(0x12, 0x34, 0x56));
+        let legacy = ThemeManifest::parse("[meta]\nid = 'legacy-test'\nname = 'Legacy test'\n[theme]\naccent = '#abcdef'\n").unwrap();
+        assert_eq!(legacy.resolve_tokens(&BTreeMap::new()).theme, legacy.resolve_tokens_with_native(&BTreeMap::new(), native::NativeAppearance { dark: Some(false), high_contrast: true, ..Default::default() }).theme);
+    }
+
+    #[test]
+    fn adwaita_package_installs_and_native_changes_update_only_active_native_theme() {
+        let root = temp_dir("native-adwaita");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/adwaita");
+        let installed = root.join("themes");
+        install_folder(&source, &installed).unwrap();
+        let mut manager = ThemeManager::new(installed, root.join("options"));
+        manager.scan();
+        assert!(!manager.uses_native_appearance());
+        assert!(!manager.set_native_appearance(native::NativeAppearance { dark: Some(false), ..Default::default() }));
+        manager.activate(Some("adwaita")).unwrap();
+        assert!(manager.uses_native_appearance());
+        let resolved = manager.resolved.as_ref().unwrap();
+        assert!(!resolved.theme.dark);
+        assert!(resolved.custom_fonts.is_some());
+        assert!(resolved.layout.shell.iter().any(|node| matches!(node, Node::Panel { side: PanelSide::Top, size: Some(44.0), .. })), "Adwaita should provide its compact header");
+        assert!(resolved.layout.shell.iter().any(|node| matches!(node, Node::Panel { side: PanelSide::Bottom, size: Some(28.0), .. })), "Adwaita should provide its compact footer");
+        assert!(resolved.layout.library.is_empty(), "Adwaita should retain Aurora's default library");
+        assert!(manager.set_native_appearance(native::NativeAppearance { dark: Some(true), ..Default::default() }));
+        assert!(manager.resolved.as_ref().unwrap().theme.dark);
+        assert!(!manager.set_native_appearance(native::NativeAppearance { dark: Some(true), ..Default::default() }));
+        manager.set_option("adwaita", "appearance", OptionValue::Text("light".into())).unwrap();
+        manager.set_option("adwaita", "accent", OptionValue::Text("red".into())).unwrap();
+        assert!(!manager.set_native_appearance(native::NativeAppearance { dark: Some(false), accent: Some(Color32::GREEN), high_contrast: false, ..Default::default() }));
+        assert!(!manager.resolved.as_ref().unwrap().theme.dark);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_profile_action_is_opt_in_and_rounding_round_trips() {
+        let legacy: Node = serde_json::from_value(serde_json::json!({"type": "account"})).unwrap();
+        assert!(matches!(legacy, Node::Account { action: None, avatar_radius: None, .. }));
+        let configured: Node = serde_json::from_value(serde_json::json!({
+            "type": "account", "action": "navigate:profile", "avatar_radius": 6,
+        })).unwrap();
+        let saved = serde_json::to_value(&configured).unwrap();
+        assert_eq!(saved["action"], "navigate:profile");
+        assert_eq!(saved["avatar_radius"], 6);
+    }
+
+    #[test]
+    fn native_desktop_updates_leave_layout_and_hot_reload_state_untouched() {
+        let root = temp_dir("native-layout-reload");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/adwaita");
+        let installed = root.join("themes");
+        install_folder(&source, &installed).unwrap();
+        // Test hot reload independently of the shipped package's default layout.
+        fs::write(installed.join("adwaita/layout.toml"), "[[shell]]\ntype = 'panel'\nside = 'center'\n").unwrap();
+        let mut manager = ThemeManager::new(installed.clone(), root.join("options"));
+        manager.scan();
+        manager.activate(Some("adwaita")).unwrap();
+        let shell_count = manager.resolved.as_ref().unwrap().layout.shell.len();
+        let previous_mtime = manager.last_mtime;
+        fs::write(installed.join("adwaita/layout.toml"), "broken = [").unwrap();
+        assert!(manager.set_native_appearance(native::NativeAppearance { dark: Some(true), ..Default::default() }));
+        assert!(manager.resolved.as_ref().unwrap().theme.dark);
+        assert_eq!(manager.resolved.as_ref().unwrap().layout.shell.len(), shell_count);
+        assert_eq!(manager.last_mtime, previous_mtime);
+
+        fs::write(installed.join("adwaita/layout.toml"), "").unwrap();
+        // Ensure a file reload is pending regardless of filesystem timestamp precision.
+        manager.last_mtime = Some(SystemTime::UNIX_EPOCH);
+        let accent = Color32::from_rgb(0x91, 0x41, 0xac);
+        assert!(manager.set_native_appearance(native::NativeAppearance { dark: Some(true), accent: Some(accent), high_contrast: false, ..Default::default() }));
+        assert_eq!(manager.resolved.as_ref().unwrap().theme.accent, accent);
+        assert_eq!(manager.resolved.as_ref().unwrap().layout.shell.len(), shell_count);
+        assert_eq!(manager.last_mtime, Some(SystemTime::UNIX_EPOCH));
+        assert!(manager.check_hot_reload());
+        assert!(manager.resolved.as_ref().unwrap().layout.shell.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn temp_dir(label: &str) -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
@@ -448,6 +592,42 @@ mod tests {
             zip.write_all(data).unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    #[test]
+    fn library_grouping_is_opt_in_and_rejects_unknown_values() {
+        let old = LayoutTree::parse("[[library]]\ntype = 'library_list'").unwrap();
+        assert!(matches!(old.library[0], Node::LibraryList { group_by: LibraryGrouping::Installed, .. }));
+        let recent = LayoutTree::parse("[[library]]\ntype = 'library_list'\ngroup_by = 'last_played'").unwrap();
+        assert!(matches!(recent.library[0], Node::LibraryList { group_by: LibraryGrouping::LastPlayed, .. }));
+        assert!(LayoutTree::parse("[[library]]\ntype = 'library_list'\ngroup_by = 'typo'").is_err());
+    }
+
+    #[test]
+    fn steam_replica_package_installs_and_resolves_every_era() {
+        let root = temp_dir("steam-replica");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/steam-replica");
+        let installed = root.join("themes");
+        install_folder(&source, &installed).expect("install the shipped theme package");
+        let mut manager = ThemeManager::new(installed, root.join("options"));
+        manager.scan();
+        manager.activate(Some("steam-replica")).expect("activate installed replica");
+        for (era, chrome) in [
+            ("modern_2023", Color32::from_rgb(0x17, 0x1D, 0x25)),
+            ("classic_2018", Color32::from_rgb(0x17, 0x1A, 0x21)),
+            ("vgui_2010", Color32::from_rgb(0x1E, 0x20, 0x1D)),
+        ] {
+            manager.set_option("steam-replica", "steam_era", OptionValue::Text(era.into())).unwrap();
+            let resolved = manager.resolved.as_mut().unwrap();
+            assert_eq!(resolved.theme.chrome, chrome, "palette for {era}");
+            assert!(!resolved.layout.shell.is_empty());
+            assert!(!resolved.layout.library.is_empty());
+            assert!(resolved.script_error.is_none());
+            let script = resolved.script.as_mut().expect("visual hooks");
+            assert!(!script.paint_background(1280.0, 800.0, 0.0, &resolved.theme).is_empty());
+            assert!(script.error().is_none());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

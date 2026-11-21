@@ -209,6 +209,8 @@ pub struct SteamApp {
     bg_tex: Option<(PathBuf, egui::TextureHandle)>,
     logo_tex: Option<(PathBuf, egui::TextureHandle)>,
     last_hot_reload_check: f64,
+    native_appearance: Option<themes::native::NativeAppearanceWatcher>,
+    applied_native_artwork: Option<Arc<ui::native_style::NativeControlArtwork>>,
 }
 
 impl SteamApp {
@@ -378,6 +380,8 @@ impl SteamApp {
             bg_tex: None,
             logo_tex: None,
             last_hot_reload_check: 0.0,
+            native_appearance: None,
+            applied_native_artwork: None,
         };
         // `--page=inventory --arg=listings`: open a page at startup (handy with --demo).
         let flag = |name: &str| std::env::args().find_map(|a| a.strip_prefix(&format!("--{name}=")).map(String::from));
@@ -689,6 +693,30 @@ impl SteamApp {
             let mut st = self.themes.lock().unwrap();
             self.prefs.hot_reload_themes = st.hot_reload;
             self.prefs.active_theme_id = st.manager.active_id.clone();
+
+            // The watcher reads desktop settings off the UI thread. Keep it
+            // alive only for opted-in themes, independently of file hot reload.
+            if st.manager.uses_native_appearance() {
+                let watcher = self.native_appearance.get_or_insert_with(themes::native::NativeAppearanceWatcher::new);
+                if let Some(appearance) = watcher.latest() {
+                    if st.manager.set_native_appearance(appearance) {
+                        st.revision = st.revision.wrapping_add(1);
+                        st.dirty = true;
+                    }
+                }
+                if let Some(artwork) = watcher.latest_artwork() {
+                    if !self.applied_native_artwork.as_ref().is_some_and(|old| Arc::ptr_eq(old, &artwork))
+                        && ui::native_style::install(ctx, &artwork)
+                    {
+                        self.applied_native_artwork = Some(artwork);
+                    }
+                }
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            } else {
+                self.native_appearance = None;
+                self.applied_native_artwork = None;
+                ui::native_style::clear(ctx);
+            }
 
             if st.hot_reload && st.manager.active_id.is_some() && (now - self.last_hot_reload_check).abs() >= 0.5 {
                 self.last_hot_reload_check = now;

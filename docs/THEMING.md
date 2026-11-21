@@ -2,6 +2,20 @@
 
 Aurora includes a **Declarative Theme Engine** inspired by Millennium and CSS box-model layouts. A theme is a self-contained folder (or `.zip` package) that can restyle colors and typography, completely rearrange the window chrome and library layout via `layout.toml`, expose user-configurable `[options.*]`, bundle custom fonts/backgrounds/logos, and draw custom ambient effects with sandboxed `theme.rhai` scripts.
 
+Two complete packages are included:
+
+- [Aurora Desktop (Steam replica)](examples/steam-replica/README.md): Steam-style chrome and library shelves, with Modern, Classic Blue and VGUI Olive palettes.
+- [Adwaita](examples/adwaita/README.md): compact AdwSteamGtk-inspired chrome around Aurora's default library, with optional native GTK4/libadwaita styling on Linux.
+
+To create installable ZIPs from a checkout, run these commands from the repository root (Python 3 is only needed to package the files):
+
+```sh
+python3 -m zipfile -c steam-replica-theme.zip docs/examples/steam-replica
+python3 -m zipfile -c adwaita-theme.zip docs/examples/adwaita
+```
+
+Install either ZIP through **Settings → Appearance → Install Theme…**, then activate it. Keep Adwaita's bundled fonts and license files in the package.
+
 ---
 
 ## Theme Package Structure
@@ -10,9 +24,11 @@ Aurora discovers installed themes inside your platform config directory:
 
 | Platform | Themes Directory (`<config_dir>/themes/<id>/`) | Saved Theme Option Data |
 | --- | --- | --- |
-| **Linux** | `~/.config/aurora/themes/<id>/` | `~/.config/aurora/theme-data/<id>.json` |
-| **macOS** | `~/Library/Application Support/aurora/themes/<id>/` | `~/Library/Application Support/aurora/theme-data/<id>.json` |
-| **Windows** | `%APPDATA%\aurora\themes\<id>\` | `%APPDATA%\aurora\theme-data\<id>.json` |
+| **Linux** | `~/.config/steaminrust/themes/<id>/` | `~/.config/steaminrust/theme-data/<id>.json` |
+| **macOS** | `~/Library/Application Support/dev.SteamInRust.SteamInRust/themes/<id>/` | `~/Library/Application Support/dev.SteamInRust.SteamInRust/theme-data/<id>.json` |
+| **Windows** | `%APPDATA%\SteamInRust\SteamInRust\config\themes\<id>\` | `%APPDATA%\SteamInRust\SteamInRust\config\theme-data\<id>.json` |
+
+Aurora retains the existing SteamInRust settings directory. On Linux, `XDG_CONFIG_HOME` overrides `~/.config` when set.
 
 A theme package contains:
 
@@ -61,6 +77,35 @@ min_aurora_version = "0.1.0"
 | `preview` | `string` | No | Relative path to a preview image. |
 | `min_aurora_version` | `string` | No | Minimum recommended Aurora version. |
 
+### `[native]` — Desktop appearance integration
+
+Packages can opt into an Adwaita base profile:
+
+```toml
+[native]
+provider = "adwaita"
+color_scheme = "system" # "system", "light", or "dark"
+accent = "system"       # or blue, teal, green, yellow, orange, red, pink, purple, slate
+```
+
+On Linux, an isolated helper loads the installed GTK4 and libadwaita (1.6 or newer) libraries. It reads real stylesheet colors, native accent conversions and button metrics, and renders GTK button backgrounds for normal, hover and pressed states. Shared secondary buttons use this artwork with preserved corners; egui retains text, focus and input handling. There is no Python dependency and no visible helper window.
+
+A background worker follows GNOME's GSettings appearance, accent and high-contrast preferences and refreshes native style data when they change. Helper output is size-limited, the process has a two-second timeout, and drawing never waits for it. These updates work independently of theme file hot reload. Missing libraries/display and other platforms keep the portable Adwaita profile; missing desktop preferences fall back to light and blue. Explicit light/dark and accent choices work on every platform.
+
+Resolution applies native settings (including `overrides.native` from selected options), then `[theme]`, then each option's token overrides. Package token overrides therefore remain authoritative. Avoid specifying `base`, `dark`, or fixed palette colors when they should come from the native profile.
+
+For example, a manual appearance choice can preserve the system accent:
+
+```toml
+[[options.appearance.choices]]
+value = "light"
+label = "Light"
+[options.appearance.choices.overrides.native]
+color_scheme = "light"
+```
+
+Aurora keeps its egui renderer and layout. GTK interprets its own stylesheet in the helper; Aurora consumes its palette, metrics and rendered neutral button backgrounds. This does not embed an interactive GTK widget tree or execute theme-provided GTK CSS. The portable fallback follows [libadwaita's documented color roles](https://gnome.pages.gitlab.gnome.org/libadwaita/doc/main/css-variables.html). Bundled theme fonts remain in use. Run `aurora --adwaita-helper` to inspect the native snapshot; the normal log reports loaded library versions.
+
 ### `[theme]` — Palette & Typography Tokens
 
 Colors accept hex strings (`#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`) or `[r, g, b]` / `[r, g, b, a]` byte arrays.
@@ -107,6 +152,7 @@ font_scale = 0.96
 | `play`, `online`, `in_game`, `away`, `danger`, `discount` | `color` | Semantic status and action colors. |
 | `radius` | `u8` | Default widget corner radius in logical pixels (`0`–`255`). |
 | `weight_preset` | `"heavy"` \| `"balanced"` | `"heavy"` uses Aurora's bold Geist styling; `"balanced"` loads crisp **Inter Regular / Medium / SemiBold / Bold**. |
+| `widget_style` | `"aurora"` \| `"adwaita"` | Control geometry and interaction styling, independently of palette; native Adwaita selects `"adwaita"` automatically. |
 | `font_scale` | `f32` (`0.75`–`1.5`) | Global UI font size multiplier. |
 
 ### `[fonts]`, `[background]`, `[logo]`, and `layout_file`
@@ -129,6 +175,8 @@ tint = "#171D2580"     # optional color tint
 [logo]
 image = "assets/logo.png"
 ```
+
+Malformed custom font faces are ignored with a log warning, and Aurora uses its bundled fallback fonts.
 
 ---
 
@@ -207,10 +255,10 @@ Every node accepts an optional `style = { ... }` table with any subset of these 
 | `"nav_tabs"` | `direction` (`"horizontal"` \| `"vertical"`), `show_icons` (`true`), `uppercase` (`false`), `profile_as_username` (`false`), `indicator` (`"pill"` \| `"underline"` \| `"left_bar"` \| `"none"`), `indicator_height` (`2.5`), `tab_gap` (`12.0`), `style` | Renders Aurora's main navigation pages (Store, Library, Community, Profile, plus plugin pages). |
 | `"back_forward"` | `size` (`28.0`), `style` | History back/forward navigation arrows. |
 | `"window_controls"` | `variant` (`"windows"` \| `"macos"` \| `"minimal"`), `height` (`28.0`), `style` | Window minimize, maximize/restore, and close controls. |
-| `"account"` | `show_avatar` (`true`), `show_name` (`true`), `show_wallet` (`false`), `show_caret` (`true`), `avatar_size` (`22.0`), `style` | User account pill with avatar, persona name, optional inline wallet balance, and account popup menu. |
+| `"account"` | `show_avatar` (`true`), `show_name` (`true`), `show_wallet` (`false`), `show_caret` (`true`), `avatar_size` (`22.0`), `avatar_radius` (`u8?`), `action` (`string?`), `style` | User account pill with avatar and optional name/wallet. By default opens the account menu. Set `action = "navigate:profile"` for direct profile navigation; `avatar_radius` rounds the image independently of the outer button. |
 | `"wallet"` | `style` | Standalone Steam wallet balance badge. |
 | `"notifications"` | `size` (`28.0`), `highlight_unread_bg` (`ColorRef?`), `style` | Notifications bell button with optional highlight fill when unread notifications exist. |
-| `"friends_button"` | `size` (`28.0`), `style` | Quick button to open/toggle Friends & Chat. |
+| `"friends_button"` | `size` (`28.0`), `icon` (`string?`, defaults to friends), `style` | Quick button to open/toggle Friends & Chat. |
 | `"downloads_bar"` | `width` (`f32?`), `style` | Live download status & progress bar. |
 | `"friends_drawer"` | `width` (`280.0`), `style` | Docked Friends & Chat drawer panel. |
 | `"page_content"` | `style` | Hosts the currently active page (Store, Library, Downloads, Settings, etc.). Place inside the center `panel`. |
@@ -223,7 +271,7 @@ Every node accepts an optional `style = { ... }` table with any subset of these 
 | --- | --- | --- |
 | `"library_search"` | `placeholder` (`string?`), `show_filter_button` (`false`), `style` | Library search box with optional filter button. |
 | `"library_filters"` | `variant` (`"default"` \| `"dropdown_icons"`), `style` | Category / Installed / Ready-to-Play filter controls. |
-| `"library_list"` | `row_height` (`26.0`), `icon_size` (`18.0`), `group_headers` (`true`), `show_counts` (`true`), `style` | Scrollable sidebar list of games with icons and optional group headers/counts. |
+| `"library_list"` | `group_by` (`"installed"` or `"last_played"`, defaults to `"installed"`), `row_height` (`26.0`), `icon_size` (`18.0`), `group_headers` (`true`), `show_counts` (`true`), `style` | Scrollable sidebar list with icons and collapsible group headers/counts. Last-played mode shows Recent, calendar months, and Never played. |
 | `"whats_new_shelf"` | `title` (`string?`), `card_width` (`240.0`), `card_height` (`135.0`), `card_radius` (`0`), `date_above` (`false`), `max_items` (`5`), `gap` (`12.0`), `style` | Horizontal shelf of recent game news/updates. |
 | `"recent_games_shelf"` | `title` (`string?`), `featured_first` (`false`), `featured_width` (`360.0`), `capsule_width` (`156.0`), `capsule_height` (`234.0`), `card_radius` (`0`), `gap` (`12.0`), `style` | Recently played games shelf. When `featured_first = true`, the first game renders as a wide 16:9 hero tile followed by vertical capsules. |
 | `"all_games_grid"` | `title` (`string?`), `show_count` (`true`), `show_sort` (`true`), `card_aspect` (`"2:3"` \| `"capsule"` \| `"banner"` \| `"16:9"`), `card_width` (`156.0`), `card_height` (`234.0`), `card_radius` (`0`), `gap` (`12.0`), `style` | Responsive full-width game grid with optional count badge and sort dropdown. |
@@ -269,7 +317,7 @@ Themes can expose Millennium-style settings in **Settings → Appearance**. Choi
 
 Supported `kind` values:
 
-1. **`select`** — Dropdown with `[[options.<key>.choices]]`, each carrying `value`, `label`, and an optional `overrides` bundle (`overrides.theme`, `overrides.background`, and/or `overrides.layout_file`).
+1. **`select`** — Dropdown with `[[options.<key>.choices]]`, each carrying `value`, `label`, and an optional `overrides` bundle (`overrides.native`, `overrides.theme`, `overrides.background`, and/or `overrides.layout_file`).
 2. **`bool`** — Toggle switch with `on_overrides` and `off_overrides` bundles.
 3. **`color`** — Color picker targeting any of the 18 `theme.<token>` colors or `background.tint`.
 4. **`slider`** — Numeric slider (`min`, `max`, `step`) targeting `theme.radius`, `theme.font_scale`, or `background.opacity`.

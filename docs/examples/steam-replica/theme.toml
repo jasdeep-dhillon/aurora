@@ -1,9 +1,9 @@
 [meta]
 id = "steam-replica"
-name = "Steam Desktop"
-version = "2.0.0"
+name = "Aurora Desktop"
+version = "2.3.0"
 author = "Aurora"
-description = "Declarative replica of the Valve Steam desktop client."
+description = "Steam desktop chrome, compact library shelves, working collections, and three complete era palettes."
 
 [theme]
 base = "NEVKO"
@@ -34,7 +34,7 @@ discount = "#4C6B22"
 
 radius = 2
 weight_preset = "balanced"
-font_scale = 0.96
+font_scale = 1.0
 
 # ---------------------------------------------------------------------------
 # User-configurable theme options

@@ -10,6 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::Error;
 use crate::color::{ThemeColor, parse_hex_color};
+use crate::native::{NativeAppearance, NativeThemeConfig, NativeThemeOverrides};
 use crate::tree::LayoutTree;
 
 /// Validate a theme package id (`[a-z0-9_-]+`, 1..=64 chars).
@@ -148,6 +149,7 @@ pub struct ThemeOverrides {
     pub radius: Option<u8>,
     pub weight_preset: Option<ui::WeightPreset>,
     pub font_scale: Option<f32>,
+    pub widget_style: Option<ui::WidgetStyle>,
 }
 
 impl ThemeOverrides {
@@ -223,6 +225,9 @@ impl ThemeOverrides {
         if let Some(v) = self.font_scale {
             theme.font_scale = v.clamp(0.75, 1.5);
         }
+        if let Some(v) = self.widget_style {
+            theme.widget_style = v;
+        }
     }
 }
 
@@ -231,6 +236,7 @@ impl ThemeOverrides {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverrideBundle {
+    pub native: Option<NativeThemeOverrides>,
     pub theme: Option<ThemeOverrides>,
     pub background: Option<BackgroundOverrides>,
     pub layout_file: Option<String>,
@@ -333,14 +339,15 @@ impl OptionValue {
                     value: raw.to_string(),
                 }),
             },
-            OptionKind::Slider => raw
-                .trim()
-                .parse::<f64>()
-                .map(Self::Number)
-                .map_err(|_| Error::InvalidOptionValue {
-                    expected: "number",
-                    value: raw.to_string(),
-                }),
+            OptionKind::Slider => {
+                raw.trim()
+                    .parse::<f64>()
+                    .map(Self::Number)
+                    .map_err(|_| Error::InvalidOptionValue {
+                        expected: "number",
+                        value: raw.to_string(),
+                    })
+            }
             OptionKind::Color => {
                 let _ = parse_hex_color(raw)?;
                 Ok(Self::Text(raw.trim().to_string()))
@@ -535,6 +542,8 @@ pub fn apply_slider_target(
 pub struct ThemeManifest {
     pub meta: ThemeMeta,
     #[serde(default)]
+    pub native: Option<NativeThemeConfig>,
+    #[serde(default)]
     pub theme: ThemeOverrides,
     #[serde(default)]
     pub fonts: FontsConfig,
@@ -578,7 +587,52 @@ impl ThemeManifest {
         &self,
         user_options: &BTreeMap<String, OptionValue>,
     ) -> ResolvedManifestParts {
-        let mut theme = ui::Theme::default();
+        self.resolve_tokens_with_native(user_options, NativeAppearance::default())
+    }
+
+    /// Resolve native option selections before applying explicit token edits.
+    pub fn native_config(
+        &self,
+        user_options: &BTreeMap<String, OptionValue>,
+    ) -> Option<NativeThemeConfig> {
+        let mut native = self.native?;
+        for (key, option) in &self.options {
+            let value = user_options.get(key).unwrap_or(&option.default);
+            let bundle = match option.kind {
+                OptionKind::Select => value
+                    .as_str()
+                    .and_then(|selected| {
+                        option
+                            .choices
+                            .iter()
+                            .find(|choice| choice.value == selected)
+                    })
+                    .and_then(|choice| choice.overrides.as_ref()),
+                OptionKind::Bool => value.as_bool().and_then(|enabled| {
+                    if enabled {
+                        option.on_overrides.as_ref()
+                    } else {
+                        option.off_overrides.as_ref()
+                    }
+                }),
+                _ => None,
+            };
+            if let Some(overrides) = bundle.and_then(|bundle| bundle.native) {
+                overrides.apply_to(&mut native);
+            }
+        }
+        Some(native)
+    }
+
+    pub fn resolve_tokens_with_native(
+        &self,
+        user_options: &BTreeMap<String, OptionValue>,
+        appearance: NativeAppearance,
+    ) -> ResolvedManifestParts {
+        let mut theme = self
+            .native_config(user_options)
+            .map(|config| config.resolve(appearance))
+            .unwrap_or_default();
         self.theme.apply_to(&mut theme);
         theme.name = self.meta.name.clone();
 
@@ -587,7 +641,12 @@ impl ThemeManifest {
         let mut layout_file = self.layout_file.clone();
 
         for (key, opt) in &self.options {
-            opt.apply(user_options.get(key), &mut theme, &mut background, &mut layout_file);
+            opt.apply(
+                user_options.get(key),
+                &mut theme,
+                &mut background,
+                &mut layout_file,
+            );
         }
 
         ResolvedManifestParts {

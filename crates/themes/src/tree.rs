@@ -339,6 +339,15 @@ impl<'de> Deserialize<'de> for MenuItemSpec {
     }
 }
 
+/// Ordering of the themed library sidebar. Existing themes keep installation groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryGrouping {
+    #[default]
+    Installed,
+    LastPlayed,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -543,6 +552,12 @@ pub enum Node {
         show_caret: bool,
         #[serde(default = "default_avatar_size")]
         avatar_size: f32,
+        /// Optional image rounding, independent of the account button frame.
+        #[serde(default)]
+        avatar_radius: Option<u8>,
+        /// A primary-click action; absent preserves the account/status menu.
+        #[serde(default)]
+        action: Option<String>,
         #[serde(default)]
         style: NodeStyle,
     },
@@ -559,6 +574,8 @@ pub enum Node {
         style: NodeStyle,
     },
     FriendsButton {
+        #[serde(default)]
+        icon: Option<String>,
         #[serde(default = "default_icon_btn_size")]
         size: f32,
         #[serde(default)]
@@ -597,6 +614,8 @@ pub enum Node {
         style: NodeStyle,
     },
     LibraryList {
+        #[serde(default)]
+        group_by: LibraryGrouping,
         #[serde(default = "default_list_row_height")]
         row_height: f32,
         #[serde(default = "default_list_icon_size")]

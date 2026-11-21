@@ -1,16 +1,16 @@
-# Steam Desktop Theme for Aurora
+# Aurora Desktop theme
 
-A 100% declarative Complex Theme package (`theme.toml` + `layout.toml` + `theme.rhai`) that faithfully replicates the Valve Steam desktop client in Aurora.
+A declarative theme modeled on the modern Steam desktop client, using its two-row header, compact library sidebar, news band, game shelves, and bottom status bar.
 
-## Features
+- 80 px header with Aurora/View/Friends/Games/Help menus, utility buttons, account menu, window controls, and underlined navigation.
+- 276 px library sidebar with Home and a Collections picker, compact filters, a dark inset search/filter field, 25 px game rows, and collapsible Recent/month/Never played groups sorted by last play. The Collections picker filters existing collections and offers All Games and New Collection.
+- Fixed 318 × 179 news artwork, 179 × 268 recent capsules, a 376 × 268 featured tile with a playtime pane, and 224 × 336 library capsules.
+- Horizontal news and recent-game shelves with working paging arrows; cards keep their proportions in narrower windows.
+- 40 px footer with Add a Game, centered 420 px download area, and Friends & Chat.
+- Modern 2023+, Classic 2018 Blue, and VGUI 2010 Olive palette options. Header accents, utility buttons, account surfaces, sidebar controls, shelf gradients, and separators all follow the selected palette. Changing an accent keeps neutral surfaces in their chosen era.
 
-- **Authentic Steam Modern Palette**: Neutral-cool dark slate (`#171D25` chrome, `#232730` canvas, `#2B303A` / `#343B48` surfaces, `#1A9FFF` Steam blue accent, `#59BF40` Play green, `#57CBDE` online cyan, `#A4D007` in-game green) with `weight_preset = "balanced"` (Inter Regular/Medium/SemiBold/Bold).
-- **Declarative Two-Row Header (`layout.toml`)**: Row 1 with logo, `Steam` / `View` / `Friends` / `Games` / `Help` menus, Friends & Notifications icons, unified avatar + username + wallet account pill, and Windows window controls; Row 2 with Back/Forward arrows and bold uppercase underline nav tabs (`STORE`, `LIBRARY`, `COMMUNITY`, `<USERNAME>`).
-- **Declarative Steam Status Bar & Library**: 32px bottom status bar (`+ Add a Game`, centered Downloads bar, `Friends & Chat`), 272px compact left library sidebar (Home + grid button, dropdown filters, search, 24px game rows), and edge-to-edge shelves (`What's New`, `Recent Games` with 16:9 featured tile + 2:3 capsules, and `All Games` grid with sharp `0px` corners).
-- **Theme Options**: Switch **Steam Era** between *Modern 2023+*, *Classic 2018 Blue*, and *VGUI 2010 Olive*.
+Install `steam-replica-theme.zip` through **Settings → Appearance → Install Theme…**, then activate **Aurora Desktop**. Choose a palette under **Theme options → Steam Era**. Version 2.3.0 uses the updated theme engine's library Collections action; update Aurora alongside the theme for that control to work.
 
-## Installation
+The shell and library home are the closest matches. Each era uses the same modern layout with its own complete palette; the older options do not reproduce historical Steam layouts. Game detail pages and other built-in pages retain Aurora's layout. Aurora's existing card hover effects remain in use: this package does not ship a card-overlay script because the declarative library renderer does not invoke that hook. The header's highlighted people button opens Friends & Chat.
 
-1. Open Aurora and go to **Settings → Appearance**.
-2. Click **Install Theme…** and choose `steam-replica-theme.zip`.
-3. Activate **Steam Desktop** (and switch eras anytime under its theme options).
+All layout colors reference semantic theme roles; the background script adds only translucent surface/chrome shading and a border-colored hairline. There are no era-specific literal layout colors to drift out of sync. This package does not claim pixel-perfect parity across every Steam screen.
