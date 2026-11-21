@@ -24,9 +24,183 @@ enum Login {
     Offline(store::SavedAccount),
 }
 
+#[derive(Default)]
+struct StorageJobsInner {
+    moving: HashMap<AppId, std::sync::Arc<local::manage::Progress>>,
+    backing_up: HashMap<AppId, std::sync::Arc<local::manage::Progress>>,
+    restoring: Option<(AppId, std::sync::Arc<local::manage::Progress>)>,
+}
+
+type SharedStorageJobs = std::sync::Arc<std::sync::Mutex<StorageJobsInner>>;
+
+fn storage_busy(jobs: &SharedStorageJobs, app_id: AppId) -> bool {
+    let g = jobs.lock().unwrap();
+    g.moving.contains_key(&app_id)
+        || g.backing_up.contains_key(&app_id)
+        || g.restoring.as_ref().is_some_and(|(id, _)| *id == app_id)
+}
+
+fn spawn_storage_ticker(
+    progress: std::sync::Arc<local::manage::Progress>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    mut on_tick: impl FnMut(u64, u64) + Send + 'static,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if done.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            let d = progress.done_bytes.load(std::sync::atomic::Ordering::Relaxed);
+            let t = progress.total_bytes.load(std::sync::atomic::Ordering::Relaxed);
+            on_tick(d, t);
+        }
+    });
+}
+
+fn handle_storage_command(
+    cmd: Command,
+    jobs: &SharedStorageJobs,
+    is_running: impl FnOnce(AppId) -> bool,
+    is_downloading: impl FnOnce(AppId) -> bool,
+    is_verifying: impl FnOnce(AppId) -> bool,
+    sink: &Sink,
+) -> Option<Command> {
+    match cmd {
+        Command::MoveGame { game, dest_library } => {
+            let app_id = game.app_id;
+            if is_running(app_id) {
+                sink(Event::MoveFinished { app_id, result: Err("Close the game before moving it.".into()) });
+                return None;
+            }
+            if is_downloading(app_id) {
+                sink(Event::MoveFinished { app_id, result: Err("Wait for the download to finish or cancel it before moving this game.".into()) });
+                return None;
+            }
+            if is_verifying(app_id) || storage_busy(jobs, app_id) {
+                sink(Event::MoveFinished { app_id, result: Err("Another file operation is already in progress for this game.".into()) });
+                return None;
+            }
+            let progress = std::sync::Arc::new(local::manage::Progress::default());
+            progress.total_bytes.store(game.size_on_disk.max(1), std::sync::atomic::Ordering::Relaxed);
+            jobs.lock().unwrap().moving.insert(app_id, progress.clone());
+            sink(Event::MoveProgress { app_id, done_bytes: 0, total_bytes: game.size_on_disk.max(1) });
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (p_tick, d_tick, s_tick) = (progress.clone(), done.clone(), sink.clone());
+            spawn_storage_ticker(p_tick, d_tick, move |done_bytes, total_bytes| {
+                s_tick(Event::MoveProgress { app_id, done_bytes, total_bytes });
+            });
+            let (jobs2, sink2) = (jobs.clone(), sink.clone());
+            tokio::task::spawn_blocking(move || {
+                let result = local::manage::move_game(&game, &dest_library, &progress);
+                done.store(true, std::sync::atomic::Ordering::Relaxed);
+                jobs2.lock().unwrap().moving.remove(&app_id);
+                sink2(Event::MoveFinished { app_id, result });
+            });
+            None
+        }
+        Command::CancelMove { app_id } => {
+            if let Some(p) = jobs.lock().unwrap().moving.get(&app_id) {
+                p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            None
+        }
+        Command::BackupGame { game, dest_dir } => {
+            let app_id = game.app_id;
+            if is_running(app_id) {
+                sink(Event::BackupFinished { app_id, result: Err("Close the game before backing it up.".into()) });
+                return None;
+            }
+            if is_downloading(app_id) {
+                sink(Event::BackupFinished { app_id, result: Err("Wait for the download to finish before backing up this game.".into()) });
+                return None;
+            }
+            if is_verifying(app_id) || storage_busy(jobs, app_id) {
+                sink(Event::BackupFinished { app_id, result: Err("Another file operation is already in progress for this game.".into()) });
+                return None;
+            }
+            let progress = std::sync::Arc::new(local::manage::Progress::default());
+            progress.total_bytes.store(game.size_on_disk.max(1), std::sync::atomic::Ordering::Relaxed);
+            jobs.lock().unwrap().backing_up.insert(app_id, progress.clone());
+            sink(Event::BackupProgress { app_id, done_bytes: 0, total_bytes: game.size_on_disk.max(1) });
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (p_tick, d_tick, s_tick) = (progress.clone(), done.clone(), sink.clone());
+            spawn_storage_ticker(p_tick, d_tick, move |done_bytes, total_bytes| {
+                s_tick(Event::BackupProgress { app_id, done_bytes, total_bytes });
+            });
+            let (jobs2, sink2) = (jobs.clone(), sink.clone());
+            tokio::task::spawn_blocking(move || {
+                let result = local::manage::backup_game(&game, &dest_dir, &progress);
+                done.store(true, std::sync::atomic::Ordering::Relaxed);
+                jobs2.lock().unwrap().backing_up.remove(&app_id);
+                sink2(Event::BackupFinished { app_id, result });
+            });
+            None
+        }
+        Command::CancelBackup { app_id } => {
+            if let Some(p) = jobs.lock().unwrap().backing_up.get(&app_id) {
+                p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            None
+        }
+        Command::RestoreGame { backup_dir, dest_library } => {
+            if jobs.lock().unwrap().restoring.is_some() {
+                sink(Event::RestoreFinished { result: Err("Another backup restore is already in progress.".into()) });
+                return None;
+            }
+            let info = match local::manage::inspect_backup(&backup_dir) {
+                Ok(i) => i,
+                Err(e) => {
+                    sink(Event::RestoreFinished { result: Err(e) });
+                    return None;
+                }
+            };
+            let app_id = info.app_id;
+            if is_running(app_id) {
+                sink(Event::RestoreFinished { result: Err("Close the game before restoring a backup for it.".into()) });
+                return None;
+            }
+            if is_downloading(app_id) {
+                sink(Event::RestoreFinished { result: Err("Wait for the download to finish before restoring a backup for this game.".into()) });
+                return None;
+            }
+            if is_verifying(app_id) || storage_busy(jobs, app_id) {
+                sink(Event::RestoreFinished { result: Err("Another file operation is already in progress for this game.".into()) });
+                return None;
+            }
+            let progress = std::sync::Arc::new(local::manage::Progress::default());
+            progress.total_bytes.store(info.total_bytes.max(1), std::sync::atomic::Ordering::Relaxed);
+            jobs.lock().unwrap().restoring = Some((app_id, progress.clone()));
+            let name = info.name.clone();
+            sink(Event::RestoreProgress { app_id, name: name.clone(), done_bytes: 0, total_bytes: info.total_bytes.max(1) });
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (p_tick, d_tick, s_tick, n_tick) = (progress.clone(), done.clone(), sink.clone(), name);
+            spawn_storage_ticker(p_tick, d_tick, move |done_bytes, total_bytes| {
+                s_tick(Event::RestoreProgress { app_id, name: n_tick.clone(), done_bytes, total_bytes });
+            });
+            let (jobs2, sink2) = (jobs.clone(), sink.clone());
+            tokio::task::spawn_blocking(move || {
+                let result = local::manage::restore_game(&backup_dir, &dest_library, &progress);
+                done.store(true, std::sync::atomic::Ordering::Relaxed);
+                jobs2.lock().unwrap().restoring = None;
+                sink2(Event::RestoreFinished { result });
+            });
+            None
+        }
+        Command::CancelRestore => {
+            if let Some((_, p)) = &jobs.lock().unwrap().restoring {
+                p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            None
+        }
+        other => Some(other),
+    }
+}
+
 pub async fn run(mut cmds: Cmds, sink: Sink) {
     // A login command that arrived while another login was waiting.
     let mut next: Option<Command> = None;
+    let storage: SharedStorageJobs = Default::default();
     loop {
         let cmd = match next.take() {
             Some(c) => c,
@@ -34,6 +208,9 @@ pub async fn run(mut cmds: Cmds, sink: Sink) {
                 Some(c) => c,
                 None => return,
             },
+        };
+        let Some(cmd) = handle_storage_command(cmd, &storage, |_| false, |_| false, |_| false, &sink) else {
+            continue;
         };
         let login = match cmd {
             Command::LoginPassword { account, password } => Login::Password { account, password },
@@ -71,7 +248,7 @@ pub async fn run(mut cmds: Cmds, sink: Sink) {
             _ => None,
         };
         sink(Event::Connecting);
-        match session(login, &mut cmds, &sink, &mut next).await {
+        match session(login, &mut cmds, &sink, &mut next, &storage).await {
             Ok(reason) => sink(Event::LoggedOut { reason }),
             Err(_) if next.is_some() => {} // replaced by a newer login
             Err(e) if saved.is_some() && is_network(&e) => {
@@ -184,12 +361,12 @@ async fn reconnect(account: store::SavedAccount) -> Result<(Connection, net::con
     Ok((conn, events, info))
 }
 
-async fn session(login: Login, cmds: &mut Cmds, sink: &Sink, next: &mut Option<Command>) -> Result<String, Error> {
+async fn session(login: Login, cmds: &mut Cmds, sink: &Sink, next: &mut Option<Command>, storage: &SharedStorageJobs) -> Result<String, Error> {
     if let Login::Offline(account) = &login {
         if offline::load_account(account.steam_id).is_none() {
             return Err(Error::Other("This account hasn't signed in online on this PC yet, so it can't start in offline mode.".into()));
         }
-        return online(None, cmds, sink, account).await;
+        return online(None, cmds, sink, account, storage).await;
     }
     let (conn, mut events) = connect_any().await?;
     conn.send(emsg::CLIENT_HELLO, &CMsgClientHello { protocol_version: Some(PROTOCOL_VERSION) })?;
@@ -232,7 +409,7 @@ async fn session(login: Login, cmds: &mut Cmds, sink: &Sink, next: &mut Option<C
     let info = logon(&conn, &mut events, &account).await?;
     store::upsert(account.clone());
     sink(Event::LoggedIn { steam_id: info.steam_id, account: account.account_name.clone() });
-    online(Some((conn, events, info)), cmds, sink, &account).await
+    online(Some((conn, events, info)), cmds, sink, &account, storage).await
 }
 
 async fn guard_flow(
@@ -428,6 +605,7 @@ async fn online(
     cmds: &mut Cmds,
     sink: &Sink,
     account: &store::SavedAccount,
+    storage: &SharedStorageJobs,
 ) -> Result<String, Error> {
     launch::repair_registry();
     let (ipc_server, mut ipc_rx) = crate::ipc::Server::start();
@@ -747,15 +925,22 @@ async fn online(
                     sink(Event::GameAttached { app_id, env: st.ipc.env_value(&token) });
                 }
                 // Like Steam: no playing while the game's files are changing.
-                Some(Command::Launch { app_id, .. }) if st.verifying.contains_key(&app_id) || st.active.as_ref().is_some_and(|(a, _)| *a == app_id) => {
-                    sink(Event::StoreError("This game is being updated or verified. You can play when that finishes.".into()));
+                Some(Command::Launch { app_id, .. })
+                    if st.verifying.contains_key(&app_id)
+                        || st.active.as_ref().is_some_and(|(a, _)| *a == app_id)
+                        || storage_busy(storage, app_id) =>
+                {
+                    sink(Event::StoreError("This game is being updated, verified, or moved. You can play when that finishes.".into()));
                 }
                 Some(Command::VerifyGame { game, steam_root }) => {
                     let app_id = game.app_id;
                     if st.running.contains_key(&app_id) {
                         sink(Event::VerifyFinished { app_id, result: Err("Close the game before verifying its files.".into()) });
-                    } else if st.verifying.contains_key(&app_id) || st.active.as_ref().is_some_and(|(a, _)| *a == app_id) {
-                        sink(Event::VerifyFinished { app_id, result: Err("This game is already being updated or verified.".into()) });
+                    } else if st.verifying.contains_key(&app_id)
+                        || st.active.as_ref().is_some_and(|(a, _)| *a == app_id)
+                        || storage_busy(storage, app_id)
+                    {
+                        sink(Event::VerifyFinished { app_id, result: Err("This game is already being updated, verified, or moved.".into()) });
                     } else {
                         let progress = std::sync::Arc::new(local::manage::Progress::default());
                         st.verifying.insert(app_id, progress.clone());
@@ -816,6 +1001,18 @@ async fn online(
                     }
                 }
                 Some(Command::SyncWorkshop { app_id }) => st.sync_workshop(app_id, Vec::new(), sink),
+                Some(Command::InspectInputConfig { app_id, install_dir }) => {
+                    let root = st
+                        .steam_root
+                        .clone()
+                        .or_else(|| launch::reg_string("Software\\Valve\\Steam", "SteamPath").map(|p| std::path::PathBuf::from(p.replace('/', "\\"))))
+                        .unwrap_or_default();
+                    let (conn, me, sink) = (st.conn.clone(), st.me, sink.clone());
+                    tokio::spawn(async move {
+                        let report = crate::input_config::inspect(&conn, app_id, me, &root, &install_dir).await;
+                        sink(Event::InputConfigInspected(report));
+                    });
+                }
                 Some(Command::LaunchWithoutCloud { app_id, install_dir, args }) => launch_now!(app_id, install_dir, args),
                 Some(Command::SkipShaderCompile { app_id }) => {
                     if let Some(cancel) = st.shader_jobs.get(&app_id) {
@@ -1281,13 +1478,17 @@ async fn online(
                 Some(Command::LoadAchievements { app_id, language }) => st.load_achievements(app_id, language, sink),
                 Some(Command::ActivateKey { key }) => st.activate_key(key, sink),
                 Some(Command::Install(req)) => {
-                    // A download being cancelled doesn't count: "Apply now" restarts it.
-                    let running = st.active.as_ref().is_some_and(|(a, p)| *a == req.app_id && !p.cancel.load(std::sync::atomic::Ordering::Relaxed));
-                    if !running && !st.queue.iter().any(|q| q.app_id == req.app_id) {
-                        st.queue.push_back(req);
+                    if storage_busy(storage, req.app_id) {
+                        sink(Event::DownloadFinished { app_id: req.app_id, result: Err("Wait for the file operation to finish before updating this game.".into()) });
+                    } else {
+                        // A download being cancelled doesn't count: "Apply now" restarts it.
+                        let running = st.active.as_ref().is_some_and(|(a, p)| *a == req.app_id && !p.cancel.load(std::sync::atomic::Ordering::Relaxed));
+                        if !running && !st.queue.iter().any(|q| q.app_id == req.app_id) {
+                            st.queue.push_back(req);
+                        }
+                        st.pump(sink, &dl_tx);
+                        st.save_downloads();
                     }
-                    st.pump(sink, &dl_tx);
-                    st.save_downloads();
                 }
                 Some(Command::PauseDownload { app_id }) => {
                     st.auto_paused = false;
@@ -1372,7 +1573,18 @@ async fn online(
                             .await;
                     });
                 }
-                Some(other) => tracing::debug!("ignored while signed in: {other:?}"),
+                Some(other) => {
+                    if let Some(unhandled) = handle_storage_command(
+                        other,
+                        storage,
+                        |id| st.running.contains_key(&id),
+                        |id| st.active.as_ref().is_some_and(|(a, _)| *a == id) || st.queue.iter().any(|q| q.app_id == id),
+                        |id| st.verifying.contains_key(&id),
+                        sink,
+                    ) {
+                        tracing::debug!("ignored while signed in: {unhandled:?}");
+                    }
+                }
             },
             Some(apps) = apps_rx.recv() => {
                 st.apps = apps.iter().map(|a| (a.app_id, a.clone())).collect();
@@ -2658,11 +2870,15 @@ impl Online {
                 self.running.insert(app_id, 0);
                 self.official.insert(app_id, dir.to_path_buf());
                 #[cfg(not(windows))]
-                let overlay = self.ipc.overlay_port().map(|port| {
-                    let tok = self.ipc.register(app_id);
-                    self.launch_tokens.insert(app_id, tok.clone());
-                    (port, tok)
-                });
+                let overlay = if launch::app_overlay_enabled(app_id) {
+                    self.ipc.overlay_port().map(|port| {
+                        let tok = self.ipc.register(app_id);
+                        self.launch_tokens.insert(app_id, tok.clone());
+                        (port, tok)
+                    })
+                } else {
+                    None
+                };
                 #[cfg(windows)]
                 let overlay: Option<(u16, String)> = None;
                 let (tx, sink, args, dir2) = (exit_tx.clone(), sink.clone(), args.clone(), dir.to_path_buf());
@@ -2682,8 +2898,23 @@ impl Online {
                 let dll = launch::steamclient_dll(is64);
                 let account_id = model::account_id(self.me);
                 let swapped = dll.as_deref().ok_or_else(|| "steamclient DLL missing".to_string()).and_then(|d| launch::swap_begin(&token, d, is64, account_id));
-                let pads = swapped.is_ok().then(crate::pads::start).flatten();
-                let started = swapped.and_then(|_| launch::spawn_with_steamclient(app, dir, args, &self.ipc.env_value(&token), &self.account, pads.as_deref()));
+                let ctrl_override = crate::pads::effective_controller_override(app_id, args.controller);
+                let input_decision = crate::pads::resolve_steam_input(ctrl_override, &crate::pads::settings().families);
+                let pads = (swapped.is_ok() && input_decision.enabled && input_decision.use_shm_bridge)
+                    .then(crate::pads::start)
+                    .flatten();
+                #[cfg(target_os = "linux")]
+                let overlay = if launch::app_overlay_enabled(app_id) {
+                    self.ipc.overlay_port().map(|port| (port, token.clone()))
+                } else {
+                    None
+                };
+                #[cfg(not(target_os = "linux"))]
+                let overlay: Option<(u16, String)> = None;
+                let started = swapped.and_then(|_| {
+                    let ov = overlay.as_ref().map(|(p, t)| (*p, t.as_str()));
+                    launch::spawn_with_steamclient(app, dir, args, &self.ipc.env_value(&token), &self.account, pads.as_deref(), ov)
+                });
                 if started.is_err() && pads.is_some() {
                     crate::pads::stop();
                 }
@@ -2707,10 +2938,34 @@ impl Online {
                     }
                 }
             }
-            crate::LaunchMode::NoSteam { .. } => match launch::spawn(app, dir, args) {
-                Ok(child) => self.track(app_id, dir, child, sink, exit_tx)?,
-                Err(e) => sink(Event::Error(e)),
-            },
+            crate::LaunchMode::NoSteam { .. } => {
+                #[cfg(target_os = "linux")]
+                let overlay = if launch::app_overlay_enabled(app_id) {
+                    self.ipc.overlay_port().map(|port| {
+                        let tok = self.ipc.register(app_id);
+                        (port, tok)
+                    })
+                } else {
+                    None
+                };
+                #[cfg(not(target_os = "linux"))]
+                let overlay: Option<(u16, String)> = None;
+                let ov = overlay.as_ref().map(|(p, t)| (*p, t.as_str()));
+                match launch::spawn(app, dir, args, ov) {
+                    Ok(child) => {
+                        if let Some((_, tok)) = overlay {
+                            self.launch_tokens.insert(app_id, tok);
+                        }
+                        self.track(app_id, dir, child, sink, exit_tx)?;
+                    }
+                    Err(e) => {
+                        if let Some((_, tok)) = overlay {
+                            self.ipc.forget(&tok);
+                        }
+                        sink(Event::Error(e));
+                    }
+                }
+            }
         }
         Ok(())
     }

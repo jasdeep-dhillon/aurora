@@ -38,10 +38,12 @@ enum Win {
     Community,
     /// The game's store page.
     Store,
+    /// Local screenshots taken during the game.
+    Screenshots,
 }
 
 impl Win {
-    const ALL: [Win; 7] = [Win::Overview, Win::Achievements, Win::Friends, Win::Chat, Win::Notes, Win::Community, Win::Store];
+    const ALL: [Win; 8] = [Win::Overview, Win::Achievements, Win::Friends, Win::Chat, Win::Notes, Win::Community, Win::Store, Win::Screenshots];
 }
 
 #[derive(Clone, Copy)]
@@ -71,7 +73,7 @@ pub struct Overlay {
     notes: String,
     search: String,
     show_offline: bool,
-    wins: [WinState; 7],
+    wins: [WinState; 8],
     /// Focus was given to the overlay since it opened.
     focused: bool,
     /// The window that had focus when the overlay opened (the game), so it
@@ -95,6 +97,16 @@ pub struct Overlay {
     pub ingame: Option<crate::ingame::Session>,
     /// Actions from in-game overlay frames, for the main window to apply.
     pending: Vec<Action>,
+    /// Live FPS reported by the in-game hook.
+    fps: Option<u32>,
+    /// Cached list of local screenshots for the running game.
+    screenshots: Vec<client::ingame::LocalScreenshot>,
+    screenshots_dirty: bool,
+    /// Pending screenshot request from the overlay UI button.
+    take_shot_requested: bool,
+    /// App ID whose notes are currently loaded, and debounce timestamp for saving.
+    notes_app: Option<AppId>,
+    notes_dirty: Option<Instant>,
 }
 
 impl Overlay {
@@ -113,7 +125,7 @@ impl Overlay {
         let main = ctx.clone();
         client::ingame::set_waker(move || crate::ingame::wake(&main, std::time::Duration::ZERO));
         let closed = WinState { open: false, pinned: false, opacity: 0.85 };
-        let mut wins = [closed; 7];
+        let mut wins = [closed; 8];
         // Like Steam: the game overview and friends open by default.
         wins[Win::Overview as usize].open = true;
         wins[Win::Friends as usize].open = true;
@@ -144,6 +156,12 @@ impl Overlay {
             preview: std::env::args().find_map(|a| a.strip_prefix("--overlay-open=").map(String::from)),
             ingame: None,
             pending: Vec::new(),
+            fps: None,
+            screenshots: Vec::new(),
+            screenshots_dirty: true,
+            take_shot_requested: false,
+            notes_app: None,
+            notes_dirty: None,
         }
     }
 
@@ -151,10 +169,18 @@ impl Overlay {
     /// (see `sync_hotkey`), so it keeps working normally everywhere else
     /// and the overlay never pops up over other apps.
     pub fn game_started(&mut self, app_id: AppId, enabled: bool) {
+        self.flush_notes();
         self.game = Some((app_id, Instant::now()));
         self.asked = false;
         self.enabled = enabled;
         self.checked = None;
+        self.fps = None;
+        self.screenshots.clear();
+        self.screenshots_dirty = true;
+        self.take_shot_requested = false;
+        self.notes_app = Some(app_id);
+        self.notes_dirty = None;
+        self.notes = std::fs::read_to_string(notes_path(app_id)).unwrap_or_default();
     }
 
     /// Register Shift+Tab only while the game is the focused window (or the
@@ -178,9 +204,15 @@ impl Overlay {
     }
 
     pub fn game_stopped(&mut self) {
+        self.flush_notes();
         self.game = None;
         self.ingame = None;
         self.open = false;
+        self.fps = None;
+        self.screenshots.clear();
+        self.screenshots_dirty = true;
+        self.take_shot_requested = false;
+        self.notes_app = None;
         for w in &mut self.wins {
             w.pinned = false;
         }
@@ -189,6 +221,18 @@ impl Overlay {
                 let _ = m.unregister(self.hotkey);
             }
             self.registered = false;
+        }
+    }
+
+    fn flush_notes(&mut self) {
+        if let Some(app_id) = self.notes_app {
+            if self.notes_dirty.take().is_some() {
+                let path = notes_path(app_id);
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(path, &self.notes);
+            }
         }
     }
 
@@ -409,22 +453,29 @@ fn poll_ingame(app: &mut SteamApp, ctx: &egui::Context) {
         if app.overlay.game.is_some_and(|(id, _)| id != conn.app_id) {
             tracing::info!("in-game overlay from app {} while {:?} runs; using it anyway", conn.app_id, app.overlay.game);
         }
-        app.overlay.ingame = Some(crate::ingame::Session::new(conn, ctx, &app._rt, &app.prefs.theme));
+        let session = crate::ingame::Session::new(conn, ctx, &app._rt, &app.prefs.theme);
+        // Shift+Tab to toggle overlay, F12 to take a screenshot.
+        session.send_config(client::ingame::wire::MOD_SHIFT, 0x09, 0, 0x7B);
+        app.overlay.ingame = Some(session);
         // Let go of Shift+Tab now: the game handles it.
         app.overlay.checked = None;
         app.overlay.open = false;
     }
-    let enabled = app.overlay.enabled;
+    let enabled = app.overlay.enabled && app.prefs.overlay_enabled;
     let Some(s) = app.overlay.ingame.as_mut() else { return };
-    let (alive, opened) = s.poll();
-    if !alive {
+    let res = s.poll();
+    if !res.alive {
         tracing::info!("in-game overlay connection closed");
         app.overlay.ingame = None;
         app.overlay.open = false;
+        app.overlay.fps = None;
         app.overlay.checked = None;
         return;
     }
-    match opened {
+    if let Some(fps) = res.fps {
+        app.overlay.fps = Some(fps);
+    }
+    match res.opened {
         // Overlay turned off for this game: don't open.
         Some(true) if !enabled => s.set_open(false),
         Some(open) => {
@@ -434,6 +485,29 @@ fn poll_ingame(app: &mut SteamApp, ctx: &egui::Context) {
             app.overlay.game_window = 0;
         }
         None => {}
+    }
+    let now = ctx.input(|i| i.time);
+    if let Some(ok) = res.screenshot_saved {
+        if ok {
+            app.overlay.screenshots_dirty = true;
+            app.toast(now, t!("Screenshot saved"), "");
+        } else {
+            app.toast(now, t!("Couldn't save screenshot"), "");
+        }
+    }
+    if let Some((w, h, rgb)) = res.screenshot_rgb {
+        let app_id = app.overlay.game.map(|(id, _)| id).or_else(|| app.overlay.ingame.as_ref().map(|s| s.conn.app_id)).unwrap_or(0);
+        let account_id = (app.state.steam_id & 0xFFFF_FFFF) as u32;
+        match client::ingame::save_screenshot_rgb(&app.local.steam_root, account_id, app_id, w, h, rgb) {
+            Ok(_) => {
+                app.overlay.screenshots_dirty = true;
+                app.toast(now, t!("Screenshot saved"), "");
+            }
+            Err(e) => {
+                tracing::warn!("saving streamed screenshot failed: {e}");
+                app.toast(now, t!("Couldn't save screenshot"), e);
+            }
+        }
     }
 }
 
@@ -459,12 +533,17 @@ fn load_once(app: &mut SteamApp) {
 fn ingame_frame(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) {
     load_once(app);
     let Some(mut s) = app.overlay.ingame.take() else { return };
+    if std::mem::take(&mut app.overlay.take_shot_requested) {
+        s.take_screenshot();
+    }
     let t = app.prefs.theme.clone();
     s.theme(&t);
     // Opened or closed here (tray, a game's dialog request): tell the game.
     s.set_open(app.overlay.open);
     let active = app.overlay.open;
-    let draw = active || app.overlay.any_pinned();
+    let fps_visible = app.prefs.fps_counter != crate::builtin::settings::FpsCorner::Off && app.overlay.fps.is_some();
+    let has_toasts = !app.toasts.is_empty();
+    let draw = active || app.overlay.any_pinned() || fps_visible || has_toasts;
     let mut close = false;
     s.run(ctx, draw, |ui| close |= content(app, ui, &t, actions, active));
     if close {
@@ -682,14 +761,23 @@ fn content(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
         }
     });
     let ctx = ui.ctx().clone();
+    fps_hud(app, &ctx, t);
+    toasts_hud(app, &ctx, t);
     overview_window(app, &ctx, t);
     achievements_window(app, &ctx, t);
     friends_window(app, &ctx, t, actions);
     chat_window(app, &ctx, t, actions);
     notes_window(app, &ctx, t);
+    screenshots_window(app, &ctx, t);
     community_window(app, &ctx, t, actions);
     store_window(app, &ctx, t, actions);
     crate::builtin::group_chat::modals(&ctx, t, &app.state, &app.client, &mut app.overlay.group_ui);
+    if active && app.overlay.ingame.is_some() {
+        software_cursor(&ctx);
+    }
+    if app.overlay.notes_dirty.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(1)) {
+        app.overlay.flush_notes();
+    }
     // The clock and session time.
     ctx.request_repaint_after(std::time::Duration::from_secs(1));
     close
@@ -767,6 +855,9 @@ fn top_strip(app: &mut SteamApp, ui: &mut Ui, t: &Theme) {
     }
     toggle(&mut m, Win::Friends, icons::USERS, t!("Friends"), unread);
     toggle(&mut m, Win::Notes, icons::NOTE, t!("Notes"), 0);
+    if game.is_some() {
+        toggle(&mut m, Win::Screenshots, icons::CAMERA, t!("Screenshots"), 0);
+    }
     if let Some(id) = game {
         use crate::builtin::hub::View;
         let now = if app.overlay.win(Win::Community).open { app.overlay.community.current().cloned() } else { None };
@@ -1259,13 +1350,176 @@ fn chat_window(app: &mut SteamApp, ctx: &egui::Context, t: &Theme, actions: &mut
     }
 }
 
+/// Draw a crisp software arrow cursor inside the in-game overlay so games that
+/// hide the OS/X11 cursor (like Helldivers 2) still show a visible pointer.
+fn software_cursor(ctx: &egui::Context) {
+    let Some(p) = ctx.pointer_hover_pos() else { return };
+    let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("ov-soft-cursor"));
+    let painter = ctx.layer_painter(layer);
+    let pts = [
+        p,
+        p + vec2(0.0, 17.0),
+        p + vec2(4.2, 13.2),
+        p + vec2(7.4, 19.5),
+        p + vec2(9.8, 18.3),
+        p + vec2(6.8, 12.2),
+        p + vec2(12.2, 12.2),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        vec![pts[0], pts[1], pts[2], pts[6]],
+        Color32::WHITE,
+        Stroke::new(1.5, Color32::BLACK),
+    ));
+    painter.line_segment([pts[2], pts[3]], Stroke::new(3.0, Color32::BLACK));
+    painter.line_segment([pts[2], pts[3]], Stroke::new(1.6, Color32::WHITE));
+}
+
+fn notes_path(app_id: AppId) -> std::path::PathBuf {
+    client::store::config_dir().join("notes").join(format!("{app_id}.txt"))
+}
+
 fn notes_window(app: &mut SteamApp, ctx: &egui::Context, t: &Theme) {
     let screen = ctx.content_rect();
     let pos = pos2(520.0, (screen.bottom() - 460.0).max(STRIP + 80.0));
     ov_window(app, ctx, t, Win::Notes, &t!("Notes"), pos, vec2(360.0, 420.0), |app, ui| {
-        ui.label(w::text(t!("Jot things down while you play. Kept until you close the app."), 12.0, t.text_dim));
+        ui.label(w::text(t!("Jot things down while you play. Saved automatically for this game."), 12.0, t.text_dim));
         ui.add_space(6.0);
         let size = ui.available_size();
-        ui.add_sized(size, egui::TextEdit::multiline(&mut app.overlay.notes).font(w::font(14.0))).with_edit_menu();
+        if ui.add_sized(size, egui::TextEdit::multiline(&mut app.overlay.notes).font(w::font(14.0))).with_edit_menu().changed() {
+            app.overlay.notes_dirty = Some(Instant::now());
+        }
     });
+}
+
+fn screenshots_window(app: &mut SteamApp, ctx: &egui::Context, t: &Theme) {
+    let Some((id, _)) = app.overlay.game else { return };
+    if app.overlay.win(Win::Screenshots).open && app.overlay.screenshots_dirty {
+        let account = (app.state.steam_id & 0xFFFF_FFFF) as u32;
+        app.overlay.screenshots = client::ingame::list_screenshots(&app.local.steam_root, account, id);
+        app.overlay.screenshots_dirty = false;
+    }
+    let screen = ctx.content_rect();
+    let pos = pos2(160.0, STRIP + 60.0);
+    let mut delete_path: Option<std::path::PathBuf> = None;
+    ov_window(app, ctx, t, Win::Screenshots, &t!("Screenshots"), pos, vec2(520.0, (screen.height() - STRIP - 140.0).clamp(320.0, 620.0)), |app, ui| {
+        ui.horizontal_wrapped(|ui| {
+            if w::button(ui, t, Some(icons::CAMERA), t!("Take screenshot (F12)"), w::Kind::Primary, w::Size::Sm).clicked() {
+                app.overlay.take_shot_requested = true;
+                // Close overlay so the screenshot captures the game itself.
+                app.overlay.open = false;
+            }
+            if w::button(ui, t, Some(icons::FOLDER), t!("Open folder"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                let account = (app.state.steam_id & 0xFFFF_FFFF) as u32;
+                let dir = client::ingame::screenshots_dir(&app.local.steam_root, account, id);
+                let _ = std::fs::create_dir_all(&dir);
+                local::open_folder(&dir);
+            }
+            if w::button(ui, t, Some(icons::RESTORE), t!("Refresh"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                app.overlay.screenshots_dirty = true;
+            }
+        });
+        ui.add_space(8.0);
+        if app.overlay.screenshots.is_empty() {
+            ui.label(w::text(t!("No screenshots for this game yet. Press F12 while playing to capture one."), 13.0, t.text_faint));
+            return;
+        }
+        egui::ScrollArea::vertical().id_salt("ov-screenshots").auto_shrink([false, false]).show(ui, |ui| {
+            for shot in &app.overlay.screenshots {
+                egui::Frame::new()
+                    .fill(t.surface)
+                    .stroke(Stroke::new(1.0, t.border))
+                    .corner_radius(t.corner_small())
+                    .inner_margin(Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(w::text_medium(&shot.name, 13.0, t.text));
+                                ui.label(w::text(shot.path.display().to_string(), 11.0, t.text_faint));
+                            });
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if w::icon_button(ui, t, icons::TRASH, t!("Delete"), false, 0).clicked() {
+                                    delete_path = Some(shot.path.clone());
+                                }
+                                if w::icon_button(ui, t, icons::EXTERNAL, t!("Open"), false, 0).clicked() {
+                                    let _ = open::that(&shot.path);
+                                }
+                            });
+                        });
+                    });
+                ui.add_space(6.0);
+            }
+        });
+    });
+    if let Some(path) = delete_path {
+        if client::ingame::delete_screenshot(&path).is_ok() {
+            app.overlay.screenshots_dirty = true;
+        }
+    }
+}
+
+fn fps_hud(app: &SteamApp, ctx: &egui::Context, t: &Theme) {
+    use crate::builtin::settings::FpsCorner;
+    let corner = app.prefs.fps_counter;
+    if corner == FpsCorner::Off {
+        return;
+    }
+    let Some(fps) = app.overlay.fps else { return };
+    let (align, offset) = match corner {
+        FpsCorner::Off => return,
+        FpsCorner::TopLeft => (Align2::LEFT_TOP, vec2(12.0, if app.overlay.open { STRIP + 10.0 } else { 10.0 })),
+        FpsCorner::TopRight => (Align2::RIGHT_TOP, vec2(-12.0, if app.overlay.open { STRIP + 10.0 } else { 10.0 })),
+        FpsCorner::BottomLeft => (Align2::LEFT_BOTTOM, vec2(12.0, -10.0)),
+        FpsCorner::BottomRight => (Align2::RIGHT_BOTTOM, vec2(-12.0, -10.0)),
+    };
+    let fg = if app.prefs.fps_high_contrast { Color32::from_rgb(0x4A, 0xFF, 0x4A) } else { t.text_dim };
+    let bg = if app.prefs.fps_high_contrast { Color32::from_black_alpha(190) } else { Color32::from_black_alpha(130) };
+    egui::Area::new(egui::Id::unique("ov-fps-hud"))
+        .anchor(align, offset)
+        .interactable(false)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(bg)
+                .corner_radius(CornerRadius::same(4))
+                .inner_margin(Margin::symmetric(8, 4))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{fps} FPS"))
+                                .font(w::font_bold(13.0))
+                                .color(fg)
+                                .monospace(),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Extend)
+                        .selectable(false),
+                    );
+                });
+        });
+}
+
+fn toasts_hud(app: &SteamApp, ctx: &egui::Context, t: &Theme) {
+    if app.toasts.is_empty() || app.overlay.ingame.is_none() {
+        return;
+    }
+    egui::Area::new(egui::Id::unique("ov-toasts-hud"))
+        .anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -16.0))
+        .interactable(false)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            ui.set_max_width(320.0);
+            for toast in app.toasts.iter().rev().take(3) {
+                egui::Frame::new()
+                    .fill(t.chrome.gamma_multiply(0.94))
+                    .stroke(Stroke::new(1.0, t.border))
+                    .corner_radius(t.corner_small())
+                    .inner_margin(Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.label(w::text_semibold(&toast.title, 13.0, t.text));
+                        if !toast.body.is_empty() {
+                            ui.label(w::text(&toast.body, 12.0, t.text_dim));
+                        }
+                    });
+                ui.add_space(6.0);
+            }
+        });
 }
