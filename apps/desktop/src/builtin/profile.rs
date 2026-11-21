@@ -12,9 +12,13 @@ use ui::{Theme, icons, widgets as w};
 
 #[path = "profile_pages.rs"]
 mod pages;
+#[path = "profile_edit.rs"]
+mod edit;
+#[path = "profile_themes.rs"]
+mod themes;
 
 /// What the profile page shows: the profile, or one of its lists.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
 enum Section {
     #[default]
     Profile,
@@ -24,6 +28,8 @@ enum Section {
     Groups,
     /// A game's card collection (the game and foil set in `Profile::cards`).
     Cards,
+    /// Editing your own profile.
+    Edit,
 }
 
 impl Section {
@@ -35,6 +41,7 @@ impl Section {
             Section::Reviews => "reviews",
             Section::Groups => "groups",
             Section::Cards => "cards",
+            Section::Edit => "edit",
         }
     }
 
@@ -71,6 +78,8 @@ pub struct Profile {
     comment_draft: String,
     /// Which page of comments shows (first comment's index), per profile.
     comment_start: std::collections::HashMap<SteamId, u32>,
+    /// Editing your profile ("Edit profile" pages).
+    edit: edit::EditState,
 }
 
 impl Extension for Profile {
@@ -83,6 +92,7 @@ impl Extension for Profile {
     }
 
     fn on_event(&mut self, event: &client::Event, ctx: &mut Ctx) {
+        self.edit_event(event, ctx);
         if let client::Event::CommentPosted { result, .. } = event {
             match result {
                 Ok(()) => {
@@ -95,8 +105,21 @@ impl Extension for Profile {
     }
 
     fn on_navigate(&mut self, _page: &str, arg: Option<&str>) {
-        let mut parts = arg.unwrap_or_default().split('/');
-        self.viewing = parts.next().and_then(|a| a.parse().ok());
+        // "edit" or "edit/<section>": your profile's settings.
+        if let Some(rest) = arg.and_then(|a| a.strip_prefix("edit")) {
+            if rest.is_empty() || rest.starts_with('/') {
+                self.viewing = None;
+                self.section = Section::Edit;
+                self.edit.section = edit::Section::from_arg(rest.trim_start_matches('/'));
+                return;
+            }
+        }
+        // "<id>/<part>", or just "<part>" ("games", "badges"…) for your own.
+        let mut parts = arg.unwrap_or_default().split('/').peekable();
+        self.viewing = parts.peek().and_then(|a| a.parse().ok());
+        if self.viewing.is_some() || parts.peek() == Some(&"") {
+            parts.next();
+        }
         self.section = Section::from_slug(parts.next());
         self.review_page = 1;
         if self.section == Section::Cards {
@@ -145,6 +168,7 @@ impl Extension for Profile {
                 match self.section {
                     Section::Profile => {}
                     Section::Games => return self.games_page(ui, &t, ctx, id, &display_name, mine),
+                    Section::Edit => return self.edit_page(ui, &t, ctx),
                     other => return self.list_page(ui, &t, ctx, id, &display_name, mine, other),
                 }
                 // Identity header on a translucent panel.
@@ -158,7 +182,9 @@ impl Extension for Profile {
                         ui.horizontal_top(|ui| {
                             let (r, _) = ui.allocate_exact_size(vec2(164.0, 164.0), Sense::hover());
                             let img = r.shrink(14.0);
-                            if !w::paint_cover(ui, img, &art::avatar_full(persona.avatar_hash.as_deref()), CornerRadius::same(6)) {
+                            let still = art::avatar_full(persona.avatar_hash.as_deref());
+                            let avatar_url = info.as_ref().and_then(|i| i.animated_avatar.as_deref()).unwrap_or(&still);
+                            if !w::paint_cover(ui, img, avatar_url, CornerRadius::same(6)) {
                                 w::skeleton(ui, &t, img, CornerRadius::same(6));
                             }
                             if let Some(frame) = info.as_ref().and_then(|i| i.avatar_frame.as_deref()) {
@@ -214,17 +240,19 @@ impl Extension for Profile {
                                 }
                                 if let Some(since) = info.as_ref().and_then(|i| i.member_since) {
                                     ui.add_space(6.0);
-                                    ui.label(w::text(t!("Member since {date}", date = ui::ago(since)), 12.5, t.text_faint));
+                                    ui.label(w::text(t!("Member since {date}", date = ui::date(since)), 12.5, t.text_faint)).on_hover_text(ui::ago(since));
                                 }
                                 ui.add_space(10.0);
                                 ui.horizontal(|ui| {
                                     if !mine && w::button(ui, &t, Some(icons::CHAT), t!("Send a message"), w::Kind::Primary, w::Size::Sm).clicked() {
                                         ctx.act(Action::OpenChat(id));
                                     }
-                                    let label = if mine { t!("Edit profile on Steam") } else { t!("View on Steam") };
-                                    if w::button(ui, &t, Some(icons::EXTERNAL), label, w::Kind::Secondary, w::Size::Sm).clicked() {
-                                        let url = if mine { format!("https://steamcommunity.com/profiles/{id}/edit/info") } else { format!("https://steamcommunity.com/profiles/{id}") };
-                                        crate::links::open_http(&url);
+                                    if mine {
+                                        if w::button(ui, &t, Some(icons::NOTE), t!("Edit profile"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                                            ctx.navigate("profile", Some("edit".into()));
+                                        }
+                                    } else if w::button(ui, &t, Some(icons::EXTERNAL), t!("View on Steam"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                                        crate::links::open_http(&format!("https://steamcommunity.com/profiles/{id}"));
                                     }
                                     if w::button(ui, &t, Some(icons::COPY), t!("Copy SteamID"), w::Kind::Ghost, w::Size::Sm).clicked() {
                                         ui.ctx().copy_text(id.to_string());
@@ -814,7 +842,7 @@ fn game_row(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, g: &model::PlayerGame) {
 }
 
 /// Translucent panel so the profile background shows through.
-fn panel(ui: &mut Ui, t: &Theme, add: impl FnOnce(&mut Ui)) {
+pub(super) fn panel(ui: &mut Ui, t: &Theme, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .fill(t.chrome.gamma_multiply(0.85))
         .stroke(Stroke::new(1.0, t.border))
@@ -872,10 +900,29 @@ fn badge_icon(ui: &mut Ui, t: &Theme, badge: &model::Badge, size: f32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use extensions::Extension;
+
     #[test]
     fn badges_from_card_collections() {
         assert_eq!(super::card_set_of("https://steamcommunity.com/id/x/gamecards/570/"), Some((570, false)));
         assert_eq!(super::card_set_of("https://steamcommunity.com/profiles/1/gamecards/20920/?border=1"), Some((20920, true)));
         assert_eq!(super::card_set_of("https://steamcommunity.com/id/x/badges/13"), None);
+    }
+
+    #[test]
+    fn navigates_to_edit_and_own_sections() {
+        let mut p = super::Profile::default();
+        p.on_navigate("profile", Some("edit"));
+        assert!(p.viewing.is_none() && p.section == super::Section::Edit && p.edit.section == super::edit::Section::General);
+        p.on_navigate("profile", Some("edit/privacy"));
+        assert!(p.viewing.is_none() && p.section == super::Section::Edit && p.edit.section == super::edit::Section::Privacy);
+        p.on_navigate("profile", Some("edit/theme"));
+        assert!(p.viewing.is_none() && p.section == super::Section::Edit && p.edit.section == super::edit::Section::Theme);
+        p.on_navigate("profile", Some("badges"));
+        assert!(p.viewing.is_none() && p.section == super::Section::Badges);
+        p.on_navigate("profile", Some("76561197960265729/games"));
+        assert!(p.viewing == Some(76561197960265729) && p.section == super::Section::Games);
+        p.on_navigate("profile", None);
+        assert!(p.viewing.is_none() && p.section == super::Section::Profile);
     }
 }

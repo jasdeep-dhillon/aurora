@@ -206,21 +206,6 @@ impl SteamApp {
         crate::image_cache::ImageCache::install(&cc.egui_ctx, rt.handle().clone());
         // Store pages and game news, saved next to the pictures.
         store::disk::init(crate::image_cache::dir().with_file_name("pages"));
-        let (tx, events) = mpsc::channel();
-        let demo_tx = tx.clone();
-        let repaint = cc.egui_ctx.clone();
-        let client = Client::spawn(
-            rt.handle(),
-            Arc::new(move |e| {
-                let _ = tx.send(e);
-                repaint.request_repaint_of(egui::ViewportId::ROOT);
-                repaint.request_repaint_of(egui::ViewportId::from_hash_of("friends-window"));
-            }),
-        );
-        // Tell the session the setting before it signs in and would otherwise
-        // resume saved downloads on its own.
-        client.send(Command::SetAutoDownloads(prefs.auto_updates));
-
         // `--no-local`: don't read this PC's Steam library (clean demo screenshots).
         let local = if std::env::args().any(|a| a == "--no-local") {
             LocalState::default()
@@ -229,6 +214,24 @@ impl SteamApp {
                 tracing::warn!("local Steam library: {e}");
                 LocalState::default()
             })
+        };
+
+        let demo = std::env::args().any(|a| a == "--demo");
+        let (tx, events) = mpsc::channel();
+        let repaint = cc.egui_ctx.clone();
+        let sink: client::Sink = Arc::new(move |e| {
+            let _ = tx.send(e);
+            repaint.request_repaint_of(egui::ViewportId::ROOT);
+            repaint.request_repaint_of(egui::ViewportId::from_hash_of("friends-window"));
+        });
+        let client = if demo {
+            crate::demo::spawn(rt.handle(), &local, sink)
+        } else {
+            let c = Client::spawn(rt.handle(), sink);
+            // Tell the session the setting before it signs in and would otherwise
+            // resume saved downloads on its own.
+            c.send(Command::SetAutoDownloads(prefs.auto_updates));
+            c
         };
 
         let flags = std::sync::Arc::new(std::sync::Mutex::new(crate::builtin::settings::AppFlags {
@@ -258,17 +261,14 @@ impl SteamApp {
         let saved = client::store::load();
         // Someone who already signed in here has used the app before.
         let ask_language = ask_language.filter(|_| saved.is_empty());
-        let demo = std::env::args().any(|a| a == "--demo");
         let mut auto_account = None;
-        if demo {
-            for e in crate::demo::events(&local) {
-                let _ = demo_tx.send(e);
-            }
-        } else if let Some(acc) = prefs.auto_login.as_ref().filter(|_| !prefs.ask_account && !std::env::args().any(|a| a == "--no-auto-login")) {
-            if saved.iter().any(|s| &s.account_name == acc) {
-                auto_account = Some(acc.clone());
-                // Offline mode sticks across restarts until "Go online".
-                client.send(if prefs.wants_offline { Command::StartOffline { account: acc.clone() } } else { Command::LoginSaved { account: acc.clone() } });
+        if !demo {
+            if let Some(acc) = prefs.auto_login.as_ref().filter(|_| !prefs.ask_account && !std::env::args().any(|a| a == "--no-auto-login")) {
+                if saved.iter().any(|s| &s.account_name == acc) {
+                    auto_account = Some(acc.clone());
+                    // Offline mode sticks across restarts until "Go online".
+                    client.send(if prefs.wants_offline { Command::StartOffline { account: acc.clone() } } else { Command::LoginSaved { account: acc.clone() } });
+                }
             }
         }
 

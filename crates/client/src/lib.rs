@@ -18,6 +18,7 @@ mod launch;
 pub mod shaders;
 mod installscript;
 pub mod market;
+pub mod profile_edit;
 pub mod social;
 pub mod cloud;
 pub mod reviews;
@@ -171,6 +172,22 @@ pub enum Command {
     /// Steam then asks for confirmation in the Steam Mobile app.
     SellItem { app_id: AppId, context_id: u64, asset_id: u64, amount: u64, receive: u64 },
     LoadMyListings,
+    /// Your profile's editable details, privacy, owned items, themes, and featured badge.
+    LoadProfileEdit { language: String },
+    SaveProfileInfo(Box<model::ProfileEdit>),
+    SaveProfilePrivacy(model::ProfilePrivacy),
+    /// Upload a picture file as your avatar.
+    UploadAvatar { path: std::path::PathBuf },
+    /// Equip a profile item (0 background, 1 mini profile background, 2 avatar
+    /// frame, 3 animated avatar); `id` 0 takes it off.
+    EquipProfileItem { kind: u8, id: u64 },
+    /// Steam's "Full Screen" vs "Original Size" flag for an equipped background.
+    SetBackgroundFullScreen { id: u64, full: bool },
+    /// Feature a community badge on your profile (0 takes it off).
+    SetFavoriteBadge { badge: u32 },
+    SetProfileTheme(String),
+    /// Countries, a country's states, or a state's cities.
+    LoadLocations { country: Option<String>, state: Option<String> },
     /// Your library collections from Steam (Favorites, Hidden, your own).
     LoadSteamCollections,
     /// Write library collections to Steam: `save` are created or replaced
@@ -357,6 +374,15 @@ impl std::fmt::Debug for Command {
             Command::MarketPrice { app_id, hash_name, currency, country, full } => f.debug_struct("MarketPrice").field("app_id", app_id).field("hash_name", hash_name).field("currency", currency).field("country", country).field("full", full).finish(),
             Command::SellItem { app_id, context_id, asset_id, amount, receive } => f.debug_struct("SellItem").field("app_id", app_id).field("context_id", context_id).field("asset_id", asset_id).field("amount", amount).field("receive", receive).finish(),
             Command::LoadMyListings => f.write_str("LoadMyListings"),
+            Command::LoadProfileEdit { language } => f.debug_struct("LoadProfileEdit").field("language", language).finish(),
+            Command::SaveProfileInfo(_) => f.write_str("SaveProfileInfo"),
+            Command::SaveProfilePrivacy(p) => f.debug_tuple("SaveProfilePrivacy").field(p).finish(),
+            Command::UploadAvatar { path } => f.debug_struct("UploadAvatar").field("path", path).finish(),
+            Command::EquipProfileItem { kind, id } => f.debug_struct("EquipProfileItem").field("kind", kind).field("id", id).finish(),
+            Command::SetBackgroundFullScreen { id, full } => f.debug_struct("SetBackgroundFullScreen").field("id", id).field("full", full).finish(),
+            Command::SetFavoriteBadge { badge } => f.debug_struct("SetFavoriteBadge").field("badge", badge).finish(),
+            Command::SetProfileTheme(t) => f.debug_tuple("SetProfileTheme").field(t).finish(),
+            Command::LoadLocations { country, state } => f.debug_struct("LoadLocations").field("country", country).field("state", state).finish(),
             Command::LoadSteamCollections => f.write_str("LoadSteamCollections"),
             Command::SaveSteamCollections { save, delete } => f.debug_struct("SaveSteamCollections").field("save", save).field("delete", delete).finish(),
             Command::LoadComments { steam_id, start } => f.debug_struct("LoadComments").field("steam_id", steam_id).field("start", start).finish(),
@@ -527,6 +553,10 @@ pub enum Event {
     /// Result of [`Command::SellItem`]: `Ok(true)` = needs confirming on your phone.
     ItemListed { asset_id: u64, result: Result<bool, String> },
     MyListings(Result<model::MyListings, String>),
+    ProfileEdit(Result<model::ProfileEdit, String>),
+    ProfileSaved { what: model::ProfileSave, result: Result<(), String> },
+    /// (code, name) for [`Command::LoadLocations`].
+    Locations { country: Option<String>, state: Option<String>, result: Result<Vec<(String, String)>, String> },
     SteamCollections(Result<Vec<model::SteamCollection>, String>),
     /// A `SaveSteamCollections` finished (the same lists, so the library
     /// knows what Steam now has).
@@ -627,6 +657,11 @@ impl Client {
     pub fn spawn(rt: &tokio::runtime::Handle, sink: Sink) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         rt.spawn(session::run(rx, sink));
+        Self { tx }
+    }
+
+    /// Create a client whose commands go to a custom channel (e.g. demo mode or tests).
+    pub fn from_sender(tx: mpsc::UnboundedSender<Command>) -> Self {
         Self { tx }
     }
 
