@@ -355,15 +355,23 @@ pub fn steamclient_dll(is64: bool) -> Option<PathBuf> {
 pub struct LaunchArgs {
     pub user: String,
     pub connect: String,
+    /// Per-game Steam Input override (`0` = default, `1` = enable, `2` = disable).
+    #[serde(default)]
+    pub controller: u8,
 }
 
 impl LaunchArgs {
     pub fn user(user: impl Into<String>) -> Self {
-        Self { user: user.into(), connect: String::new() }
+        Self { user: user.into(), connect: String::new(), controller: 0 }
     }
 
     pub fn connect(connect: impl Into<String>) -> Self {
-        Self { user: String::new(), connect: connect.into() }
+        Self { user: String::new(), connect: connect.into(), controller: 0 }
+    }
+
+    pub fn with_controller(mut self, controller: u8) -> Self {
+        self.controller = controller;
+        self
     }
 }
 
@@ -376,6 +384,28 @@ pub fn spawn(app: &OwnedApp, install_dir: &Path, args: &LaunchArgs) -> Result<Ch
     let connect = safe_connect_args(&args.connect)?;
     let opts = UserOptions::parse(&args.user);
     finish(app, install_dir, &opts, command(app, install_dir, &opts, &connect)?).spawn().map_err(|e| format!("could not start {}: {e}", app.name))
+}
+
+/// Environment variables controlling Steam Input and controller bridging for
+/// a launch with our `steamclient`.
+pub(crate) fn steam_input_env_vars(
+    app_override: u8,
+    settings: &crate::pads::ControllerSettings,
+    pads: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let decision = crate::pads::resolve_steam_input(app_override, &settings.families);
+    let mut env = vec![
+        (crate::pads::ENV_STEAM_INPUT, if decision.enabled { "1" } else { "0" }.to_string()),
+        (crate::pads::ENV_INPUT_FAMILIES, format!("0x{:x}", decision.families_mask)),
+        (crate::pads::ENV_INPUT_CALIBRATION, settings.calibration.encode()),
+    ];
+    if decision.enabled
+        && decision.use_shm_bridge
+        && let Some(name) = pads
+    {
+        env.push((crate::pads::ENV_PADS, name.to_string()));
+    }
+    env
 }
 
 /// Start a game with our steamclient: environment like a Steam launch, plus
@@ -392,8 +422,10 @@ pub fn spawn_with_steamclient(app: &OwnedApp, install_dir: &Path, args: &LaunchA
         .env("SteamEnv", "1")
         .env("SteamAppUser", account)
         .env("SteamUser", account);
-    if let Some(name) = pads {
-        cmd.env(crate::pads::ENV_PADS, name);
+    let ctrl_override = crate::pads::effective_controller_override(app.app_id, args.controller);
+    let ctrl_settings = crate::pads::settings();
+    for (k, v) in steam_input_env_vars(ctrl_override, &ctrl_settings, pads) {
+        cmd.env(k, v);
     }
     if let Some(log) = std::env::var_os("STEAMINRUST_STEAMCLIENT_LOG") {
         cmd.env(crate::ipc::protocol::ENV_LOG, log);
@@ -2928,11 +2960,11 @@ mod tests {
             "-mono-assembly-path=/tmp/evil".into(),
             "+exec autoexec.cfg".into(),
         ] {
-            let args = LaunchArgs { user: "-novid".into(), connect: payload.clone() };
+            let args = LaunchArgs { user: "-novid".into(), connect: payload.clone(), controller: 0 };
             assert!(spawn(&test_app, &dir, &args).is_err(), "spawn must fail closed for {payload}");
             assert!(spawn_with_steamclient(&test_app, &dir, &args, "127.0.0.1:1:tok", "acct", None).is_err());
             assert!(run_through_steam(480, &args, 1, false, || {}).unwrap_err().contains("refusing launch"));
-            assert!(run_through_host(&test_app, &dir, &args, "acct", "tok", 1, || {}).unwrap_err().contains("refusing launch"));
+            assert!(run_through_host(&test_app, &dir, &args, "acct", "tok", 1, None, || {}).unwrap_err().contains("refusing launch"));
             assert!(!pwned.exists(), "evil wrapper executed!");
             assert!(!out.exists(), "game started despite unsafe connect!");
         }
@@ -2941,11 +2973,37 @@ mod tests {
         let ok_args = LaunchArgs {
             user: format!("SAFE_VAR=ok '{}' %command% -novid", good_wrap.display()),
             connect: "+connect 127.0.0.1:27015 +password pass123".into(),
+            controller: 0,
         };
         let mut child = spawn(&test_app, &dir, &ok_args).unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "ok|1|-novid +connect 127.0.0.1:27015 +password pass123");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn steam_input_env_wires_per_game_override_and_global_toggles() {
+        let mut cfg = crate::pads::ControllerSettings::default();
+        // Disabled per game (2): STEAMINRUST_STEAM_INPUT=0 and STEAMINRUST_PADS omitted even if passed.
+        let disabled = steam_input_env_vars(2, &cfg, Some("Local\\sir-pads-1"));
+        assert!(disabled.contains(&(crate::pads::ENV_STEAM_INPUT, "0".into())));
+        assert!(disabled.contains(&(crate::pads::ENV_INPUT_FAMILIES, "0x0".into())));
+        assert!(!disabled.iter().any(|(k, _)| *k == crate::pads::ENV_PADS));
+
+        // Default (0) or Enable (1) with non-Xbox enabled passes STEAMINRUST_PADS and STEAMINRUST_STEAM_INPUT=1.
+        let enabled = steam_input_env_vars(1, &cfg, Some("Local\\sir-pads-1"));
+        assert!(enabled.contains(&(crate::pads::ENV_STEAM_INPUT, "1".into())));
+        assert!(enabled.contains(&(crate::pads::ENV_INPUT_FAMILIES, "0xf".into())));
+        assert!(enabled.contains(&(crate::pads::ENV_PADS, "Local\\sir-pads-1".into())));
+
+        // Xbox-only globally: Steam Input enabled for Xbox, SHM bridge omitted.
+        cfg.families.playstation = false;
+        cfg.families.switch_pro = false;
+        cfg.families.generic = false;
+        let xbox_only = steam_input_env_vars(0, &cfg, Some("Local\\sir-pads-1"));
+        assert!(xbox_only.contains(&(crate::pads::ENV_STEAM_INPUT, "1".into())));
+        assert!(xbox_only.contains(&(crate::pads::ENV_INPUT_FAMILIES, "0x1".into())));
+        assert!(!xbox_only.iter().any(|(k, _)| *k == crate::pads::ENV_PADS));
     }
 }
 

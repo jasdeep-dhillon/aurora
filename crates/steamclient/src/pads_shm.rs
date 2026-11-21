@@ -11,6 +11,26 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 /// Environment variable naming the file mapping (set only on Windows, for
 /// games started with our steamclient while the app reads pads).
 pub const ENV_PADS: &str = "STEAMINRUST_PADS";
+/// `"1"` (or unset) = Steam Input enabled; `"0"` = disabled for this game.
+pub const ENV_STEAM_INPUT: &str = "STEAMINRUST_STEAM_INPUT";
+/// Bitmask of enabled controller families (`FAMILY_*`, decimal or `0x` hex).
+pub const ENV_INPUT_FAMILIES: &str = "STEAMINRUST_INPUT_FAMILIES";
+/// Encoded [`PadCalibration`] parameters for this launch.
+pub const ENV_INPUT_CALIBRATION: &str = "STEAMINRUST_INPUT_CFG";
+
+pub const FAMILY_XBOX: u32 = 1 << 0;
+pub const FAMILY_PLAYSTATION: u32 = 1 << 1;
+pub const FAMILY_SWITCH_PRO: u32 = 1 << 2;
+pub const FAMILY_GENERIC: u32 = 1 << 3;
+pub const FAMILY_ALL: u32 = FAMILY_XBOX | FAMILY_PLAYSTATION | FAMILY_SWITCH_PRO | FAMILY_GENERIC;
+
+/// Slot family code stored inside [`Slot::motion_flags`] (bits 8..16).
+pub const SLOT_FAMILY_UNKNOWN: u8 = 0;
+pub const SLOT_FAMILY_XBOX: u8 = 1;
+pub const SLOT_FAMILY_PLAYSTATION: u8 = 2;
+pub const SLOT_FAMILY_SWITCH_PRO: u8 = 3;
+pub const SLOT_FAMILY_GENERIC: u8 = 4;
+
 pub const SHM_PREFIX: &str = "Local\\sir-pads-";
 pub const MAGIC: u32 = 0x3144_4150; // "PAD1"
 pub const SLOTS: usize = 4;
@@ -109,6 +129,10 @@ pub struct State {
     pub rx: i16,
     pub ry: i16,
     pub has_motion: bool,
+    /// Calibration (deadzones, trigger threshold, Nintendo swap, gyro scale) was already applied.
+    pub calibrated: bool,
+    /// Controller family code (`SLOT_FAMILY_*`).
+    pub family: u8,
     /// Accelerometer (m/s^2) stored as f32 bit patterns so `State` stays `Eq`.
     pub accel_bits: [u32; 3],
     /// Gyroscope (rad/s) stored as f32 bit patterns so `State` stays `Eq`.
@@ -129,6 +153,183 @@ impl State {
     }
 }
 
+/// Calibration, deadzone, gyro, rumble, and layout preferences shared between
+/// Aurora and the injected `steamclient` DLL.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct PadCalibration {
+    pub left_deadzone: f32,
+    pub right_deadzone: f32,
+    pub trigger_threshold: f32,
+    pub gyro_enabled: bool,
+    pub gyro_sensitivity: f32,
+    pub rumble_enabled: bool,
+    pub nintendo_layout: bool,
+}
+
+impl Default for PadCalibration {
+    fn default() -> Self {
+        Self {
+            left_deadzone: 0.15,
+            right_deadzone: 0.15,
+            trigger_threshold: 0.10,
+            gyro_enabled: true,
+            gyro_sensitivity: 1.0,
+            rumble_enabled: true,
+            nintendo_layout: false,
+        }
+    }
+}
+
+impl PadCalibration {
+    pub fn clamped(mut self) -> Self {
+        self.left_deadzone = if self.left_deadzone.is_finite() { self.left_deadzone.clamp(0.0, 0.50) } else { 0.15 };
+        self.right_deadzone = if self.right_deadzone.is_finite() { self.right_deadzone.clamp(0.0, 0.50) } else { 0.15 };
+        self.trigger_threshold = if self.trigger_threshold.is_finite() { self.trigger_threshold.clamp(0.0, 0.50) } else { 0.10 };
+        self.gyro_sensitivity = if self.gyro_sensitivity.is_finite() { self.gyro_sensitivity.clamp(0.1, 4.0) } else { 1.0 };
+        self
+    }
+
+    pub fn encode(&self) -> String {
+        let c = self.clamped();
+        format!(
+            "{:.3},{:.3},{:.3},{},{:.3},{},{}",
+            c.left_deadzone,
+            c.right_deadzone,
+            c.trigger_threshold,
+            u8::from(c.gyro_enabled),
+            c.gyro_sensitivity,
+            u8::from(c.rumble_enabled),
+            u8::from(c.nintendo_layout)
+        )
+    }
+
+    pub fn decode(s: &str) -> Self {
+        let mut d = Self::default();
+        let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+        if let Some(v) = parts.first().and_then(|x| x.parse::<f32>().ok()) {
+            d.left_deadzone = v;
+        }
+        if let Some(v) = parts.get(1).and_then(|x| x.parse::<f32>().ok()) {
+            d.right_deadzone = v;
+        }
+        if let Some(v) = parts.get(2).and_then(|x| x.parse::<f32>().ok()) {
+            d.trigger_threshold = v;
+        }
+        if let Some(v) = parts.get(3).and_then(|x| x.parse::<u8>().ok()) {
+            d.gyro_enabled = v != 0;
+        }
+        if let Some(v) = parts.get(4).and_then(|x| x.parse::<f32>().ok()) {
+            d.gyro_sensitivity = v;
+        }
+        if let Some(v) = parts.get(5).and_then(|x| x.parse::<u8>().ok()) {
+            d.rumble_enabled = v != 0;
+        }
+        if let Some(v) = parts.get(6).and_then(|x| x.parse::<u8>().ok()) {
+            d.nintendo_layout = v != 0;
+        }
+        d.clamped()
+    }
+
+    pub fn apply_to_state(&self, mut s: State) -> State {
+        let c = self.clamped();
+        if c.nintendo_layout {
+            s.buttons = swap_nintendo_buttons(s.buttons);
+        }
+        (s.lx, s.ly) = apply_stick_deadzone(s.lx, s.ly, c.left_deadzone);
+        (s.rx, s.ry) = apply_stick_deadzone(s.rx, s.ry, c.right_deadzone);
+        s.lt = apply_trigger_threshold(s.lt, c.trigger_threshold);
+        s.rt = apply_trigger_threshold(s.rt, c.trigger_threshold);
+        if !c.gyro_enabled {
+            s.has_motion = false;
+            s.accel_bits = [0; 3];
+            s.gyro_bits = [0; 3];
+        } else if s.has_motion && (c.gyro_sensitivity - 1.0).abs() > f32::EPSILON {
+            let g = s.gyro();
+            let scaled = [g[0] * c.gyro_sensitivity, g[1] * c.gyro_sensitivity, g[2] * c.gyro_sensitivity];
+            s.gyro_bits = [scaled[0].to_bits(), scaled[1].to_bits(), scaled[2].to_bits()];
+        }
+        s.calibrated = true;
+        s
+    }
+}
+
+pub fn apply_stick_f32(x: f32, y: f32, deadzone: f32) -> (f32, f32) {
+    let dz = deadzone.clamp(0.0, 0.95);
+    let mag = (x * x + y * y).sqrt();
+    if mag <= dz || mag == 0.0 {
+        return (0.0, 0.0);
+    }
+    let scale = ((mag - dz) / (1.0 - dz)).min(1.0) / mag;
+    ((x * scale).clamp(-1.0, 1.0), (y * scale).clamp(-1.0, 1.0))
+}
+
+pub fn apply_stick_deadzone(x: i16, y: i16, deadzone: f32) -> (i16, i16) {
+    if deadzone <= 0.0 {
+        return (x, y);
+    }
+    let fx = (x as f32 / 32767.0).clamp(-1.0, 1.0);
+    let fy = (y as f32 / 32767.0).clamp(-1.0, 1.0);
+    let (ox, oy) = apply_stick_f32(fx, fy, deadzone);
+    (
+        (ox * 32767.0).round().clamp(-32768.0, 32767.0) as i16,
+        (oy * 32767.0).round().clamp(-32768.0, 32767.0) as i16,
+    )
+}
+
+pub fn apply_trigger_f32(v: f32, threshold: f32) -> f32 {
+    let th = threshold.clamp(0.0, 0.95);
+    let v = v.clamp(0.0, 1.0);
+    if v <= th { 0.0 } else { ((v - th) / (1.0 - th)).clamp(0.0, 1.0) }
+}
+
+pub fn apply_trigger_threshold(v: u8, threshold: f32) -> u8 {
+    if threshold <= 0.0 {
+        return v;
+    }
+    let f = apply_trigger_f32(v as f32 / 255.0, threshold);
+    (f * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// Swap A<->B (`0x1000` <-> `0x2000`) and X<->Y (`0x4000` <-> `0x8000`).
+pub fn swap_nintendo_buttons(buttons: u16) -> u16 {
+    const A: u16 = 0x1000;
+    const B: u16 = 0x2000;
+    const X: u16 = 0x4000;
+    const Y: u16 = 0x8000;
+    let mut out = buttons & !(A | B | X | Y);
+    if buttons & A != 0 { out |= B; }
+    if buttons & B != 0 { out |= A; }
+    if buttons & X != 0 { out |= Y; }
+    if buttons & Y != 0 { out |= X; }
+    out
+}
+
+pub fn family_allowed(mask: u32, slot_family: u8) -> bool {
+    let bit = match slot_family {
+        SLOT_FAMILY_XBOX => FAMILY_XBOX,
+        SLOT_FAMILY_PLAYSTATION => FAMILY_PLAYSTATION,
+        SLOT_FAMILY_SWITCH_PRO => FAMILY_SWITCH_PRO,
+        _ => FAMILY_GENERIC,
+    };
+    mask & bit != 0
+}
+
+pub fn parse_family_mask(raw: Option<&str>) -> u32 {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return FAMILY_ALL;
+    };
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).unwrap_or(FAMILY_ALL)
+    } else {
+        s.parse::<u32>().unwrap_or(FAMILY_ALL)
+    }
+}
+
+pub fn steam_input_env_enabled(raw: Option<&str>) -> bool {
+    !matches!(raw.map(str::trim), Some("0" | "false" | "FALSE" | "off" | "OFF"))
+}
+
 fn pair(a: i16, b: i16) -> u32 {
     a as u16 as u32 | (b as u16 as u32) << 16
 }
@@ -146,7 +347,8 @@ impl Slot {
         self.triggers.store(s0.lt as u32 | (s0.rt as u32) << 8, Ordering::Relaxed);
         self.left.store(pair(s0.lx, s0.ly), Ordering::Relaxed);
         self.right.store(pair(s0.rx, s0.ry), Ordering::Relaxed);
-        self.motion_flags.store(s0.has_motion as u32, Ordering::Relaxed);
+        let flags = (s0.has_motion as u32) | ((s0.calibrated as u32) << 1) | ((s0.family as u32) << 8);
+        self.motion_flags.store(flags, Ordering::Relaxed);
         for i in 0..3 {
             self.accel[i].store(s0.accel_bits[i], Ordering::Relaxed);
             self.gyro[i].store(s0.gyro_bits[i], Ordering::Relaxed);
@@ -164,6 +366,7 @@ impl Slot {
             }
             let connected = self.connected.load(Ordering::Relaxed) != 0;
             let (t, l, r) = (self.triggers.load(Ordering::Relaxed), self.left.load(Ordering::Relaxed), self.right.load(Ordering::Relaxed));
+            let flags = self.motion_flags.load(Ordering::Relaxed);
             let s = State {
                 packet: self.packet.load(Ordering::Relaxed),
                 buttons: self.buttons.load(Ordering::Relaxed) as u16,
@@ -173,7 +376,9 @@ impl Slot {
                 ly: (l >> 16) as u16 as i16,
                 rx: r as u16 as i16,
                 ry: (r >> 16) as u16 as i16,
-                has_motion: self.motion_flags.load(Ordering::Relaxed) != 0,
+                has_motion: flags & 1 != 0,
+                calibrated: flags & 2 != 0,
+                family: ((flags >> 8) & 0xFF) as u8,
                 accel_bits: [
                     self.accel[0].load(Ordering::Relaxed),
                     self.accel[1].load(Ordering::Relaxed),
@@ -449,5 +654,65 @@ mod tests {
         assert!(got.has_motion);
         assert_eq!(got.accel(), [0.0, 9.80665, 0.5]);
         assert_eq!(got.gyro(), [0.25, -0.5, 1.0]);
+    }
+
+    #[test]
+    fn calibration_round_trip_and_apply() {
+        let cal = PadCalibration {
+            left_deadzone: 0.25,
+            right_deadzone: 0.10,
+            trigger_threshold: 0.20,
+            gyro_enabled: false,
+            gyro_sensitivity: 2.5,
+            rumble_enabled: false,
+            nintendo_layout: true,
+        };
+        let encoded = cal.encode();
+        assert_eq!(PadCalibration::decode(&encoded), cal);
+        // Invalid values clamp safely.
+        let clamped = PadCalibration::decode("0.99,-0.5,nan,0,9.0,0,1");
+        assert_eq!(clamped.left_deadzone, 0.50);
+        assert_eq!(clamped.right_deadzone, 0.0);
+        assert_eq!(clamped.gyro_sensitivity, 4.0);
+        assert!(!clamped.gyro_enabled);
+        assert!(clamped.nintendo_layout);
+
+        // Apply swaps A/B and X/Y, zeros inside deadzone/trigger threshold, strips motion when disabled.
+        let mut raw = State {
+            buttons: 0x1000 | 0x4000 | 0x0010, // A | X | START
+            lx: 4000, // ~0.122 < 0.25 deadzone -> 0
+            ly: 0,
+            rx: 32767,
+            ry: 0,
+            lt: 40, // ~0.157 < 0.20 threshold -> 0
+            rt: 255,
+            family: SLOT_FAMILY_SWITCH_PRO,
+            ..Default::default()
+        };
+        raw.set_motion([0.0, 9.8, 0.0], [1.0, 2.0, 3.0]);
+        let applied = cal.apply_to_state(raw);
+        assert!(applied.calibrated);
+        assert_eq!(applied.family, SLOT_FAMILY_SWITCH_PRO);
+        assert_eq!(applied.buttons, 0x2000 | 0x8000 | 0x0010); // B | Y | START
+        assert_eq!((applied.lx, applied.ly), (0, 0));
+        assert_eq!(applied.rx, 32767);
+        assert_eq!(applied.lt, 0);
+        assert_eq!(applied.rt, 255);
+        assert!(!applied.has_motion);
+    }
+
+    #[test]
+    fn family_mask_and_env_helpers() {
+        assert!(steam_input_env_enabled(None));
+        assert!(steam_input_env_enabled(Some("1")));
+        assert!(!steam_input_env_enabled(Some("0")));
+        assert!(!steam_input_env_enabled(Some("false")));
+        assert_eq!(parse_family_mask(None), FAMILY_ALL);
+        assert_eq!(parse_family_mask(Some("0x6")), FAMILY_PLAYSTATION | FAMILY_SWITCH_PRO);
+        assert_eq!(parse_family_mask(Some("5")), FAMILY_XBOX | FAMILY_SWITCH_PRO);
+        assert!(family_allowed(FAMILY_PLAYSTATION, SLOT_FAMILY_PLAYSTATION));
+        assert!(!family_allowed(FAMILY_PLAYSTATION, SLOT_FAMILY_XBOX));
+        assert!(!family_allowed(FAMILY_PLAYSTATION, SLOT_FAMILY_SWITCH_PRO));
+        assert!(family_allowed(FAMILY_GENERIC, SLOT_FAMILY_UNKNOWN));
     }
 }
