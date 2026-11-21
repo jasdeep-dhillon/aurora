@@ -105,13 +105,24 @@ pub struct Settings {
     /// Account details, purchase history, licenses, family.
     acct: super::settings_account::AccountPages,
     flags: SharedFlags,
+    themes: crate::app::SharedThemeManager,
+    confirm_uninstall: Option<String>,
+    option_hex_bufs: std::collections::HashMap<String, String>,
     /// Cached "are we the steam:// handler?" (registry lookups are slow).
     handler: Option<bool>,
 }
 
 impl Settings {
-    pub fn new(flags: SharedFlags) -> Self {
-        Self { section: Section::default(), acct: Default::default(), flags, handler: None }
+    pub fn new(flags: SharedFlags, themes: crate::app::SharedThemeManager) -> Self {
+        Self {
+            section: Section::default(),
+            acct: Default::default(),
+            flags,
+            themes,
+            confirm_uninstall: None,
+            option_hex_bufs: Default::default(),
+            handler: None,
+        }
     }
 }
 
@@ -188,7 +199,7 @@ impl Extension for Settings {
                     Section::Downloads => downloads(ui, &t, ctx, &self.flags),
                     Section::Cloud => cloud(ui, &t, &self.flags),
                     Section::Accessibility => accessibility(ui, &t, ctx, &self.flags),
-                    Section::Appearance => appearance(ui, &t, ctx),
+                    Section::Appearance => appearance(ui, &t, ctx, &self.themes, &mut self.confirm_uninstall, &mut self.option_hex_bufs),
                     Section::Plugins => {
                         w::page_title(ui, &t, t!("Plugins"), Some(t!("Scripts you install yourself. Each one runs in a sandbox and only gets the permissions you approve.")));
                         ctx.settings_for("plugins", ui);
@@ -626,52 +637,398 @@ fn zoom_slider(ui: &mut Ui, ctx: &mut Ctx) {
     }
 }
 
-fn appearance(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
-    w::page_title(ui, t, t!("Appearance"), None);
-    ui.label(w::text_semibold(t!("Theme"), 15.0, t.text));
-    ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
-        for preset in ui::Theme::presets() {
-            let selected = preset.name == t.name;
-            let (rect, resp) = ui.allocate_exact_size(vec2(150.0, 104.0), Sense::click());
-            let p = ui.painter();
-            p.rect_filled(rect, t.corner(), preset.bg);
-            let top = egui::Rect::from_min_size(rect.min, vec2(rect.width(), 18.0));
-            p.rect_filled(top, egui::CornerRadius { nw: t.radius, ne: t.radius, sw: 0, se: 0 }, preset.chrome);
-            p.rect_filled(egui::Rect::from_min_size(rect.min + vec2(12.0, 28.0), vec2(56.0, 38.0)), egui::CornerRadius::same(5), preset.surface);
-            p.rect_filled(egui::Rect::from_min_size(rect.min + vec2(76.0, 28.0), vec2(62.0, 38.0)), egui::CornerRadius::same(5), preset.surface);
-            p.rect_filled(egui::Rect::from_min_size(rect.min + vec2(12.0, 72.0), vec2(36.0, 10.0)), egui::CornerRadius::same(5), preset.accent);
-            p.text(rect.right_bottom() - vec2(10.0, 10.0), egui::Align2::RIGHT_BOTTOM, &preset.name, w::font_semibold(12.0), preset.text);
-            let stroke = if selected { egui::Stroke::new(2.0, t.accent) } else { egui::Stroke::new(1.0, t.border) };
-            p.rect_stroke(rect, t.corner(), stroke, egui::StrokeKind::Outside);
-            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                ctx.act(Action::SetTheme(preset));
-            }
-        }
-    });
-    ui.add_space(16.0);
-    let mut theme = t.clone();
+fn appearance(
+    ui: &mut Ui,
+    t: &Theme,
+    ctx: &mut Ctx,
+    themes_state: &crate::app::SharedThemeManager,
+    confirm_uninstall: &mut Option<String>,
+    option_hex_bufs: &mut std::collections::HashMap<String, String>,
+) {
+    use themes::{OptionKind, OptionValue};
+
+    w::page_title(
+        ui,
+        t,
+        t!("Appearance"),
+        Some("Install and manage declarative theme packages (.zip / .aurora-theme)."),
+    );
+
+    let (themes_dir, mut hot_reload, last_error, active_id, script_error) = {
+        let st = themes_state.lock().unwrap();
+        let script_err = st.manager.resolved.as_ref().and_then(|r| {
+            r.script_error
+                .clone()
+                .or_else(|| r.script.as_ref().and_then(|s| s.error().map(str::to_string)))
+        });
+        (
+            st.manager.themes_dir.clone(),
+            st.hot_reload,
+            st.last_error.clone(),
+            st.manager.active_id.clone(),
+            script_err,
+        )
+    };
+
+    // Top action bar
     w::card(t).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        egui::Grid::new("appearance").num_columns(2).spacing(vec2(32.0, 14.0)).show(ui, |ui| {
-            ui.label(w::text_medium(t!("Accent color"), 14.0, t.text));
-            ui.horizontal(|ui| {
-                ui.color_edit_button_srgba(&mut theme.accent);
-                ui.color_edit_button_srgba(&mut theme.accent_2);
-            });
-            ui.end_row();
-            ui.label(w::text_medium(t!("Corner roundness"), 14.0, t.text));
-            ui.add(egui::Slider::new(&mut theme.radius, 0..=20));
-            ui.end_row();
-            ui.label(w::text_medium(t!("Interface scale"), 14.0, t.text));
-            zoom_slider(ui, ctx);
-            ui.end_row();
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            if w::button(ui, t, Some(icons::PACKAGE), "Install Theme…", w::Kind::Primary, w::Size::Md).clicked() {
+                if let Some(zip_path) = rfd::FileDialog::new()
+                    .add_filter("Aurora Theme", &["zip", "aurora-theme"])
+                    .pick_file()
+                {
+                    match themes::install_zip(&zip_path, &themes_dir) {
+                        Ok(meta) => {
+                            {
+                                let mut st = themes_state.lock().unwrap();
+                                st.manager.scan();
+                            }
+                            ctx.act(Action::ActivateTheme(Some(meta.id.clone())));
+                            ctx.toast(format!("Installed and activated \"{}\"", meta.name));
+                        }
+                        Err(e) => ctx.toast(format!("Install failed: {e}")),
+                    }
+                }
+            }
+            if w::button(ui, t, Some(icons::FOLDER), "Open Themes Folder", w::Kind::Secondary, w::Size::Md).clicked() {
+                let _ = std::fs::create_dir_all(&themes_dir);
+                local::open_folder(&themes_dir);
+            }
+            if w::button(ui, t, Some(icons::REFRESH), "Reload", w::Kind::Ghost, w::Size::Md).clicked() {
+                ctx.act(Action::ReloadThemes);
+                ctx.toast("Themes reloaded");
+            }
+            ui.add_space(6.0);
+            if ui.add(toggle(&mut hot_reload)).changed() {
+                let mut st = themes_state.lock().unwrap();
+                st.hot_reload = hot_reload;
+            }
+            ui.label(w::text_medium("Hot-Reload", 13.0, t.text_dim));
         });
     });
-    if &theme != t {
-        ctx.act(Action::SetTheme(theme));
+
+    if let Some(err) = last_error {
+        ui.add_space(10.0);
+        theme_warning_banner(ui, t, "Theme error", &err);
     }
+    if let Some(err) = script_error {
+        ui.add_space(10.0);
+        theme_warning_banner(ui, t, "theme.rhai script error", &err);
+    }
+
+    ui.add_space(16.0);
+
+    // Default (Aurora) card
+    let default_active = active_id.is_none();
+    egui::Frame::new()
+        .fill(t.surface)
+        .corner_radius(t.corner())
+        .inner_margin(Margin::same(16))
+        .stroke(if default_active {
+            egui::Stroke::new(2.0, t.accent)
+        } else {
+            egui::Stroke::new(1.0, t.border)
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(w::text_semibold("Default (Aurora)", 15.0, t.text));
+                        if default_active {
+                            ui.label(w::text_semibold(format!("{} Active", icons::CHECK), 12.0, t.play));
+                        }
+                    });
+                    ui.label(w::text("Aurora's built-in default interface and layout.", 12.5, t.text_dim));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if !default_active && w::button(ui, t, Some(icons::CHECK), "Activate", w::Kind::Secondary, w::Size::Sm).clicked() {
+                        ctx.act(Action::ActivateTheme(None));
+                    }
+                });
+            });
+        });
+
+    ui.add_space(16.0);
+
+    // Installed Themes list
+    let (installed, broken) = {
+        let st = themes_state.lock().unwrap();
+        (st.manager.installed.clone(), st.manager.broken.clone())
+    };
+
+    ui.label(w::text_semibold(format!("Installed Themes ({})", installed.len()), 15.0, t.text));
+    ui.add_space(8.0);
+
+    if installed.is_empty() {
+        w::empty(
+            ui,
+            t,
+            icons::PALETTE,
+            "No themes installed yet",
+            "Click \"Install Theme…\" above to install a .zip or .aurora-theme package.",
+        );
+    } else {
+        let mut uninstall_id: Option<String> = None;
+        for item in &installed {
+            let id = &item.manifest.meta.id;
+            let is_active = active_id.as_deref() == Some(id.as_str());
+            egui::Frame::new()
+                .fill(t.surface)
+                .corner_radius(t.corner())
+                .inner_margin(Margin::same(16))
+                .stroke(if is_active {
+                    egui::Stroke::new(2.0, t.accent)
+                } else {
+                    egui::Stroke::new(1.0, t.border)
+                })
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(w::text_semibold(&item.manifest.meta.name, 15.0, t.text));
+                                if !item.manifest.meta.version.is_empty() {
+                                    ui.label(w::text(format!("v{}", item.manifest.meta.version), 11.5, t.text_faint));
+                                }
+                                if item.has_layout {
+                                    ui.label(w::text("layout", 11.5, t.text_faint));
+                                }
+                                if item.has_script {
+                                    ui.label(w::text(format!("{} rhai", icons::SPARKLE), 11.5, t.accent));
+                                }
+                                if is_active {
+                                    ui.label(w::text_semibold(format!("{} Active", icons::CHECK), 12.0, t.play));
+                                }
+                            });
+                            if !item.manifest.meta.author.is_empty() {
+                                ui.label(w::text(format!("by {}", item.manifest.meta.author), 12.0, t.text_dim));
+                            }
+                            if !item.manifest.meta.description.is_empty() {
+                                ui.add_space(3.0);
+                                ui.add(egui::Label::new(w::text(&item.manifest.meta.description, 12.5, t.text_dim)).wrap());
+                            }
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            if confirm_uninstall.as_deref() == Some(id.as_str()) {
+                                if w::button(ui, t, Some(icons::TRASH), "Confirm", w::Kind::Danger, w::Size::Sm).clicked() {
+                                    uninstall_id = Some(id.clone());
+                                    *confirm_uninstall = None;
+                                }
+                                if w::button(ui, t, None, "Cancel", w::Kind::Ghost, w::Size::Sm).clicked() {
+                                    *confirm_uninstall = None;
+                                }
+                            } else {
+                                if w::button(ui, t, Some(icons::TRASH), "Uninstall", w::Kind::Ghost, w::Size::Sm).clicked() {
+                                    *confirm_uninstall = Some(id.clone());
+                                }
+                                if is_active {
+                                    if w::button(ui, t, None, "Deactivate", w::Kind::Secondary, w::Size::Sm).clicked() {
+                                        ctx.act(Action::ActivateTheme(None));
+                                    }
+                                } else if w::button(ui, t, Some(icons::CHECK), "Activate", w::Kind::Primary, w::Size::Sm).clicked() {
+                                    ctx.act(Action::ActivateTheme(Some(id.clone())));
+                                }
+                            }
+                        });
+                    });
+                });
+            ui.add_space(8.0);
+        }
+
+        if let Some(id) = uninstall_id {
+            if active_id.as_deref() == Some(id.as_str()) {
+                ctx.act(Action::ActivateTheme(None));
+            }
+            match themes::uninstall_theme(&themes_dir, &id) {
+                Ok(()) => {
+                    ctx.act(Action::ReloadThemes);
+                    ctx.toast(format!("Uninstalled theme \"{id}\""));
+                }
+                Err(e) => ctx.toast(format!("Uninstall failed: {e}")),
+            }
+        }
+    }
+
+    // Broken themes warning card
+    if !broken.is_empty() {
+        ui.add_space(12.0);
+        egui::Frame::new()
+            .fill(t.surface)
+            .corner_radius(t.corner_small())
+            .inner_margin(Margin::same(14))
+            .stroke(egui::Stroke::new(1.0, t.away))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(w::text_semibold(format!("{}  Broken Themes ({})", icons::WARNING, broken.len()), 14.0, t.away));
+                ui.add_space(6.0);
+                for (path, err) in &broken {
+                    ui.label(w::text_medium(path.display().to_string(), 12.5, t.text));
+                    ui.add(egui::Label::new(w::text(err, 12.0, t.text_dim)).wrap());
+                    ui.add_space(4.0);
+                }
+            });
+    }
+
+    // Active theme options panel
+    let active_options = {
+        let st = themes_state.lock().unwrap();
+        st.manager.active_manifest().and_then(|m| {
+            if m.options.is_empty() {
+                None
+            } else {
+                let id = m.meta.id.clone();
+                let name = m.meta.name.clone();
+                let values = st.manager.load_option_values(&id);
+                let opts: Vec<(String, themes::ThemeOption)> = m.options.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                Some((id, name, values, opts))
+            }
+        })
+    };
+
+    if let Some((theme_id, theme_name, values, options)) = active_options {
+        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            ui.label(w::text_semibold(format!("{theme_name} Options"), 15.0, t.text));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if w::button(ui, t, Some(icons::REFRESH), "Reset Options", w::Kind::Ghost, w::Size::Sm).clicked() {
+                    let res = {
+                        let mut st = themes_state.lock().unwrap();
+                        let r = st.manager.reset_options(&theme_id);
+                        if r.is_ok() {
+                            st.revision = st.revision.wrapping_add(1);
+                            st.dirty = true;
+                        }
+                        r
+                    };
+                    option_hex_bufs.clear();
+                    match res {
+                        Ok(()) => ctx.toast("Reset theme options to defaults"),
+                        Err(e) => ctx.toast(format!("Reset failed: {e}")),
+                    }
+                }
+            });
+        });
+        ui.add_space(6.0);
+        w::card(t).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            for (idx, (key, opt)) in options.iter().enumerate() {
+                if idx > 0 {
+                    ui.add_space(10.0);
+                }
+                let current = values.get(key).unwrap_or(&opt.default);
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(w::text_medium(&opt.label, 14.0, t.text));
+                        if !opt.description.is_empty() {
+                            ui.add(egui::Label::new(w::text(&opt.description, 12.0, t.text_dim)).wrap());
+                        }
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| match opt.kind {
+                        OptionKind::Bool => {
+                            let mut b = current.as_bool().unwrap_or(false);
+                            if ui.add(toggle(&mut b)).changed() {
+                                ctx.act(Action::SetThemeOption {
+                                    theme_id: theme_id.clone(),
+                                    key: key.clone(),
+                                    value: b.to_string(),
+                                });
+                            }
+                        }
+                        OptionKind::Select => {
+                            let selected = current.as_str().unwrap_or("");
+                            ui.horizontal_wrapped(|ui| {
+                                for choice in opt.choices.iter().rev() {
+                                    if w::chip(ui, t, &choice.label, choice.value == selected).clicked() {
+                                        ctx.act(Action::SetThemeOption {
+                                            theme_id: theme_id.clone(),
+                                            key: key.clone(),
+                                            value: choice.value.clone(),
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                        OptionKind::Color => {
+                            let mut col = current
+                                .as_str()
+                                .and_then(|s| themes::parse_hex_color(s).ok())
+                                .unwrap_or(t.accent);
+                            let buf = option_hex_bufs
+                                .entry(key.clone())
+                                .or_insert_with(|| themes::color_to_hex(col));
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(buf)
+                                    .font(egui::FontId::monospace(12.5))
+                                    .desired_width(86.0),
+                            );
+                            if resp.changed() {
+                                if let Ok(parsed) = themes::parse_hex_color(buf) {
+                                    ctx.act(Action::SetThemeOption {
+                                        theme_id: theme_id.clone(),
+                                        key: key.clone(),
+                                        value: themes::color_to_hex(parsed),
+                                    });
+                                }
+                            } else if !resp.has_focus() {
+                                let canonical = themes::color_to_hex(col);
+                                if *buf != canonical {
+                                    *buf = canonical;
+                                }
+                            }
+                            if ui.color_edit_button_srgba(&mut col).changed() {
+                                let hex = themes::color_to_hex(col);
+                                option_hex_bufs.insert(key.clone(), hex.clone());
+                                ctx.act(Action::SetThemeOption {
+                                    theme_id: theme_id.clone(),
+                                    key: key.clone(),
+                                    value: hex,
+                                });
+                            }
+                        }
+                        OptionKind::Slider => {
+                            let min = opt.min.unwrap_or(0.0);
+                            let max = opt.max.unwrap_or(100.0);
+                            let mut val = current.as_f32().unwrap_or(min).clamp(min, max);
+                            let mut slider = egui::Slider::new(&mut val, min..=max);
+                            if let Some(step) = opt.step {
+                                slider = slider.step_by(step as f64);
+                            }
+                            if ui.add(slider).changed() {
+                                ctx.act(Action::SetThemeOption {
+                                    theme_id: theme_id.clone(),
+                                    key: key.clone(),
+                                    value: OptionValue::Number(val as f64).to_string_value(),
+                                });
+                            }
+                        }
+                    });
+                });
+            }
+        });
+    }
+}
+
+fn theme_warning_banner(ui: &mut Ui, t: &Theme, title: &str, body: &str) {
+    egui::Frame::new()
+        .fill(t.surface)
+        .corner_radius(t.corner_small())
+        .inner_margin(Margin::same(12))
+        .stroke(egui::Stroke::new(1.2, t.danger))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.label(w::text(icons::WARNING, 16.0, t.danger));
+                ui.vertical(|ui| {
+                    ui.label(w::text_semibold(title, 13.5, t.danger));
+                    ui.add(egui::Label::new(w::text(body, 12.5, t.text_dim)).wrap());
+                });
+            });
+        });
 }
 
 fn interface(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, flags: &SharedFlags, handler: &mut Option<bool>) {

@@ -26,6 +26,7 @@ plugins = { path = "crates/plugins" }
 i18n = { path = "crates/i18n" }
 depot = { path = "crates/depot" }
 video = { path = "crates/video" }
+themes = { path = "crates/themes" }
 
 # Protocol
 prost = "0.14"
@@ -34,6 +35,7 @@ protox = "0.10"
 tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 flate2 = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 rsa = "0.9"
 rand = "0.8"
 base64 = "0.22"
