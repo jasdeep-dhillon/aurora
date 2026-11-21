@@ -121,7 +121,7 @@ impl Library {
                         PropTab::Updates => self.tab_updates(ui, t, ctx, app_id, installed.as_ref(), owned.as_ref()),
                         PropTab::Files => self.tab_files(ui, t, ctx, app_id, installed.as_ref()),
                         PropTab::Betas => self.tab_betas(ui, t, ctx, app_id, installed.as_ref(), owned.as_ref()),
-                        PropTab::Controller => self.tab_controller(ui, t, app_id),
+                        PropTab::Controller => self.tab_controller(ui, t, ctx, app_id),
                         PropTab::Dlc => self.tab_dlc(ui, t, ctx, app_id, installed.as_ref(), owned.as_ref()),
                         PropTab::Workshop => self.tab_workshop(ui, t, ctx, app_id, installed.as_ref()),
                         PropTab::Privacy => self.tab_privacy(ui, t, app_id),
@@ -621,11 +621,34 @@ impl Library {
         }
     }
 
-    fn tab_controller(&mut self, ui: &mut Ui, t: &Theme, app: AppId) {
-        let s = self.settings_mut(app);
+    fn tab_controller(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, app: AppId) {
+        let mut choice = self.settings_mut(app).controller;
         section(ui, t, t!("Steam Input"), t!("Override controller handling for this game."), |ui| {
             for (v, l) in [(0u8, t!("Use the default settings")), (1, t!("Enable Steam Input")), (2, t!("Disable Steam Input"))] {
-                w::radio_value(ui, t, &mut s.controller, v, l);
+                if w::radio_value(ui, t, &mut choice, v, l).changed() {
+                    self.settings_mut(app).controller = choice;
+                    client::set_app_controller(app, choice);
+                }
+            }
+            ui.add_space(6.0);
+            let cfg = client::controller_settings();
+            let decision = client::resolve_steam_input(choice, &cfg.families);
+            let status = if !decision.enabled && choice == 2 {
+                t!("Aurora Steam Input and non-Xbox controller bridging are disabled for this game.").to_string()
+            } else if !decision.enabled {
+                t!("All controller families are currently turned off in global Controller settings.").to_string()
+            } else {
+                let mut active = Vec::new();
+                if cfg.families.xbox { active.push(t!("Xbox")); }
+                if cfg.families.playstation { active.push(t!("PlayStation")); }
+                if cfg.families.switch_pro { active.push(t!("Switch Pro")); }
+                if cfg.families.generic { active.push(t!("Generic")); }
+                t!("Enabled for: {list}", list = active.join(", "))
+            };
+            ui.add(egui::Label::new(w::text(status, 12.5, t.text_dim)).wrap());
+            ui.add_space(6.0);
+            if w::button(ui, t, Some(icons::CONTROLLER), t!("Controller Settings…"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                ctx.navigate("settings", Some(format!("controller:{app}")));
             }
         });
     }

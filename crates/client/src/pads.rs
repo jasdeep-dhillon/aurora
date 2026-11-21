@@ -1,96 +1,469 @@
-//! Windows: controllers XInput can't see (PlayStation, Switch, Steam
-//! Controller, generic DirectInput pads), read with SDL3 (`SDL3.dll` next to
-//! the app) while a game with our steamclient runs, and published to the game
-//! through shared memory. The steamclient shows them to the game as Xbox
-//! pads, through Steam Input and through XInput, like Steam does.
+//! Cross-platform controller management, detection, live input testing,
+//! calibration, and Steam Input override resolution.
 //!
-//! Xbox pads are left alone: games read them through XInput themselves.
+//! - **Windows**: reads non-Xbox controllers (PlayStation, Switch, Steam
+//!   Controller, generic DirectInput pads) via dynamically loaded `SDL3.dll`
+//!   while a game with our `steamclient` runs (publishing enabled families
+//!   to shared memory `Local\sir-pads-*` with deadzones/calibration applied),
+//!   and enumerates/tests all controllers (including Xbox via SDL3 or XInput)
+//!   when Settings → Controller is open.
+//! - **Linux**: enumerates/tests controllers via dynamically loaded
+//!   `libSDL3.so.0` when installed, falling back cleanly to kernel
+//!   `/sys/class/input` + `/dev/input/event*` / `/dev/input/js*` when SDL3
+//!   is unavailable.
 
 #[path = "../../steamclient/src/pads_shm.rs"]
 #[allow(dead_code)]
 mod shm;
 
-pub use shm::ENV_PADS;
+pub use shm::{
+    ENV_INPUT_CALIBRATION, ENV_INPUT_FAMILIES, ENV_PADS, ENV_STEAM_INPUT, FAMILY_GENERIC,
+    FAMILY_PLAYSTATION, FAMILY_SWITCH_PRO, FAMILY_XBOX, PadCalibration,
+};
 
-/// A game with our steamclient is starting: read pads until [`stop`].
-/// Returns the shared memory's name for the game's environment.
-#[cfg(not(windows))]
-pub fn start() -> Option<String> {
-    None
+use model::AppId;
+use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ControllerFamily {
+    Xbox,
+    PlayStation,
+    SwitchPro,
+    Generic,
 }
 
-#[cfg(not(windows))]
-pub fn stop() {}
+impl ControllerFamily {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Xbox => "Xbox",
+            Self::PlayStation => "PlayStation",
+            Self::SwitchPro => "Switch Pro",
+            Self::Generic => "Generic",
+        }
+    }
 
-#[cfg(windows)]
-pub use imp::{start, stop};
+    pub fn slot_family(self) -> u8 {
+        match self {
+            Self::Xbox => shm::SLOT_FAMILY_XBOX,
+            Self::PlayStation => shm::SLOT_FAMILY_PLAYSTATION,
+            Self::SwitchPro => shm::SLOT_FAMILY_SWITCH_PRO,
+            Self::Generic => shm::SLOT_FAMILY_GENERIC,
+        }
+    }
 
-#[cfg(windows)]
-mod imp {
-    use super::shm::{self, Shared, State};
+    pub fn bit(self) -> u32 {
+        match self {
+            Self::Xbox => FAMILY_XBOX,
+            Self::PlayStation => FAMILY_PLAYSTATION,
+            Self::SwitchPro => FAMILY_SWITCH_PRO,
+            Self::Generic => FAMILY_GENERIC,
+        }
+    }
+
+    /// Classify a controller from its SDL3 `SDL_GamepadType` (if known), USB/BT
+    /// vendor ID, and device name.
+    pub fn classify(sdl_type: i32, vendor: u16, name: &str) -> Self {
+        match sdl_type {
+            2 | 3 => return Self::Xbox,           // XBOX360 / XBOXONE
+            4 | 5 | 6 => return Self::PlayStation, // PS3 / PS4 / PS5
+            7..=10 => return Self::SwitchPro,      // SWITCH_PRO / JOYCON_*
+            _ => {}
+        }
+        match vendor {
+            0x045e => return Self::Xbox,        // Microsoft
+            0x054c => return Self::PlayStation, // Sony
+            0x057e => return Self::SwitchPro,   // Nintendo
+            _ => {}
+        }
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("xbox") || lower.contains("x-box") || lower.contains("xinput") {
+            Self::Xbox
+        } else if lower.contains("dualsense")
+            || lower.contains("dualshock")
+            || lower.contains("playstation")
+            || lower.contains("sony")
+            || lower.contains("ps3")
+            || lower.contains("ps4")
+            || lower.contains("ps5")
+        {
+            Self::PlayStation
+        } else if lower.contains("nintendo")
+            || lower.contains("switch")
+            || lower.contains("joy-con")
+            || lower.contains("pro controller")
+        {
+            Self::SwitchPro
+        } else {
+            Self::Generic
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Global Steam Input enable toggles per controller family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct FamilyToggles {
+    #[serde(default = "yes")]
+    pub xbox: bool,
+    #[serde(default = "yes")]
+    pub playstation: bool,
+    #[serde(default = "yes")]
+    pub switch_pro: bool,
+    #[serde(default = "yes")]
+    pub generic: bool,
+}
+
+impl Default for FamilyToggles {
+    fn default() -> Self {
+        Self { xbox: true, playstation: true, switch_pro: true, generic: true }
+    }
+}
+
+impl FamilyToggles {
+    pub fn is_enabled(&self, family: ControllerFamily) -> bool {
+        match family {
+            ControllerFamily::Xbox => self.xbox,
+            ControllerFamily::PlayStation => self.playstation,
+            ControllerFamily::SwitchPro => self.switch_pro,
+            ControllerFamily::Generic => self.generic,
+        }
+    }
+
+    pub fn bitmask(&self) -> u32 {
+        let mut mask = 0u32;
+        if self.xbox {
+            mask |= FAMILY_XBOX;
+        }
+        if self.playstation {
+            mask |= FAMILY_PLAYSTATION;
+        }
+        if self.switch_pro {
+            mask |= FAMILY_SWITCH_PRO;
+        }
+        if self.generic {
+            mask |= FAMILY_GENERIC;
+        }
+        mask
+    }
+
+    pub fn any_enabled(&self) -> bool {
+        self.bitmask() != 0
+    }
+
+    pub fn any_non_xbox(&self) -> bool {
+        self.playstation || self.switch_pro || self.generic
+    }
+}
+
+/// Persisted global controller settings (Steam Input family toggles + calibration).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ControllerSettings {
+    pub families: FamilyToggles,
+    pub calibration: PadCalibration,
+}
+
+/// Per-launch resolution of `GameSettings.controller` (`0` default, `1` enable, `2` disable)
+/// combined with global controller family toggles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SteamInputDecision {
+    pub enabled: bool,
+    pub families_mask: u32,
+    pub use_shm_bridge: bool,
+}
+
+/// Resolve whether Aurora's Steam Input and XInput SHM bridge are active for a launch.
+///
+/// - `2` ("Disable Steam Input"): disables Steam Input and XInput bridging unconditionally.
+/// - `0` ("Use default settings") or `1` ("Enable Steam Input"): honors global controller family toggles.
+pub fn resolve_steam_input(app_override: u8, global: &FamilyToggles) -> SteamInputDecision {
+    if app_override == 2 {
+        return SteamInputDecision { enabled: false, families_mask: 0, use_shm_bridge: false };
+    }
+    let mask = global.bitmask();
+    SteamInputDecision {
+        enabled: mask != 0,
+        families_mask: mask,
+        use_shm_bridge: global.any_non_xbox(),
+    }
+}
+
+static SETTINGS: OnceLock<Mutex<ControllerSettings>> = OnceLock::new();
+static APP_CONTROLLERS: OnceLock<Mutex<BTreeMap<AppId, u8>>> = OnceLock::new();
+
+fn settings_lock() -> &'static Mutex<ControllerSettings> {
+    SETTINGS.get_or_init(|| Mutex::new(ControllerSettings::default()))
+}
+
+fn app_controllers_lock() -> &'static Mutex<BTreeMap<AppId, u8>> {
+    APP_CONTROLLERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+pub fn settings() -> ControllerSettings {
+    settings_lock().lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub fn set_settings(mut next: ControllerSettings) {
+    next.calibration = next.calibration.clamped();
+    *settings_lock().lock().unwrap_or_else(|e| e.into_inner()) = next;
+}
+
+pub fn set_app_controllers(map: BTreeMap<AppId, u8>) {
+    let mut guard = app_controllers_lock().lock().unwrap_or_else(|e| e.into_inner());
+    *guard = map.into_iter().filter(|(_, v)| *v != 0).collect();
+}
+
+pub fn set_app_controller(app_id: AppId, mode: u8) {
+    let mut guard = app_controllers_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if mode == 0 {
+        guard.remove(&app_id);
+    } else {
+        guard.insert(app_id, mode);
+    }
+}
+
+pub fn app_controller(app_id: AppId) -> u8 {
+    app_controllers_lock().lock().unwrap_or_else(|e| e.into_inner()).get(&app_id).copied().unwrap_or(0)
+}
+
+/// Effective per-game override: an explicit non-default launch argument wins,
+/// otherwise falls back to the stored per-game override.
+pub fn effective_controller_override(app_id: AppId, launch_arg: u8) -> u8 {
+    if launch_arg != 0 { launch_arg } else { app_controller(app_id) }
+}
+
+// ------------------------------------------------------------ UI inspection types
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionKind {
+    Unknown,
+    Wired,
+    Wireless,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LiveInput {
+    /// XInput button bitmask (plus `shm::GUIDE` = `0x0400`).
+    pub buttons: u16,
+    pub misc: bool,
+    pub touchpad: bool,
+    /// `[R1, L1, R2, L2]` back paddles.
+    pub paddles: [bool; 4],
+    /// Calibrated normalized sticks in `[-1.0, 1.0]` (X right +, Y up +).
+    pub lx: f32,
+    pub ly: f32,
+    pub rx: f32,
+    pub ry: f32,
+    /// Raw sticks before deadzone.
+    pub raw_lx: f32,
+    pub raw_ly: f32,
+    pub raw_rx: f32,
+    pub raw_ry: f32,
+    /// Calibrated triggers in `[0.0, 1.0]`.
+    pub lt: f32,
+    pub rt: f32,
+    pub raw_lt: f32,
+    pub raw_rt: f32,
+    pub has_motion: bool,
+    pub accel: [f32; 3],
+    pub gyro: [f32; 3],
+}
+
+#[derive(Debug, Clone)]
+pub struct DetectedController {
+    pub id: String,
+    pub name: String,
+    pub family: ControllerFamily,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub connection: ConnectionKind,
+    pub slot: Option<usize>,
+    pub battery_percent: Option<u8>,
+    pub backend: &'static str,
+    pub has_rumble: bool,
+    pub has_gyro: bool,
+    pub live: LiveInput,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DetectionSnapshot {
+    pub backend: &'static str,
+    pub controllers: Vec<DetectedController>,
+    pub note: Option<String>,
+}
+
+/// Build a [`LiveInput`] from raw normalized axes + XInput buttons and apply [`PadCalibration`].
+#[allow(clippy::too_many_arguments)]
+fn build_live_input(
+    buttons: u16,
+    misc: bool,
+    touchpad: bool,
+    paddles: [bool; 4],
+    raw_lx: f32,
+    raw_ly: f32,
+    raw_rx: f32,
+    raw_ry: f32,
+    raw_lt: f32,
+    raw_rt: f32,
+    accel: [f32; 3],
+    gyro: [f32; 3],
+    has_motion: bool,
+    cal: &PadCalibration,
+) -> LiveInput {
+    let c = cal.clamped();
+    let buttons = if c.nintendo_layout { shm::swap_nintendo_buttons(buttons) } else { buttons };
+    let (lx, ly) = shm::apply_stick_f32(raw_lx, raw_ly, c.left_deadzone);
+    let (rx, ry) = shm::apply_stick_f32(raw_rx, raw_ry, c.right_deadzone);
+    let lt = shm::apply_trigger_f32(raw_lt, c.trigger_threshold);
+    let rt = shm::apply_trigger_f32(raw_rt, c.trigger_threshold);
+    let (has_motion, accel, gyro) = if c.gyro_enabled && has_motion {
+        (true, accel, [gyro[0] * c.gyro_sensitivity, gyro[1] * c.gyro_sensitivity, gyro[2] * c.gyro_sensitivity])
+    } else {
+        (false, [0.0; 3], [0.0; 3])
+    };
+    LiveInput {
+        buttons,
+        misc,
+        touchpad,
+        paddles,
+        lx,
+        ly,
+        rx,
+        ry,
+        raw_lx: raw_lx.clamp(-1.0, 1.0),
+        raw_ly: raw_ly.clamp(-1.0, 1.0),
+        raw_rx: raw_rx.clamp(-1.0, 1.0),
+        raw_ry: raw_ry.clamp(-1.0, 1.0),
+        lt,
+        rt,
+        raw_lt: raw_lt.clamp(0.0, 1.0),
+        raw_rt: raw_rt.clamp(0.0, 1.0),
+        has_motion,
+        accel,
+        gyro,
+    }
+}
+
+// ------------------------------------------------------------ Shared SDL3 loader
+
+mod sdl_dyn {
     use std::ffi::{CStr, c_char, c_void};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
+    use std::sync::OnceLock;
 
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
-        fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
-    }
-    const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x8;
-    const INIT_GAMEPAD: u32 = 0x2000;
+    pub const INIT_GAMEPAD: u32 = 0x2000;
+    pub const INIT_HAPTIC: u32 = 0x1000;
+    pub const SENSOR_ACCEL: i32 = 1;
+    pub const SENSOR_GYRO: i32 = 2;
 
-    type Gp = *mut c_void;
+    pub type Gp = *mut c_void;
 
-    /// The SDL3 functions we use (SDLCALL is the C convention).
-    struct Sdl {
-        set_hint: unsafe extern "C" fn(*const c_char, *const c_char) -> bool,
-        init: unsafe extern "C" fn(u32) -> bool,
-        quit_subsystem: unsafe extern "C" fn(u32),
-        get_error: unsafe extern "C" fn() -> *const c_char,
-        free: unsafe extern "C" fn(*mut c_void),
-        set_joystick_events: unsafe extern "C" fn(bool),
-        set_gamepad_events: unsafe extern "C" fn(bool),
-        get_gamepads: unsafe extern "C" fn(*mut i32) -> *mut u32,
-        type_for_id: unsafe extern "C" fn(u32) -> i32,
-        vendor_for_id: unsafe extern "C" fn(u32) -> u16,
-        name_for_id: unsafe extern "C" fn(u32) -> *const c_char,
-        open: unsafe extern "C" fn(u32) -> Gp,
-        close: unsafe extern "C" fn(Gp),
-        connected: unsafe extern "C" fn(Gp) -> bool,
-        update: unsafe extern "C" fn(),
-        button: unsafe extern "C" fn(Gp, i32) -> bool,
-        axis: unsafe extern "C" fn(Gp, i32) -> i16,
-        rumble: unsafe extern "C" fn(Gp, u16, u16, u32) -> bool,
-        has_sensor: Option<unsafe extern "C" fn(Gp, i32) -> bool>,
-        set_sensor_enabled: Option<unsafe extern "C" fn(Gp, i32, bool) -> bool>,
-        get_sensor_data: Option<unsafe extern "C" fn(Gp, i32, *mut f32, i32) -> bool>,
-    }
-
-    const SDL_SENSOR_ACCEL: i32 = 1;
-    const SDL_SENSOR_GYRO: i32 = 2;
-
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain([0]).collect()
+    pub struct Sdl {
+        pub set_hint: unsafe extern "C" fn(*const c_char, *const c_char) -> bool,
+        pub init: unsafe extern "C" fn(u32) -> bool,
+        pub init_subsystem: Option<unsafe extern "C" fn(u32) -> bool>,
+        pub quit_subsystem: unsafe extern "C" fn(u32),
+        pub pump_events: Option<unsafe extern "C" fn()>,
+        pub get_error: unsafe extern "C" fn() -> *const c_char,
+        pub free: unsafe extern "C" fn(*mut c_void),
+        pub set_joystick_events: unsafe extern "C" fn(bool),
+        pub set_gamepad_events: unsafe extern "C" fn(bool),
+        pub get_gamepads: unsafe extern "C" fn(*mut i32) -> *mut u32,
+        pub type_for_id: unsafe extern "C" fn(u32) -> i32,
+        pub vendor_for_id: unsafe extern "C" fn(u32) -> u16,
+        pub product_for_id: Option<unsafe extern "C" fn(u32) -> u16>,
+        pub name_for_id: unsafe extern "C" fn(u32) -> *const c_char,
+        pub open: unsafe extern "C" fn(u32) -> Gp,
+        pub close: unsafe extern "C" fn(Gp),
+        pub connected: unsafe extern "C" fn(Gp) -> bool,
+        pub update: unsafe extern "C" fn(),
+        pub button: unsafe extern "C" fn(Gp, i32) -> bool,
+        pub axis: unsafe extern "C" fn(Gp, i32) -> i16,
+        pub rumble: unsafe extern "C" fn(Gp, u16, u16, u32) -> bool,
+        pub has_sensor: Option<unsafe extern "C" fn(Gp, i32) -> bool>,
+        pub set_sensor_enabled: Option<unsafe extern "C" fn(Gp, i32, bool) -> bool>,
+        pub get_sensor_data: Option<unsafe extern "C" fn(Gp, i32, *mut f32, i32) -> bool>,
+        pub connection_state: Option<unsafe extern "C" fn(Gp) -> i32>,
+        pub power_info: Option<unsafe extern "C" fn(Gp, *mut i32) -> i32>,
     }
 
-    fn load_sdl() -> Option<Sdl> {
+    unsafe impl Send for Sdl {}
+    unsafe impl Sync for Sdl {}
+
+    #[cfg(windows)]
+    fn load_lib() -> Option<*mut c_void> {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
+        }
+        const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x8;
         let path = std::env::current_exe().ok()?.parent()?.join("SDL3.dll");
         if !path.is_file() {
-            tracing::info!("controllers: no SDL3.dll next to the app; only Xbox pads reach games");
+            tracing::info!("controllers: no SDL3.dll next to the app; using XInput only");
             return None;
         }
-        let m = unsafe { LoadLibraryExW(wide(&path.to_string_lossy()).as_ptr(), std::ptr::null_mut(), LOAD_WITH_ALTERED_SEARCH_PATH) };
+        let wide: Vec<u16> = path.to_string_lossy().encode_utf16().chain([0]).collect();
+        let m = unsafe { LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), LOAD_WITH_ALTERED_SEARCH_PATH) };
         if m.is_null() {
             tracing::warn!("controllers: couldn't load {}", path.display());
             return None;
         }
+        Some(m)
+    }
+
+    #[cfg(windows)]
+    unsafe fn sym(m: *mut c_void, name: *const c_char) -> *mut c_void {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+        }
+        unsafe { GetProcAddress(m, name) }
+    }
+
+    #[cfg(not(windows))]
+    fn load_lib() -> Option<*mut c_void> {
+        use std::ffi::CString;
+        let mut candidates: Vec<CString> = Vec::new();
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            for name in ["libSDL3.so.0", "libSDL3.so"] {
+                let p = dir.join(name);
+                if p.is_file()
+                    && let Ok(c) = CString::new(p.to_string_lossy().as_bytes())
+                {
+                    candidates.push(c);
+                }
+            }
+        }
+        candidates.push(CString::new("libSDL3.so.0").unwrap());
+        candidates.push(CString::new("libSDL3.so").unwrap());
+        for c in candidates {
+            let m = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
+            if !m.is_null() {
+                return Some(m);
+            }
+        }
+        tracing::info!("controllers: libSDL3 not found; using Linux sysfs/evdev fallback");
+        None
+    }
+
+    #[cfg(not(windows))]
+    unsafe fn sym(m: *mut c_void, name: *const c_char) -> *mut c_void {
+        unsafe { libc::dlsym(m, name) }
+    }
+
+    fn load_sdl() -> Option<Sdl> {
+        let m = load_lib()?;
         macro_rules! f {
             ($name:literal) => {{
-                let p = unsafe { GetProcAddress(m, concat!($name, "\0").as_ptr().cast()) };
+                let p = unsafe { sym(m, concat!($name, "\0").as_ptr().cast()) };
                 if p.is_null() {
-                    tracing::warn!("controllers: SDL3.dll has no {}", $name);
+                    tracing::warn!("controllers: SDL3 library has no {}", $name);
                     return None;
                 }
                 unsafe { std::mem::transmute::<*mut c_void, _>(p) }
@@ -98,14 +471,16 @@ mod imp {
         }
         macro_rules! opt {
             ($name:literal) => {{
-                let p = unsafe { GetProcAddress(m, concat!($name, "\0").as_ptr().cast()) };
+                let p = unsafe { sym(m, concat!($name, "\0").as_ptr().cast()) };
                 if p.is_null() { None } else { Some(unsafe { std::mem::transmute::<*mut c_void, _>(p) }) }
             }};
         }
         Some(Sdl {
             set_hint: f!("SDL_SetHint"),
             init: f!("SDL_Init"),
+            init_subsystem: opt!("SDL_InitSubSystem"),
             quit_subsystem: f!("SDL_QuitSubSystem"),
+            pump_events: opt!("SDL_PumpEvents"),
             get_error: f!("SDL_GetError"),
             free: f!("SDL_free"),
             set_joystick_events: f!("SDL_SetJoystickEventsEnabled"),
@@ -113,6 +488,7 @@ mod imp {
             get_gamepads: f!("SDL_GetGamepads"),
             type_for_id: f!("SDL_GetGamepadTypeForID"),
             vendor_for_id: f!("SDL_GetGamepadVendorForID"),
+            product_for_id: opt!("SDL_GetGamepadProductForID"),
             name_for_id: f!("SDL_GetGamepadNameForID"),
             open: f!("SDL_OpenGamepad"),
             close: f!("SDL_CloseGamepad"),
@@ -124,15 +500,157 @@ mod imp {
             has_sensor: opt!("SDL_GamepadHasSensor"),
             set_sensor_enabled: opt!("SDL_SetGamepadSensorEnabled"),
             get_sensor_data: opt!("SDL_GetGamepadSensorData"),
+            connection_state: opt!("SDL_GetGamepadConnectionState"),
+            power_info: opt!("SDL_GetGamepadPowerInfo"),
         })
     }
 
-    fn sdl() -> Option<&'static Sdl> {
+    pub fn sdl() -> Option<&'static Sdl> {
         static SDL: OnceLock<Option<Sdl>> = OnceLock::new();
         SDL.get_or_init(load_sdl).as_ref()
     }
 
-    /// The shared memory, created once for the app's lifetime.
+    pub fn cstr_lossy(p: *const c_char) -> String {
+        if p.is_null() { String::new() } else { unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned() }
+    }
+
+    pub const BUTTONS: [(i32, u16); 15] = [
+        (0, 0x1000),      // south -> A
+        (1, 0x2000),      // east -> B
+        (2, 0x4000),      // west -> X
+        (3, 0x8000),      // north -> Y
+        (4, 0x0020),      // back
+        (5, super::shm::GUIDE), // guide
+        (6, 0x0010),      // start
+        (7, 0x0040),      // left stick
+        (8, 0x0080),      // right stick
+        (9, 0x0100),      // left shoulder
+        (10, 0x0200),     // right shoulder
+        (11, 0x0001),     // d-pad up
+        (12, 0x0002),     // d-pad down
+        (13, 0x0004),     // d-pad left
+        (14, 0x0008),     // d-pad right
+    ];
+
+    pub fn flip(v: i16) -> i16 {
+        (-(v as i32)).clamp(-32768, 32767) as i16
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn trigger_u8(v: i16) -> u8 {
+        (v.max(0) as u32 * 255 / 32767) as u8
+    }
+
+    pub fn read_raw(sdl: &Sdl, gp: Gp) -> (u16, bool, bool, [bool; 4], [i16; 4], [i16; 2], Option<([f32; 3], [f32; 3])>) {
+        let b = |i| unsafe { (sdl.button)(gp, i) };
+        let a = |i| unsafe { (sdl.axis)(gp, i) };
+        let buttons = BUTTONS.iter().filter(|(i, _)| b(*i)).fold(0, |acc, (_, bit)| acc | bit);
+        let misc = b(15);
+        let paddles = [b(16), b(17), b(18), b(19)];
+        let touchpad = b(20);
+        let sticks = [a(0), flip(a(1)), a(2), flip(a(3))];
+        let triggers = [a(4), a(5)];
+        let motion = sdl.get_sensor_data.and_then(|get_data| {
+            let mut accel = [0.0f32; 3];
+            let mut gyro = [0.0f32; 3];
+            let has_a = unsafe { get_data(gp, SENSOR_ACCEL, accel.as_mut_ptr(), 3) };
+            let has_g = unsafe { get_data(gp, SENSOR_GYRO, gyro.as_mut_ptr(), 3) };
+            (has_a || has_g).then_some((accel, gyro))
+        });
+        (buttons, misc, touchpad, paddles, sticks, triggers, motion)
+    }
+
+    pub fn enable_sensors(sdl: &Sdl, gp: Gp) -> bool {
+        let (Some(has), Some(enable)) = (sdl.has_sensor, sdl.set_sensor_enabled) else {
+            return false;
+        };
+        unsafe {
+            let mut any = false;
+            if has(gp, SENSOR_ACCEL) {
+                any |= enable(gp, SENSOR_ACCEL, true);
+            }
+            if has(gp, SENSOR_GYRO) {
+                any |= enable(gp, SENSOR_GYRO, true);
+            }
+            any
+        }
+    }
+
+    pub fn connection_and_battery(sdl: &Sdl, gp: Gp) -> (super::ConnectionKind, Option<u8>) {
+        let conn = match sdl.connection_state.map(|f| unsafe { f(gp) }) {
+            Some(1) => super::ConnectionKind::Wired,
+            Some(2) => super::ConnectionKind::Wireless,
+            _ => super::ConnectionKind::Unknown,
+        };
+        let batt = sdl.power_info.and_then(|f| {
+            let mut pct = -1i32;
+            let state = unsafe { f(gp, &mut pct) };
+            matches!(state, 1 | 3 | 4).then(|| (0..=100).contains(&pct).then_some(pct as u8)).flatten()
+        });
+        (conn, batt)
+    }
+}
+
+// ------------------------------------------------------------ Shared UI polling state
+
+static SNAPSHOT: OnceLock<Mutex<DetectionSnapshot>> = OnceLock::new();
+static UI_LAST_POLL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FORCE_RESCAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TEST_RUMBLE_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn snapshot_lock() -> &'static Mutex<DetectionSnapshot> {
+    SNAPSHOT.get_or_init(|| Mutex::new(DetectionSnapshot::default()))
+}
+
+fn rumble_lock() -> &'static Mutex<Option<String>> {
+    TEST_RUMBLE_ID.get_or_init(|| Mutex::new(None))
+}
+
+fn ui_active() -> bool {
+    let last = UI_LAST_POLL_MS.load(std::sync::atomic::Ordering::Relaxed);
+    last != 0 && shm::now_ms().saturating_sub(last) < 2000
+}
+
+pub fn poll_ui() -> DetectionSnapshot {
+    UI_LAST_POLL_MS.store(shm::now_ms(), std::sync::atomic::Ordering::Relaxed);
+    platform::ensure_ui_reader();
+    snapshot_lock().lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub fn refresh_ui() {
+    FORCE_RESCAN.store(true, std::sync::atomic::Ordering::Release);
+    UI_LAST_POLL_MS.store(shm::now_ms(), std::sync::atomic::Ordering::Relaxed);
+    platform::ensure_ui_reader();
+}
+
+pub fn trigger_test_rumble(controller_id: &str) {
+    *rumble_lock().lock().unwrap_or_else(|e| e.into_inner()) = Some(controller_id.to_string());
+}
+
+#[cfg(not(windows))]
+pub fn start() -> Option<String> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn stop() {}
+
+#[cfg(windows)]
+pub use platform::{start, stop};
+
+#[cfg(windows)]
+mod platform {
+    use super::shm::{self, Shared, State};
+    use super::{
+        ConnectionKind, ControllerFamily, DetectedController, DetectionSnapshot, FORCE_RESCAN,
+        PadCalibration, build_live_input, rumble_lock, sdl_dyn::{self, Gp, Sdl}, settings, snapshot_lock,
+        ui_active,
+    };
+    use std::ffi::{c_char, c_void};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
     fn mapping() -> Option<(&'static Shared, &'static str)> {
         static MAP: OnceLock<Option<shm::Shm>> = OnceLock::new();
         let shm = MAP
@@ -147,18 +665,25 @@ mod imp {
         Some((shm.shared(), shm.name()))
     }
 
-    /// Games using the pads right now.
     static USERS: AtomicUsize = AtomicUsize::new(0);
-    /// The reader thread is running.
     static RUNNING: Mutex<bool> = Mutex::new(false);
 
+    pub fn ensure_ui_reader() {
+        let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        if !*running {
+            if std::thread::Builder::new().name("pads".into()).spawn(move || read_loop(false)).is_ok() {
+                *running = true;
+            }
+        }
+    }
+
     pub fn start() -> Option<String> {
-        let sdl = sdl()?;
-        let (shared, name) = mapping()?;
+        let _sdl = sdl_dyn::sdl()?;
+        let (_, name) = mapping()?;
         let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
         USERS.fetch_add(1, Ordering::AcqRel);
         if !*running {
-            if std::thread::Builder::new().name("pads".into()).spawn(move || read_pads(sdl, shared)).is_err() {
+            if std::thread::Builder::new().name("pads".into()).spawn(move || read_loop(true)).is_err() {
                 USERS.fetch_sub(1, Ordering::AcqRel);
                 return None;
             }
@@ -177,118 +702,70 @@ mod imp {
         }
     }
 
-    struct Open {
+    struct OpenPad {
         id: u32,
         gp: Gp,
-        last: State,
+        name: String,
+        family: ControllerFamily,
+        vendor: u16,
+        product: u16,
+        has_gyro: bool,
+        last_shm: State,
         rumble: (u16, u16),
         rumbled: Instant,
     }
 
-    /// SDL_GamepadButton → XInput button bit, by position (SDL's south
-    /// button is Xbox A, like Steam maps it).
-    const BUTTONS: [(i32, u16); 15] = [
-        (0, 0x1000),     // south → A
-        (1, 0x2000),     // east → B
-        (2, 0x4000),     // west → X
-        (3, 0x8000),     // north → Y
-        (4, 0x0020),     // back
-        (5, shm::GUIDE), // guide
-        (6, 0x0010),     // start
-        (7, 0x0040),     // left stick
-        (8, 0x0080),     // right stick
-        (9, 0x0100),     // left shoulder
-        (10, 0x0200),    // right shoulder
-        (11, 0x0001),    // d-pad up
-        (12, 0x0002),    // d-pad down
-        (13, 0x0004),    // d-pad left
-        (14, 0x0008),    // d-pad right
-    ];
-
-    /// SDL's Y axes point down, XInput's up.
-    fn flip(v: i16) -> i16 {
-        (-(v as i32)).clamp(-32768, 32767) as i16
-    }
-
-    fn trigger(v: i16) -> u8 {
-        (v.max(0) as u32 * 255 / 32767) as u8
-    }
-
-    fn state(sdl: &Sdl, gp: Gp) -> State {
-        let b = |i| unsafe { (sdl.button)(gp, i) };
-        let a = |i| unsafe { (sdl.axis)(gp, i) };
-        let mut s = State {
-            packet: 0,
-            buttons: BUTTONS.iter().filter(|(i, _)| b(*i)).fold(0, |acc, (_, bit)| acc | bit),
-            lx: a(0),
-            ly: flip(a(1)),
-            rx: a(2),
-            ry: flip(a(3)),
-            lt: trigger(a(4)),
-            rt: trigger(a(5)),
-            ..Default::default()
-        };
-        if let Some(get_data) = sdl.get_sensor_data {
-            let mut accel = [0.0f32; 3];
-            let mut gyro = [0.0f32; 3];
-            let has_a = unsafe { get_data(gp, SDL_SENSOR_ACCEL, accel.as_mut_ptr(), 3) };
-            let has_g = unsafe { get_data(gp, SDL_SENSOR_GYRO, gyro.as_mut_ptr(), 3) };
-            if has_a || has_g {
-                s.set_motion(accel, gyro);
-            }
+    fn read_loop(has_shm_user: bool) {
+        let _ = has_shm_user;
+        let sdl = sdl_dyn::sdl();
+        let shared = mapping().map(|(s, _)| s);
+        if let Some(sdl) = sdl {
+            run_sdl_loop(sdl, shared);
+        } else {
+            run_xinput_ui_loop();
         }
-        s
     }
 
-    /// Xbox pads are XInput's; the game reads those itself.
-    fn is_xbox(sdl: &Sdl, id: u32) -> bool {
-        let kind = unsafe { (sdl.type_for_id)(id) };
-        kind == 2 || kind == 3 || unsafe { (sdl.vendor_for_id)(id) } == 0x045e
-    }
-
-    fn name(sdl: &Sdl, id: u32) -> String {
-        let p = unsafe { (sdl.name_for_id)(id) };
-        if p.is_null() { String::new() } else { unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned() }
-    }
-
-    fn read_pads(sdl: &'static Sdl, shared: &'static Shared) {
+    fn run_sdl_loop(sdl: &'static Sdl, shared: Option<&'static Shared>) {
         unsafe {
             for (k, v) in [(c"SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", c"1"), (c"SDL_JOYSTICK_THREAD", c"1")] {
                 (sdl.set_hint)(k.as_ptr(), v.as_ptr());
             }
         }
-        if !unsafe { (sdl.init)(INIT_GAMEPAD) } {
-            let e = unsafe { CStr::from_ptr((sdl.get_error)()) }.to_string_lossy().into_owned();
+        if !unsafe { (sdl.init)(sdl_dyn::INIT_GAMEPAD) } {
+            let e = sdl_dyn::cstr_lossy(unsafe { (sdl.get_error)() });
             tracing::warn!("controllers: SDL couldn't start: {e}");
-            *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = false;
+            run_xinput_ui_loop();
             return;
         }
-        // Nobody reads SDL's event queue: keep it from filling up.
         unsafe {
             (sdl.set_joystick_events)(false);
             (sdl.set_gamepad_events)(false);
         }
-        tracing::info!("controllers: reading PlayStation/Switch/other pads for games");
-        let mut pads: [Option<Open>; shm::SLOTS] = Default::default();
+        tracing::info!("controllers: SDL3 pad reader active");
+        let mut pads: Vec<OpenPad> = Vec::new();
         let mut scanned: Option<Instant> = None;
         loop {
-            if USERS.load(Ordering::Acquire) == 0 {
+            if USERS.load(Ordering::Acquire) == 0 && !ui_active() {
                 let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-                if USERS.load(Ordering::Acquire) == 0 {
-                    for (slot, p) in pads.iter_mut().enumerate() {
-                        if let Some(o) = p.take() {
-                            unsafe { (sdl.close)(o.gp) };
-                        }
-                        shared.slots[slot].write(None);
+                if USERS.load(Ordering::Acquire) == 0 && !ui_active() {
+                    for o in pads.drain(..) {
+                        unsafe { (sdl.close)(o.gp) };
                     }
-                    unsafe { (sdl.quit_subsystem)(INIT_GAMEPAD) };
+                    if let Some(s) = shared {
+                        for slot in &s.slots {
+                            slot.write(None);
+                        }
+                    }
+                    unsafe { (sdl.quit_subsystem)(sdl_dyn::INIT_GAMEPAD) };
                     *running = false;
                     tracing::info!("controllers: stopped reading pads");
                     return;
                 }
             }
             unsafe { (sdl.update)() };
-            if scanned.is_none_or(|t| t.elapsed() > Duration::from_millis(500)) {
+            let force = FORCE_RESCAN.swap(false, Ordering::AcqRel);
+            if force || scanned.is_none_or(|t| t.elapsed() > Duration::from_millis(500)) {
                 scanned = Some(Instant::now());
                 let mut n = 0;
                 let ids = unsafe { (sdl.get_gamepads)(&mut n) };
@@ -296,92 +773,1083 @@ mod imp {
                     let list: Vec<u32> = unsafe { std::slice::from_raw_parts(ids, n.max(0) as usize) }.to_vec();
                     unsafe { (sdl.free)(ids.cast()) };
                     for id in list {
-                        if pads.iter().flatten().any(|o| o.id == id) || is_xbox(sdl, id) {
+                        if pads.iter().any(|o| o.id == id) {
                             continue;
                         }
-                        let Some(slot) = pads.iter().position(Option::is_none) else { break };
                         let gp = unsafe { (sdl.open)(id) };
                         if gp.is_null() {
                             continue;
                         }
-                        if let (Some(has), Some(enable)) = (sdl.has_sensor, sdl.set_sensor_enabled) {
-                            unsafe {
-                                if has(gp, SDL_SENSOR_ACCEL) {
-                                    let _ = enable(gp, SDL_SENSOR_ACCEL, true);
-                                }
-                                if has(gp, SDL_SENSOR_GYRO) {
-                                    let _ = enable(gp, SDL_SENSOR_GYRO, true);
-                                }
-                            }
-                        }
-                        tracing::info!("controllers: {} → game pad {}", name(sdl, id), slot + 1);
-                        shared.slots[slot].set_rumble(0, 0);
-                        pads[slot] = Some(Open { id, gp, last: State::default(), rumble: (0, 0), rumbled: Instant::now() });
+                        let name = sdl_dyn::cstr_lossy(unsafe { (sdl.name_for_id)(id) });
+                        let kind = unsafe { (sdl.type_for_id)(id) };
+                        let vendor = unsafe { (sdl.vendor_for_id)(id) };
+                        let product = sdl.product_for_id.map_or(0, |f| unsafe { f(id) });
+                        let family = ControllerFamily::classify(kind, vendor, &name);
+                        let has_gyro = sdl_dyn::enable_sensors(sdl, gp);
+                        tracing::info!("controllers: detected {} ({})", name, family.label());
+                        pads.push(OpenPad {
+                            id,
+                            gp,
+                            name,
+                            family,
+                            vendor,
+                            product,
+                            has_gyro,
+                            last_shm: State::default(),
+                            rumble: (0, 0),
+                            rumbled: Instant::now(),
+                        });
                     }
                 }
             }
-            for (slot, p) in pads.iter_mut().enumerate() {
-                let Some(o) = p else { continue };
+
+            let cfg = settings();
+            let cal = cfg.calibration;
+            let rumble_target = rumble_lock().lock().unwrap_or_else(|e| e.into_inner()).take();
+            let game_active = USERS.load(Ordering::Acquire) > 0;
+            let mut ui_list = Vec::with_capacity(pads.len());
+            let mut shm_idx = 0usize;
+
+            pads.retain_mut(|o| {
                 if !unsafe { (sdl.connected)(o.gp) } {
-                    tracing::info!("controllers: game pad {} disconnected", slot + 1);
+                    tracing::info!("controllers: {} disconnected", o.name);
                     unsafe { (sdl.close)(o.gp) };
-                    *p = None;
-                    shared.slots[slot].write(None);
-                    continue;
+                    return false;
                 }
-                let mut s = state(sdl, o.gp);
-                s.packet = o.last.packet;
-                if s != o.last {
-                    s.packet = s.packet.wrapping_add(1);
+                let (buttons, misc, touchpad, paddles, sticks, triggers, motion) = sdl_dyn::read_raw(sdl, o.gp);
+                let raw_state = {
+                    let mut st = State {
+                        packet: 0,
+                        buttons,
+                        lx: sticks[0],
+                        ly: sticks[1],
+                        rx: sticks[2],
+                        ry: sticks[3],
+                        lt: sdl_dyn::trigger_u8(triggers[0]),
+                        rt: sdl_dyn::trigger_u8(triggers[1]),
+                        family: o.family.slot_family(),
+                        ..Default::default()
+                    };
+                    if let Some((accel, gyro)) = motion {
+                        st.set_motion(accel, gyro);
+                    }
+                    st
+                };
+
+                let id_str = format!("sdl-{}", o.id);
+                if rumble_target.as_deref() == Some(id_str.as_str()) && cal.rumble_enabled {
+                    unsafe { (sdl.rumble)(o.gp, 0xFFFF, 0xFFFF, 400) };
                 }
-                o.last = s;
-                shared.slots[slot].write(Some(s));
-                // XInput rumble lasts until changed; SDL's needs a duration.
-                let want = shared.slots[slot].rumble();
-                if want != o.rumble || (want != (0, 0) && o.rumbled.elapsed() > Duration::from_secs(20)) {
-                    let ms = if want == (0, 0) { 0 } else { 30_000 };
-                    unsafe { (sdl.rumble)(o.gp, want.0, want.1, ms) };
-                    o.rumble = want;
-                    o.rumbled = Instant::now();
+
+                // Publish enabled non-Xbox controllers to shared memory when a game is running.
+                let mut assigned_slot = None;
+                if game_active && o.family != ControllerFamily::Xbox && cfg.families.is_enabled(o.family) && shm_idx < shm::SLOTS {
+                    if let Some(s) = shared {
+                        let mut calibrated = cal.apply_to_state(raw_state);
+                        calibrated.packet = o.last_shm.packet;
+                        if calibrated != o.last_shm {
+                            calibrated.packet = calibrated.packet.wrapping_add(1);
+                        }
+                        o.last_shm = calibrated;
+                        s.slots[shm_idx].write(Some(calibrated));
+                        let want = if cal.rumble_enabled { s.slots[shm_idx].rumble() } else { (0, 0) };
+                        if want != o.rumble || (want != (0, 0) && o.rumbled.elapsed() > Duration::from_secs(20)) {
+                            let ms = if want == (0, 0) { 0 } else { 30_000 };
+                            unsafe { (sdl.rumble)(o.gp, want.0, want.1, ms) };
+                            o.rumble = want;
+                            o.rumbled = Instant::now();
+                        }
+                        assigned_slot = Some(shm_idx);
+                        shm_idx += 1;
+                    }
+                }
+
+                if ui_active() {
+                    let (conn, batt) = sdl_dyn::connection_and_battery(sdl, o.gp);
+                    let (accel, gyro, has_m) = match motion {
+                        Some((a, g)) => (a, g, true),
+                        None => ([0.0; 3], [0.0; 3], false),
+                    };
+                    let live = build_live_input(
+                        buttons,
+                        misc,
+                        touchpad,
+                        paddles,
+                        sticks[0] as f32 / 32767.0,
+                        sticks[1] as f32 / 32767.0,
+                        sticks[2] as f32 / 32767.0,
+                        sticks[3] as f32 / 32767.0,
+                        triggers[0].max(0) as f32 / 32767.0,
+                        triggers[1].max(0) as f32 / 32767.0,
+                        accel,
+                        gyro,
+                        has_m,
+                        &cal,
+                    );
+                    ui_list.push(DetectedController {
+                        id: id_str,
+                        name: o.name.clone(),
+                        family: o.family,
+                        vendor_id: o.vendor,
+                        product_id: o.product,
+                        connection: conn,
+                        slot: assigned_slot,
+                        battery_percent: batt,
+                        backend: "SDL3",
+                        has_rumble: true,
+                        has_gyro: o.has_gyro,
+                        live,
+                    });
+                }
+                true
+            });
+
+            if let Some(s) = shared {
+                for slot in shm_idx..shm::SLOTS {
+                    s.slots[slot].write(None);
+                }
+                if game_active {
+                    s.heartbeat.store(shm::now_ms(), Ordering::Relaxed);
                 }
             }
-            shared.heartbeat.store(shm::now_ms(), Ordering::Relaxed);
-            std::thread::sleep(Duration::from_millis(2));
+            if ui_active() {
+                *snapshot_lock().lock().unwrap_or_else(|e| e.into_inner()) = DetectionSnapshot {
+                    backend: "SDL3",
+                    controllers: ui_list,
+                    note: None,
+                };
+            }
+            std::thread::sleep(Duration::from_millis(if game_active { 2 } else { 12 }));
         }
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
+    /// Fallback when `SDL3.dll` is not next to Aurora on Windows: expose Xbox XInput pads to Settings.
+    fn run_xinput_ui_loop() {
+        #[repr(C)]
+        #[derive(Clone, Copy, Default)]
+        struct XPad {
+            packet: u32,
+            buttons: u16,
+            lt: u8,
+            rt: u8,
+            lx: i16,
+            ly: i16,
+            rx: i16,
+            ry: i16,
+        }
+        type GetState = unsafe extern "system" fn(u32, *mut XPad) -> u32;
+        type SetState = unsafe extern "system" fn(u32, *mut [u16; 2]) -> u32;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LoadLibraryW(name: *const u16) -> *mut c_void;
+            fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+        }
+        let mut funcs: Option<(GetState, Option<SetState>)> = None;
+        for dll in ["xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"] {
+            let wide: Vec<u16> = dll.encode_utf16().chain([0]).collect();
+            let m = unsafe { LoadLibraryW(wide.as_ptr()) };
+            if m.is_null() {
+                continue;
+            }
+            let g = unsafe { GetProcAddress(m, c"XInputGetState".as_ptr()) };
+            if !g.is_null() {
+                let s = unsafe { GetProcAddress(m, c"XInputSetState".as_ptr()) };
+                let get: GetState = unsafe { std::mem::transmute(g) };
+                let set = (!s.is_null()).then(|| unsafe { std::mem::transmute(s) });
+                funcs = Some((get, set));
+                break;
+            }
+        }
+        loop {
+            if !ui_active() {
+                let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+                if !ui_active() {
+                    *running = false;
+                    return;
+                }
+            }
+            let cal = settings().calibration;
+            let rumble_target = rumble_lock().lock().unwrap_or_else(|e| e.into_inner()).take();
+            let mut list = Vec::new();
+            if let Some((get, set)) = funcs {
+                for i in 0..4u32 {
+                    let mut xp = XPad::default();
+                    if unsafe { get(i, &mut xp) } == 0 {
+                        let id = format!("xinput-{i}");
+                        if rumble_target.as_deref() == Some(id.as_str()) && cal.rumble_enabled
+                            && let Some(set_fn) = set
+                        {
+                            let mut v = [0x5000u16, 0x9000u16];
+                            unsafe { set_fn(i, &mut v) };
+                        }
+                        let live = build_live_input(
+                            xp.buttons,
+                            false,
+                            false,
+                            [false; 4],
+                            xp.lx as f32 / 32767.0,
+                            xp.ly as f32 / 32767.0,
+                            xp.rx as f32 / 32767.0,
+                            xp.ry as f32 / 32767.0,
+                            xp.lt as f32 / 255.0,
+                            xp.rt as f32 / 255.0,
+                            [0.0; 3],
+                            [0.0; 3],
+                            false,
+                            &cal,
+                        );
+                        list.push(DetectedController {
+                            id,
+                            name: format!("Xbox Controller #{}", i + 1),
+                            family: ControllerFamily::Xbox,
+                            vendor_id: 0x045e,
+                            product_id: 0,
+                            connection: ConnectionKind::Unknown,
+                            slot: Some(i as usize),
+                            battery_percent: None,
+                            backend: "XInput",
+                            has_rumble: set.is_some(),
+                            has_gyro: false,
+                            live,
+                        });
+                    }
+                }
+            }
+            *snapshot_lock().lock().unwrap_or_else(|e| e.into_inner()) = DetectionSnapshot {
+                backend: "XInput",
+                controllers: list,
+                note: Some("SDL3.dll is missing next to Aurora; only Xbox XInput controllers are visible.".into()),
+            };
+            std::thread::sleep(Duration::from_millis(16));
+        }
+    }
+}
 
-        /// Needs SDL3.dll next to the test binary (skipped without it).
-        #[test]
-        fn reads_pads_until_stopped() {
-            let dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
-            if !dir.join("SDL3.dll").is_file() {
-                eprintln!("no SDL3.dll next to the test: skipped");
+#[cfg(not(windows))]
+mod platform {
+    use super::{
+        ConnectionKind, ControllerFamily, DetectedController, DetectionSnapshot, FORCE_RESCAN, LiveInput,
+        build_live_input, rumble_lock, sdl_dyn::{self, Gp, Sdl}, settings, snapshot_lock, ui_active,
+    };
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    static RUNNING: Mutex<bool> = Mutex::new(false);
+
+    pub fn ensure_ui_reader() {
+        let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        if !*running {
+            if std::thread::Builder::new().name("pads-linux".into()).spawn(read_loop).is_ok() {
+                *running = true;
+            }
+        }
+    }
+
+    struct SdlPad {
+        id: u32,
+        gp: Gp,
+        name: String,
+        family: ControllerFamily,
+        vendor: u16,
+        product: u16,
+        has_gyro: bool,
+    }
+
+    fn read_loop() {
+        if let Some(sdl) = sdl_dyn::sdl() {
+            unsafe {
+                for (k, v) in [(c"SDL_NO_SIGNAL_HANDLERS", c"1"), (c"SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", c"1")] {
+                    (sdl.set_hint)(k.as_ptr(), v.as_ptr());
+                }
+            }
+            let init_flags = sdl_dyn::INIT_GAMEPAD | sdl_dyn::INIT_HAPTIC;
+            if unsafe { (sdl.init)(init_flags) || (sdl.init)(sdl_dyn::INIT_GAMEPAD) } {
+                run_sdl_linux(sdl);
                 return;
             }
-            let wait = |what: &str, f: &dyn Fn() -> bool| {
-                let t = Instant::now();
-                while !f() {
-                    assert!(t.elapsed() < Duration::from_secs(10), "{what}");
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-            };
-            let name = start().expect("pads start");
-            assert!(name.starts_with("Local\\sir-pads-"));
-            let (shared, _) = mapping().unwrap();
-            wait("the reader keeps the heartbeat", &|| shared.live());
-            let pads: Vec<_> = shared.slots.iter().map(|s| s.read()).collect();
-            eprintln!("pads seen: {pads:?}");
-            stop();
-            wait("the reader stops", &|| !*RUNNING.lock().unwrap());
-            // And starts again for the next game.
-            start().expect("pads start again");
-            wait("the reader restarts", &|| *RUNNING.lock().unwrap());
-            stop();
-            wait("the reader stops again", &|| !*RUNNING.lock().unwrap());
+            tracing::warn!("controllers: SDL3 gamepad init failed ({}); falling back to Linux evdev/js", sdl_dyn::cstr_lossy(unsafe { (sdl.get_error)() }));
         }
+        run_native_linux();
+    }
+
+    /// Trigger a short rumble pulse directly via Linux evdev `EVIOCSFF` + `EV_FF`
+    /// as a fallback when SDL3 rumble returns false (common on Bluetooth Xbox pads).
+    fn evdev_rumble_fallback(vendor: u16, product: u16) {
+        let pads = discover_sysfs_pads(Path::new("/sys/class/input"), Path::new("/dev/input"));
+        let target = pads
+            .iter()
+            .find(|p| (vendor == 0 || p.vendor_id == vendor) && (product == 0 || p.product_id == product))
+            .or_else(|| pads.first());
+        let Some(ev_path) = target.and_then(|p| p.event_node.clone()) else {
+            return;
+        };
+        let _ = std::thread::Builder::new().name("pad-ff".into()).spawn(move || {
+            use std::io::Write;
+            let Ok(mut f) = File::options().read(true).write(true).open(&ev_path) else {
+                tracing::debug!("controllers: evdev rumble cannot open {} rw", ev_path.display());
+                return;
+            };
+            // Linux `struct ff_effect` (x86_64: 48 bytes, FF_RUMBLE = 0x50).
+            #[repr(C)]
+            struct FfEffect {
+                kind: u16,
+                id: i16,
+                direction: u16,
+                trigger_button: u16,
+                trigger_interval: u16,
+                replay_length: u16,
+                replay_delay: u16,
+                strong_magnitude: u16,
+                weak_magnitude: u16,
+                _pad: [u8; 28],
+            }
+            let mut eff = FfEffect {
+                kind: 0x50, // FF_RUMBLE
+                id: -1,
+                direction: 0,
+                trigger_button: 0,
+                trigger_interval: 0,
+                replay_length: 400,
+                replay_delay: 0,
+                strong_magnitude: 0xC000,
+                weak_magnitude: 0xC000,
+                _pad: [0u8; 28],
+            };
+            // EVIOCSFF = _IOW('E', 0x80, struct ff_effect)
+            let eviocsff = ((1u32 << 30)
+                | ((std::mem::size_of::<FfEffect>() as u32) << 16)
+                | ((b'E' as u32) << 8)
+                | 0x80) as libc::Ioctl;
+            // EVIOCRMFF = _IOW('E', 0x81, int)
+            let eviocrmff = ((1u32 << 30) | (4u32 << 16) | ((b'E' as u32) << 8) | 0x81) as libc::Ioctl;
+            if unsafe { libc::ioctl(f.as_raw_fd(), eviocsff, &mut eff as *mut FfEffect) } < 0 {
+                return;
+            }
+            let play = InputEvent {
+                time: libc::timeval { tv_sec: 0, tv_usec: 0 },
+                kind: 0x15, // EV_FF
+                code: eff.id as u16,
+                value: 1,
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts((&play as *const InputEvent).cast::<u8>(), std::mem::size_of::<InputEvent>())
+            };
+            let _ = f.write_all(bytes);
+            std::thread::sleep(Duration::from_millis(450));
+            let _ = unsafe { libc::ioctl(f.as_raw_fd(), eviocrmff, eff.id as libc::c_int) };
+        });
+    }
+
+    fn run_sdl_linux(sdl: &'static Sdl) {
+        let mut pads: Vec<SdlPad> = Vec::new();
+        let mut scanned: Option<Instant> = None;
+        let mut last_reinit = Instant::now();
+        let init_flags = sdl_dyn::INIT_GAMEPAD | sdl_dyn::INIT_HAPTIC;
+        loop {
+            if !ui_active() {
+                let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+                if !ui_active() {
+                    for o in pads.drain(..) {
+                        unsafe { (sdl.close)(o.gp) };
+                    }
+                    unsafe { (sdl.quit_subsystem)(init_flags) };
+                    *running = false;
+                    return;
+                }
+            }
+            if let Some(pump) = sdl.pump_events {
+                unsafe { pump() };
+            }
+            unsafe { (sdl.update)() };
+            let force = FORCE_RESCAN.swap(false, Ordering::AcqRel);
+            let need_bt_reinit = pads.is_empty()
+                && last_reinit.elapsed() > Duration::from_secs(2)
+                && !discover_sysfs_pads(Path::new("/sys/class/input"), Path::new("/dev/input")).is_empty();
+            if force || need_bt_reinit {
+                last_reinit = Instant::now();
+                for o in pads.drain(..) {
+                    unsafe { (sdl.close)(o.gp) };
+                }
+                unsafe {
+                    (sdl.quit_subsystem)(init_flags);
+                    if let Some(init_sub) = sdl.init_subsystem {
+                        if !init_sub(init_flags) {
+                            let _ = init_sub(sdl_dyn::INIT_GAMEPAD);
+                        }
+                    } else if !(sdl.init)(init_flags) {
+                        let _ = (sdl.init)(sdl_dyn::INIT_GAMEPAD);
+                    }
+                    if let Some(pump) = sdl.pump_events {
+                        pump();
+                    }
+                    (sdl.update)();
+                }
+                scanned = None;
+            }
+            if force || scanned.is_none_or(|t| t.elapsed() > Duration::from_millis(500)) {
+                scanned = Some(Instant::now());
+                let mut n = 0;
+                let ids = unsafe { (sdl.get_gamepads)(&mut n) };
+                if !ids.is_null() {
+                    let list: Vec<u32> = unsafe { std::slice::from_raw_parts(ids, n.max(0) as usize) }.to_vec();
+                    unsafe { (sdl.free)(ids.cast()) };
+                    for id in list {
+                        if pads.iter().any(|o| o.id == id) {
+                            continue;
+                        }
+                        let gp = unsafe { (sdl.open)(id) };
+                        if gp.is_null() {
+                            continue;
+                        }
+                        let name = sdl_dyn::cstr_lossy(unsafe { (sdl.name_for_id)(id) });
+                        let kind = unsafe { (sdl.type_for_id)(id) };
+                        let vendor = unsafe { (sdl.vendor_for_id)(id) };
+                        let product = sdl.product_for_id.map_or(0, |f| unsafe { f(id) });
+                        let family = ControllerFamily::classify(kind, vendor, &name);
+                        let has_gyro = sdl_dyn::enable_sensors(sdl, gp);
+                        pads.push(SdlPad { id, gp, name, family, vendor, product, has_gyro });
+                    }
+                }
+            }
+            let cal = settings().calibration;
+            let rumble_target = rumble_lock().lock().unwrap_or_else(|e| e.into_inner()).take();
+            let mut ui_list = Vec::with_capacity(pads.len());
+            let mut slot_idx = 0usize;
+            pads.retain(|o| {
+                if !unsafe { (sdl.connected)(o.gp) } {
+                    unsafe { (sdl.close)(o.gp) };
+                    return false;
+                }
+                let id_str = format!("sdl-{}", o.id);
+                if rumble_target.as_deref() == Some(id_str.as_str()) && cal.rumble_enabled {
+                    let ok = unsafe { (sdl.rumble)(o.gp, 0xFFFF, 0xFFFF, 400) };
+                    if !ok {
+                        evdev_rumble_fallback(o.vendor, o.product);
+                    }
+                }
+                let (buttons, misc, touchpad, paddles, sticks, triggers, motion) = sdl_dyn::read_raw(sdl, o.gp);
+                let (conn, batt) = sdl_dyn::connection_and_battery(sdl, o.gp);
+                let (accel, gyro, has_m) = match motion {
+                    Some((a, g)) => (a, g, true),
+                    None => ([0.0; 3], [0.0; 3], false),
+                };
+                let live = build_live_input(
+                    buttons,
+                    misc,
+                    touchpad,
+                    paddles,
+                    sticks[0] as f32 / 32767.0,
+                    sticks[1] as f32 / 32767.0,
+                    sticks[2] as f32 / 32767.0,
+                    sticks[3] as f32 / 32767.0,
+                    triggers[0].max(0) as f32 / 32767.0,
+                    triggers[1].max(0) as f32 / 32767.0,
+                    accel,
+                    gyro,
+                    has_m,
+                    &cal,
+                );
+                let slot = (slot_idx < 4).then(|| {
+                    let s = slot_idx;
+                    slot_idx += 1;
+                    s
+                });
+                ui_list.push(DetectedController {
+                    id: id_str,
+                    name: o.name.clone(),
+                    family: o.family,
+                    vendor_id: o.vendor,
+                    product_id: o.product,
+                    connection: conn,
+                    slot,
+                    battery_percent: batt,
+                    backend: "SDL3",
+                    has_rumble: true,
+                    has_gyro: o.has_gyro,
+                    live,
+                });
+                true
+            });
+            *snapshot_lock().lock().unwrap_or_else(|e| e.into_inner()) = DetectionSnapshot {
+                backend: "SDL3",
+                controllers: ui_list,
+                note: None,
+            };
+            std::thread::sleep(Duration::from_millis(16));
+        }
+    }
+
+    // -------------------------------------------------------- Linux sysfs / evdev / js fallback
+
+    #[derive(Debug, Clone)]
+    pub(super) struct SysfsPad {
+        pub id: String,
+        pub name: String,
+        pub family: ControllerFamily,
+        pub vendor_id: u16,
+        pub product_id: u16,
+        pub connection: ConnectionKind,
+        pub event_node: Option<PathBuf>,
+        pub js_node: Option<PathBuf>,
+    }
+
+    /// Check if a bit in Linux `/sys/class/input/*/device/capabilities/key` is set.
+    /// Words are hex `usize` values listed most-significant word first.
+    pub(super) fn has_cap_bit(caps: &str, bit: usize) -> bool {
+        let bits_per_word = usize::BITS as usize;
+        let words: Vec<&str> = caps.split_whitespace().collect();
+        let word_from_lsb = bit / bits_per_word;
+        if word_from_lsb >= words.len() {
+            return false;
+        }
+        let idx = words.len() - 1 - word_from_lsb;
+        usize::from_str_radix(words[idx], 16).is_ok_and(|w| (w >> (bit % bits_per_word)) & 1 != 0)
+    }
+
+    pub(super) fn is_gamepad_caps(key_caps: &str, props: &str) -> bool {
+        // Skip dedicated accelerometer/IMU nodes (`INPUT_PROP_ACCELEROMETER = 6`).
+        if has_cap_bit(props, 6) {
+            return false;
+        }
+        // BTN_JOYSTICK (0x120..=0x12f) or BTN_GAMEPAD (0x130..=0x13e).
+        (0x120usize..=0x13e).any(|b| has_cap_bit(key_caps, b))
+    }
+
+    fn read_hex_u16(path: &Path) -> u16 {
+        std::fs::read_to_string(path).ok().and_then(|s| u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()).unwrap_or(0)
+    }
+
+    pub(super) fn discover_sysfs_pads(sys_class_input: &Path, dev_input: &Path) -> Vec<SysfsPad> {
+        let Ok(rd) = std::fs::read_dir(sys_class_input) else {
+            return Vec::new();
+        };
+        let mut js_by_dev: HashMap<PathBuf, PathBuf> = HashMap::new();
+        let mut events: Vec<(String, PathBuf)> = Vec::new();
+        for e in rd.flatten() {
+            let fname = e.file_name().to_string_lossy().into_owned();
+            let path = e.path();
+            if fname.starts_with("js") && fname[2..].bytes().all(|b| b.is_ascii_digit()) {
+                if let Ok(dev) = std::fs::canonicalize(path.join("device")) {
+                    js_by_dev.insert(dev, dev_input.join(&fname));
+                }
+            } else if fname.starts_with("event") && fname[5..].bytes().all(|b| b.is_ascii_digit()) {
+                events.push((fname, path));
+            }
+        }
+        events.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut out = Vec::new();
+        for (fname, path) in events {
+            let dev_dir = path.join("device");
+            let key_caps = std::fs::read_to_string(dev_dir.join("capabilities/key")).unwrap_or_default();
+            let props = std::fs::read_to_string(dev_dir.join("properties")).unwrap_or_default();
+            if !is_gamepad_caps(&key_caps, &props) {
+                continue;
+            }
+            let name = std::fs::read_to_string(dev_dir.join("name")).map(|s| s.trim().to_string()).unwrap_or_else(|_| fname.clone());
+            let vendor_id = read_hex_u16(&dev_dir.join("id/vendor"));
+            let product_id = read_hex_u16(&dev_dir.join("id/product"));
+            let bustype = read_hex_u16(&dev_dir.join("id/bustype"));
+            let connection = match bustype {
+                0x0005 => ConnectionKind::Wireless,
+                0x0003 => ConnectionKind::Wired,
+                _ => ConnectionKind::Unknown,
+            };
+            let canon = std::fs::canonicalize(&dev_dir).ok();
+            let js_node = canon.as_ref().and_then(|c| js_by_dev.get(c).cloned());
+            let ev_path = dev_input.join(&fname);
+            let family = ControllerFamily::classify(0, vendor_id, &name);
+            out.push(SysfsPad {
+                id: format!("linux-{fname}"),
+                name,
+                family,
+                vendor_id,
+                product_id,
+                connection,
+                event_node: Some(ev_path),
+                js_node,
+            });
+        }
+        out
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct InputEvent {
+        time: libc::timeval,
+        kind: u16,
+        code: u16,
+        value: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct JsEvent {
+        time: u32,
+        value: i16,
+        kind: u8,
+        number: u8,
+    }
+
+    #[derive(Default)]
+    struct RawLinuxState {
+        buttons: u16,
+        misc: bool,
+        lx: f32,
+        ly: f32,
+        rx: f32,
+        ry: f32,
+        lt: f32,
+        rt: f32,
+        hat_x: i32,
+        hat_y: i32,
+    }
+
+    enum OpenNode {
+        Evdev { file: File, bounds: HashMap<u16, (i32, i32)>, raw: RawLinuxState },
+        Js { file: File, raw: RawLinuxState },
+        MetadataOnly,
+    }
+
+    fn query_abs_bounds(fd: i32) -> HashMap<u16, (i32, i32)> {
+        let mut map = HashMap::new();
+        for code in [0u16, 1, 2, 3, 4, 5, 16, 17] {
+            let mut info = [0i32; 6];
+            let req = ((2u32 << 30) | (24u32 << 16) | ((b'E' as u32) << 8) | (0x40 + code as u32)) as libc::Ioctl;
+            if unsafe { libc::ioctl(fd, req, info.as_mut_ptr()) } >= 0 {
+                map.insert(code, (info[1], info[2]));
+            }
+        }
+        map
+    }
+
+    fn norm_axis(val: i32, min: i32, max: i32) -> f32 {
+        if max <= min {
+            return 0.0;
+        }
+        let span = (max - min) as f32;
+        (((val - min) as f32 / span) * 2.0 - 1.0).clamp(-1.0, 1.0)
+    }
+
+    fn norm_trigger(val: i32, min: i32, max: i32) -> f32 {
+        if max <= min {
+            return 0.0;
+        }
+        ((val - min) as f32 / (max - min) as f32).clamp(0.0, 1.0)
+    }
+
+    fn set_bit(buttons: &mut u16, bit: u16, down: bool) {
+        if down {
+            *buttons |= bit;
+        } else {
+            *buttons &= !bit;
+        }
+    }
+
+    fn open_node(p: &SysfsPad) -> OpenNode {
+        if let Some(ev) = &p.event_node
+            && let Ok(f) = File::options().read(true).custom_flags(libc::O_NONBLOCK).open(ev)
+        {
+            let bounds = query_abs_bounds(f.as_raw_fd());
+            return OpenNode::Evdev { file: f, bounds, raw: RawLinuxState::default() };
+        }
+        if let Some(js) = &p.js_node
+            && let Ok(f) = File::options().read(true).custom_flags(libc::O_NONBLOCK).open(js)
+        {
+            return OpenNode::Js { file: f, raw: RawLinuxState::default() };
+        }
+        OpenNode::MetadataOnly
+    }
+
+    fn poll_open_node(node: &mut OpenNode) {
+        match node {
+            OpenNode::Evdev { file, bounds, raw } => {
+                let mut buf = [0u8; std::mem::size_of::<InputEvent>() * 16];
+                while let Ok(n) = file.read(&mut buf) {
+                    let sz = std::mem::size_of::<InputEvent>();
+                    if n < sz {
+                        break;
+                    }
+                    for chunk in buf[..n].chunks_exact(sz) {
+                        let ev = unsafe { std::ptr::read_unaligned(chunk.as_ptr().cast::<InputEvent>()) };
+                        match ev.kind {
+                            0x01 => {
+                                let down = ev.value != 0;
+                                match ev.code {
+                                    0x130 => set_bit(&mut raw.buttons, 0x1000, down), // BTN_SOUTH
+                                    0x131 => set_bit(&mut raw.buttons, 0x2000, down), // BTN_EAST
+                                    0x134 => set_bit(&mut raw.buttons, 0x4000, down), // BTN_WEST (X)
+                                    0x133 => set_bit(&mut raw.buttons, 0x8000, down), // BTN_NORTH (Y)
+                                    0x136 => set_bit(&mut raw.buttons, 0x0100, down), // BTN_TL
+                                    0x137 => set_bit(&mut raw.buttons, 0x0200, down), // BTN_TR
+                                    0x13a => set_bit(&mut raw.buttons, 0x0020, down), // BTN_SELECT
+                                    0x13b => set_bit(&mut raw.buttons, 0x0010, down), // BTN_START
+                                    0x13c => set_bit(&mut raw.buttons, super::shm::GUIDE, down), // BTN_MODE
+                                    0x13d => set_bit(&mut raw.buttons, 0x0040, down), // BTN_THUMBL
+                                    0x13e => set_bit(&mut raw.buttons, 0x0080, down), // BTN_THUMBR
+                                    0x220 => set_bit(&mut raw.buttons, 0x0001, down), // DPAD_UP
+                                    0x221 => set_bit(&mut raw.buttons, 0x0002, down), // DPAD_DOWN
+                                    0x222 => set_bit(&mut raw.buttons, 0x0004, down), // DPAD_LEFT
+                                    0x223 => set_bit(&mut raw.buttons, 0x0008, down), // DPAD_RIGHT
+                                    0x138 => raw.lt = if down { 1.0 } else { 0.0 },   // BTN_TL2
+                                    0x139 => raw.rt = if down { 1.0 } else { 0.0 },   // BTN_TR2
+                                    _ => {}
+                                }
+                            }
+                            0x03 => {
+                                let (min, max) = bounds.get(&ev.code).copied().unwrap_or((-32768, 32767));
+                                match ev.code {
+                                    0x00 => raw.lx = norm_axis(ev.value, min, max),
+                                    0x01 => raw.ly = -norm_axis(ev.value, min, max),
+                                    0x03 => raw.rx = norm_axis(ev.value, min, max),
+                                    0x04 => raw.ry = -norm_axis(ev.value, min, max),
+                                    0x02 => raw.lt = norm_trigger(ev.value, if min < 0 { 0 } else { min }, max),
+                                    0x05 => raw.rt = norm_trigger(ev.value, if min < 0 { 0 } else { min }, max),
+                                    0x10 => {
+                                        raw.hat_x = ev.value;
+                                        set_bit(&mut raw.buttons, 0x0004, ev.value < 0);
+                                        set_bit(&mut raw.buttons, 0x0008, ev.value > 0);
+                                    }
+                                    0x11 => {
+                                        raw.hat_y = ev.value;
+                                        set_bit(&mut raw.buttons, 0x0001, ev.value < 0);
+                                        set_bit(&mut raw.buttons, 0x0002, ev.value > 0);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            OpenNode::Js { file, raw } => {
+                let mut buf = [0u8; std::mem::size_of::<JsEvent>() * 16];
+                while let Ok(n) = file.read(&mut buf) {
+                    let sz = std::mem::size_of::<JsEvent>();
+                    if n < sz {
+                        break;
+                    }
+                    for chunk in buf[..n].chunks_exact(sz) {
+                        let ev = unsafe { std::ptr::read_unaligned(chunk.as_ptr().cast::<JsEvent>()) };
+                        match ev.kind & !0x80 {
+                            1 => {
+                                let down = ev.value != 0;
+                                match ev.number {
+                                    0 => set_bit(&mut raw.buttons, 0x1000, down),
+                                    1 => set_bit(&mut raw.buttons, 0x2000, down),
+                                    2 => set_bit(&mut raw.buttons, 0x4000, down),
+                                    3 => set_bit(&mut raw.buttons, 0x8000, down),
+                                    4 => set_bit(&mut raw.buttons, 0x0100, down),
+                                    5 => set_bit(&mut raw.buttons, 0x0200, down),
+                                    6 => set_bit(&mut raw.buttons, 0x0020, down),
+                                    7 => set_bit(&mut raw.buttons, 0x0010, down),
+                                    8 => set_bit(&mut raw.buttons, super::shm::GUIDE, down),
+                                    9 => set_bit(&mut raw.buttons, 0x0040, down),
+                                    10 => set_bit(&mut raw.buttons, 0x0080, down),
+                                    _ => {}
+                                }
+                            }
+                            2 => {
+                                let v = ev.value as f32 / 32767.0;
+                                match ev.number {
+                                    0 => raw.lx = v.clamp(-1.0, 1.0),
+                                    1 => raw.ly = (-v).clamp(-1.0, 1.0),
+                                    2 => raw.lt = ((v + 1.0) * 0.5).clamp(0.0, 1.0),
+                                    3 => raw.rx = v.clamp(-1.0, 1.0),
+                                    4 => raw.ry = (-v).clamp(-1.0, 1.0),
+                                    5 => raw.rt = ((v + 1.0) * 0.5).clamp(0.0, 1.0),
+                                    6 => {
+                                        set_bit(&mut raw.buttons, 0x0004, ev.value < -16000);
+                                        set_bit(&mut raw.buttons, 0x0008, ev.value > 16000);
+                                    }
+                                    7 => {
+                                        set_bit(&mut raw.buttons, 0x0001, ev.value < -16000);
+                                        set_bit(&mut raw.buttons, 0x0002, ev.value > 16000);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            OpenNode::MetadataOnly => {}
+        }
+    }
+
+    fn run_native_linux() {
+        let mut nodes: Vec<(SysfsPad, OpenNode)> = Vec::new();
+        let mut scanned: Option<Instant> = None;
+        loop {
+            if !ui_active() {
+                let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+                if !ui_active() {
+                    *running = false;
+                    return;
+                }
+            }
+            let force = FORCE_RESCAN.swap(false, Ordering::AcqRel);
+            if force || scanned.is_none_or(|t| t.elapsed() > Duration::from_millis(800)) {
+                scanned = Some(Instant::now());
+                let found = discover_sysfs_pads(Path::new("/sys/class/input"), Path::new("/dev/input"));
+                let mut next = Vec::with_capacity(found.len());
+                for pad in found {
+                    if let Some(pos) = nodes.iter().position(|(existing, _)| existing.id == pad.id) {
+                        let (_, existing_node) = nodes.swap_remove(pos);
+                        next.push((pad, existing_node));
+                    } else {
+                        let node = open_node(&pad);
+                        next.push((pad, node));
+                    }
+                }
+                nodes = next;
+            }
+
+            let cal = settings().calibration;
+            let mut list = Vec::with_capacity(nodes.len());
+            let mut any_readonly = false;
+            for (idx, (pad, node)) in nodes.iter_mut().enumerate() {
+                poll_open_node(node);
+                let backend = match node {
+                    OpenNode::Evdev { .. } => "evdev",
+                    OpenNode::Js { .. } => "js",
+                    OpenNode::MetadataOnly => {
+                        any_readonly = true;
+                        "sysfs"
+                    }
+                };
+                let live = match node {
+                    OpenNode::Evdev { raw, .. } | OpenNode::Js { raw, .. } => build_live_input(
+                        raw.buttons,
+                        raw.misc,
+                        false,
+                        [false; 4],
+                        raw.lx,
+                        raw.ly,
+                        raw.rx,
+                        raw.ry,
+                        raw.lt,
+                        raw.rt,
+                        [0.0; 3],
+                        [0.0; 3],
+                        false,
+                        &cal,
+                    ),
+                    OpenNode::MetadataOnly => LiveInput::default(),
+                };
+                list.push(DetectedController {
+                    id: pad.id.clone(),
+                    name: pad.name.clone(),
+                    family: pad.family,
+                    vendor_id: pad.vendor_id,
+                    product_id: pad.product_id,
+                    connection: pad.connection,
+                    slot: (idx < 4).then_some(idx),
+                    battery_percent: None,
+                    backend,
+                    has_rumble: false,
+                    has_gyro: false,
+                    live,
+                });
+            }
+            let note = any_readonly.then(|| "Device permissions restrict live input reading; check udev / input group permissions.".to_string());
+            *snapshot_lock().lock().unwrap_or_else(|e| e.into_inner()) = DetectionSnapshot {
+                backend: "Linux evdev/js",
+                controllers: list,
+                note,
+            };
+            std::thread::sleep(Duration::from_millis(16));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shm::FAMILY_ALL;
+
+    #[test]
+    fn family_classification_handles_sdl_vendor_and_name() {
+        assert_eq!(ControllerFamily::classify(3, 0, "Controller"), ControllerFamily::Xbox);
+        assert_eq!(ControllerFamily::classify(6, 0, "Controller"), ControllerFamily::PlayStation);
+        assert_eq!(ControllerFamily::classify(7, 0, "Controller"), ControllerFamily::SwitchPro);
+        assert_eq!(ControllerFamily::classify(0, 0x054c, "Wireless Controller"), ControllerFamily::PlayStation);
+        assert_eq!(ControllerFamily::classify(0, 0x057e, "Pro Controller"), ControllerFamily::SwitchPro);
+        assert_eq!(ControllerFamily::classify(0, 0x045e, "Pad"), ControllerFamily::Xbox);
+        assert_eq!(ControllerFamily::classify(0, 0x1234, "8BitDo Ultimate Xbox"), ControllerFamily::Xbox);
+        assert_eq!(ControllerFamily::classify(0, 0x1234, "DualSense Wireless Controller"), ControllerFamily::PlayStation);
+        assert_eq!(ControllerFamily::classify(0, 0x1234, "Generic USB Gamepad"), ControllerFamily::Generic);
+    }
+
+    #[test]
+    fn resolve_steam_input_honors_override_and_global_toggles() {
+        let all = FamilyToggles::default();
+        assert_eq!(
+            resolve_steam_input(0, &all),
+            SteamInputDecision { enabled: true, families_mask: FAMILY_ALL, use_shm_bridge: true }
+        );
+        assert_eq!(
+            resolve_steam_input(1, &all),
+            SteamInputDecision { enabled: true, families_mask: FAMILY_ALL, use_shm_bridge: true }
+        );
+        // Disable Steam Input for game (2) disables both ISteamInput and SHM bridge.
+        assert_eq!(
+            resolve_steam_input(2, &all),
+            SteamInputDecision { enabled: false, families_mask: 0, use_shm_bridge: false }
+        );
+
+        // Only Xbox enabled globally -> SHM bridge is unnecessary even for Default/Enable.
+        let xbox_only = FamilyToggles { xbox: true, playstation: false, switch_pro: false, generic: false };
+        assert_eq!(
+            resolve_steam_input(0, &xbox_only),
+            SteamInputDecision { enabled: true, families_mask: FAMILY_XBOX, use_shm_bridge: false }
+        );
+        assert_eq!(
+            resolve_steam_input(1, &xbox_only),
+            SteamInputDecision { enabled: true, families_mask: FAMILY_XBOX, use_shm_bridge: false }
+        );
+
+        // All global families disabled -> Default and Enable both stay disabled.
+        let none = FamilyToggles { xbox: false, playstation: false, switch_pro: false, generic: false };
+        assert_eq!(
+            resolve_steam_input(0, &none),
+            SteamInputDecision { enabled: false, families_mask: 0, use_shm_bridge: false }
+        );
+        assert_eq!(
+            resolve_steam_input(1, &none),
+            SteamInputDecision { enabled: false, families_mask: 0, use_shm_bridge: false }
+        );
+    }
+
+    #[test]
+    fn settings_persistence_roundtrip_and_clamping() {
+        let s = ControllerSettings {
+            families: FamilyToggles { xbox: false, playstation: true, switch_pro: false, generic: true },
+            calibration: PadCalibration {
+                left_deadzone: 0.22,
+                right_deadzone: 0.18,
+                trigger_threshold: 0.12,
+                gyro_enabled: false,
+                gyro_sensitivity: 1.75,
+                rumble_enabled: false,
+                nintendo_layout: true,
+            },
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: ControllerSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+
+        set_settings(ControllerSettings {
+            families: s.families,
+            calibration: PadCalibration { left_deadzone: 0.99, gyro_sensitivity: 9.0, ..s.calibration },
+        });
+        let stored = settings();
+        assert_eq!(stored.calibration.left_deadzone, 0.50);
+        assert_eq!(stored.calibration.gyro_sensitivity, 4.0);
+        set_settings(ControllerSettings::default());
+    }
+
+    #[test]
+    fn build_live_input_applies_calibration() {
+        let cal = PadCalibration {
+            left_deadzone: 0.25,
+            right_deadzone: 0.10,
+            trigger_threshold: 0.20,
+            gyro_enabled: true,
+            gyro_sensitivity: 2.0,
+            rumble_enabled: true,
+            nintendo_layout: true,
+        };
+        let live = build_live_input(
+            0x1000 | 0x4000,
+            true,
+            false,
+            [true, false, false, false],
+            0.15,
+            0.0,
+            0.55,
+            0.0,
+            0.10,
+            0.60,
+            [0.0, 9.8, 0.0],
+            [0.5, -0.25, 0.0],
+            true,
+            &cal,
+        );
+        assert_eq!(live.buttons, 0x2000 | 0x8000);
+        assert_eq!((live.lx, live.ly), (0.0, 0.0));
+        assert!((live.raw_lx - 0.15).abs() < 0.001);
+        assert!(live.rx > 0.49 && live.rx < 0.51);
+        assert_eq!(live.lt, 0.0);
+        assert!((live.rt - 0.5).abs() < 0.001);
+        assert!(live.has_motion);
+        assert_eq!(live.gyro, [1.0, -0.5, 0.0]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn linux_sysfs_discovery_filters_gamepads_and_ignores_mice_and_imus() {
+        let root = std::env::temp_dir().join(format!("sir-sysfs-pads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sys = root.join("sys");
+        let dev = root.join("dev");
+        std::fs::create_dir_all(&dev).unwrap();
+
+        // Gamepad event0 (DualSense, BTN_SOUTH = 0x130 -> word index 4 from LSB on 64-bit, bit 0x10000).
+        let gp_dev = sys.join("event0/device");
+        std::fs::create_dir_all(gp_dev.join("id")).unwrap();
+        std::fs::create_dir_all(gp_dev.join("capabilities")).unwrap();
+        std::fs::write(gp_dev.join("name"), "Sony Interactive Entertainment DualSense Wireless Controller\n").unwrap();
+        std::fs::write(gp_dev.join("id/vendor"), "054c\n").unwrap();
+        std::fs::write(gp_dev.join("id/product"), "0ce6\n").unwrap();
+        std::fs::write(gp_dev.join("id/bustype"), "0005\n").unwrap();
+        // Bit 0x130: word 4 (bits 256..319) on 64-bit, or word 9 (bits 288..319) on 32-bit.
+        let bits = usize::BITS as usize;
+        let word_idx = 0x130 / bits;
+        let bit_val = 1usize << (0x130 % bits);
+        let mut words = vec!["0".to_string(); word_idx + 1];
+        words[0] = format!("{bit_val:x}");
+        std::fs::write(gp_dev.join("capabilities/key"), words.join(" ")).unwrap();
+        std::fs::write(gp_dev.join("capabilities/abs"), "0\n").unwrap();
+        std::fs::write(gp_dev.join("properties"), "0\n").unwrap();
+
+        // IMU event1 (same key/abs or none, with INPUT_PROP_ACCELEROMETER bit 6 = 0x40).
+        let imu_dev = sys.join("event1/device");
+        std::fs::create_dir_all(imu_dev.join("id")).unwrap();
+        std::fs::create_dir_all(imu_dev.join("capabilities")).unwrap();
+        std::fs::write(imu_dev.join("name"), "DualSense Motion Sensors\n").unwrap();
+        std::fs::write(imu_dev.join("capabilities/key"), words.join(" ")).unwrap();
+        std::fs::write(imu_dev.join("properties"), "40\n").unwrap();
+
+        // Mouse event2 (BTN_LEFT = 0x110).
+        let mouse_dev = sys.join("event2/device");
+        std::fs::create_dir_all(mouse_dev.join("id")).unwrap();
+        std::fs::create_dir_all(mouse_dev.join("capabilities")).unwrap();
+        std::fs::write(mouse_dev.join("name"), "USB Gaming Mouse\n").unwrap();
+        let m_idx = 0x110 / bits;
+        let m_bit = 1usize << (0x110 % bits);
+        let mut m_words = vec!["0".to_string(); m_idx + 1];
+        m_words[0] = format!("{m_bit:x}");
+        std::fs::write(mouse_dev.join("capabilities/key"), m_words.join(" ")).unwrap();
+        std::fs::write(mouse_dev.join("properties"), "0\n").unwrap();
+
+        let pads = platform::discover_sysfs_pads(&sys, &dev);
+        assert_eq!(pads.len(), 1);
+        assert_eq!(pads[0].family, ControllerFamily::PlayStation);
+        assert_eq!(pads[0].vendor_id, 0x054c);
+        assert_eq!(pads[0].product_id, 0x0ce6);
+        assert_eq!(pads[0].connection, ConnectionKind::Wireless);
+        assert_eq!(pads[0].id, "linux-event0");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

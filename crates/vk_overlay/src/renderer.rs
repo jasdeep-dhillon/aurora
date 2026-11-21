@@ -9,6 +9,72 @@ use crate::wire::VERTEX_SIZE;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr;
+use std::sync::Arc;
+
+/// Pixel layout of a Vulkan swapchain image for F12 screenshots.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PixelKind {
+    Rgba8,
+    Bgra8,
+    Rgb10a2,
+    Bgr10a2,
+    Half,
+}
+
+pub fn vk_pixel_kind(fmt: i32) -> Option<PixelKind> {
+    Some(match fmt {
+        VK_FORMAT_R8G8B8A8_UNORM | VK_FORMAT_R8G8B8A8_SRGB => PixelKind::Rgba8,
+        VK_FORMAT_B8G8R8A8_UNORM | VK_FORMAT_B8G8R8A8_SRGB => PixelKind::Bgra8,
+        VK_FORMAT_A2B10G10R10_UNORM_PACK32 => PixelKind::Rgb10a2,
+        VK_FORMAT_A2R10G10B10_UNORM_PACK32 => PixelKind::Bgr10a2,
+        VK_FORMAT_R16G16B16A16_SFLOAT => PixelKind::Half,
+        _ => return None,
+    })
+}
+
+fn half_to_f32(h: u16) -> f32 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = ((h >> 10) & 0x1F) as i32;
+    let frac = (h & 0x3FF) as f32;
+    sign * match exp {
+        0 => frac * 2f32.powi(-24),
+        31 => f32::INFINITY,
+        _ => (1.0 + frac / 1024.0) * 2f32.powi(exp - 15),
+    }
+}
+
+fn linear_to_srgb8(v: f32) -> u8 {
+    let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+    let s = if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+    (s * 255.0 + 0.5) as u8
+}
+
+/// Convert packed swapchain pixels (`raw` must fit `width * height * bpp`) into tightly packed RGB.
+pub fn vk_pixels_to_rgb(kind: PixelKind, raw: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let bpp = if kind == PixelKind::Half { 8 } else { 4 };
+    let px = (width as usize).saturating_mul(height as usize);
+    let len = px.saturating_mul(bpp).min(raw.len());
+    let src = &raw[..len];
+    let mut out = Vec::with_capacity(px.saturating_mul(3));
+    match kind {
+        PixelKind::Rgba8 => src.chunks_exact(4).for_each(|p| out.extend_from_slice(&p[..3])),
+        PixelKind::Bgra8 => src.chunks_exact(4).for_each(|p| out.extend_from_slice(&[p[2], p[1], p[0]])),
+        PixelKind::Rgb10a2 => src.chunks_exact(4).for_each(|p| {
+            let v = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+            out.extend_from_slice(&[((v & 0x3FF) >> 2) as u8, (((v >> 10) & 0x3FF) >> 2) as u8, (((v >> 20) & 0x3FF) >> 2) as u8]);
+        }),
+        PixelKind::Bgr10a2 => src.chunks_exact(4).for_each(|p| {
+            let v = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+            out.extend_from_slice(&[(((v >> 20) & 0x3FF) >> 2) as u8, (((v >> 10) & 0x3FF) >> 2) as u8, ((v & 0x3FF) >> 2) as u8]);
+        }),
+        PixelKind::Half => src.chunks_exact(8).for_each(|p| {
+            for c in 0..3 {
+                out.push(linear_to_srgb8(half_to_f32(u16::from_le_bytes([p[c * 2], p[c * 2 + 1]]))));
+            }
+        }),
+    }
+    out
+}
 
 struct GpuBuf {
     buf: VkBuffer,
@@ -27,13 +93,16 @@ struct Texture {
 }
 
 struct FrameSlot {
+    image: VkImage,
     view: VkImageView,
     fb: VkFramebuffer,
     cmd: VkCommandBuffer,
     fence: VkFence,
+    fence_pending: bool,
     done_sem: VkSemaphore,
     vb: Option<GpuBuf>,
     ib: Option<GpuBuf>,
+    uploaded: Option<Arc<Frame>>,
     staging: Vec<GpuBuf>,
     retired_tex: Vec<Texture>,
 }
@@ -42,6 +111,8 @@ pub struct OverlayRenderer {
     device: VkDevice,
     dd: DeviceDispatch,
     mem_props: VkPhysicalDeviceMemoryProperties,
+    format: i32,
+    can_copy_src: bool,
     width: u32,
     height: u32,
     linear_out: bool,
@@ -65,6 +136,7 @@ impl OverlayRenderer {
         queue_family: u32,
         swapchain: VkSwapchainKHR,
         format: i32,
+        can_copy_src: bool,
         width: u32,
         height: u32,
     ) -> Option<Self> {
@@ -463,7 +535,7 @@ impl OverlayRenderer {
         };
         if unsafe { (dd.allocate_command_buffers)(device, &alloc_ci, cmds.as_mut_ptr()) } != VK_SUCCESS {
             let mut r = Self {
-                device, dd, mem_props, width, height, linear_out: is_linear_output_format(format),
+                device, dd, mem_props, format, can_copy_src, width, height, linear_out: is_linear_output_format(format),
                 cmd_pool, render_pass, ds_layout, ds_pool, sampler_linear, sampler_nearest,
                 pipe_layout, pipeline, slots: Vec::new(), textures: HashMap::new(),
             };
@@ -473,7 +545,7 @@ impl OverlayRenderer {
 
         let mut slots = Vec::with_capacity(images.len());
         let sem_ci = VkSemaphoreCreateInfo { sType: VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, pNext: ptr::null(), flags: 0 };
-        let fence_ci = VkFenceCreateInfo { sType: VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, pNext: ptr::null(), flags: VK_FENCE_CREATE_SIGNALED_BIT };
+        let fence_ci = VkFenceCreateInfo { sType: VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, pNext: ptr::null(), flags: 0 };
         for (&img, &cmd) in images.iter().zip(cmds.iter()) {
             let iv_ci = VkImageViewCreateInfo {
                 sType: VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -522,7 +594,7 @@ impl OverlayRenderer {
                     if view != 0 { (dd.destroy_image_view)(device, view, ptr::null()); }
                 }
                 let mut r = Self {
-                    device, dd, mem_props, width, height, linear_out: is_linear_output_format(format),
+                    device, dd, mem_props, format, can_copy_src, width, height, linear_out: is_linear_output_format(format),
                     cmd_pool, render_pass, ds_layout, ds_pool, sampler_linear, sampler_nearest,
                     pipe_layout, pipeline, slots, textures: HashMap::new(),
                 };
@@ -530,13 +602,16 @@ impl OverlayRenderer {
                 return None;
             }
             slots.push(FrameSlot {
+                image: img,
                 view,
                 fb,
                 cmd,
                 fence,
+                fence_pending: false,
                 done_sem,
                 vb: None,
                 ib: None,
+                uploaded: None,
                 staging: Vec::new(),
                 retired_tex: Vec::new(),
             });
@@ -546,6 +621,8 @@ impl OverlayRenderer {
             device,
             dd,
             mem_props,
+            format,
+            can_copy_src,
             width,
             height,
             linear_out: is_linear_output_format(format),
@@ -741,34 +818,39 @@ impl OverlayRenderer {
         Some(Texture { image, mem, view, set, width: w, height: h, linear })
     }
 
-    pub unsafe fn draw(
+    pub unsafe fn process_present(
         &mut self,
         queue: VkQueue,
         image_index: u32,
         wait_sems: &[VkSemaphore],
-        frame: Option<&Frame>,
+        frame: Option<&Arc<Frame>>,
         tex_ops: Vec<TexOp>,
-    ) -> Option<VkSemaphore> {
+        take_shot: bool,
+    ) -> (Option<VkSemaphore>, Option<Result<(u32, u32, Vec<u8>), ()>>) {
         let idx = image_index as usize;
         if idx >= self.slots.len() {
-            return None;
+            return (None, take_shot.then_some(Err(())));
         }
         let has_meshes = frame.is_some_and(|f| !f.meshes.is_empty());
-        if !has_meshes && tex_ops.is_empty() {
-            return None;
+        if !has_meshes && tex_ops.is_empty() && !take_shot {
+            return (None, None);
         }
 
         let fence = self.slots[idx].fence;
         let cmd = self.slots[idx].cmd;
         let fb = self.slots[idx].fb;
+        let sw_image = self.slots[idx].image;
         let done_sem = self.slots[idx].done_sem;
 
-        // Wait for this slot's previous overlay submission (2s timeout).
-        if unsafe { (self.dd.wait_for_fences)(self.device, 1, &fence, VK_TRUE, 2_000_000_000) } != VK_SUCCESS {
-            return None;
-        }
-        if unsafe { (self.dd.reset_fences)(self.device, 1, &fence) } != VK_SUCCESS {
-            return None;
+        // Wait & reset only if a previous submit actually used this slot's fence.
+        if self.slots[idx].fence_pending {
+            if unsafe { (self.dd.wait_for_fences)(self.device, 1, &fence, VK_TRUE, 2_000_000_000) } != VK_SUCCESS {
+                return (None, take_shot.then_some(Err(())));
+            }
+            if unsafe { (self.dd.reset_fences)(self.device, 1, &fence) } != VK_SUCCESS {
+                return (None, take_shot.then_some(Err(())));
+            }
+            self.slots[idx].fence_pending = false;
         }
 
         // Reclaim staging buffers & retired textures from this slot's completed frame.
@@ -782,7 +864,7 @@ impl OverlayRenderer {
         }
 
         if unsafe { (self.dd.reset_command_buffer)(cmd, 0) } != VK_SUCCESS {
-            return None;
+            return (None, take_shot.then_some(Err(())));
         }
         let bi = VkCommandBufferBeginInfo {
             sType: VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -791,7 +873,107 @@ impl OverlayRenderer {
             pInheritanceInfo: ptr::null(),
         };
         if unsafe { (self.dd.begin_command_buffer)(cmd, &bi) } != VK_SUCCESS {
-            return None;
+            return (None, take_shot.then_some(Err(())));
+        }
+
+        // 0. Capture swapchain image BEFORE drawing the overlay if requested.
+        let mut capture: Option<(GpuBuf, PixelKind)> = None;
+        let mut shot_early_err = false;
+        if take_shot {
+            if let (true, Some(copy_fn), Some(kind)) = (self.can_copy_src, self.dd.cmd_copy_image_to_buffer, vk_pixel_kind(self.format)) {
+                let bpp = if kind == PixelKind::Half { 8usize } else { 4usize };
+                let byte_len = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(bpp);
+                if byte_len > 0 {
+                    if let Some(buf) = unsafe { self.create_host_buf(byte_len, VK_BUFFER_USAGE_TRANSFER_DST_BIT) } {
+                        let subrange = VkImageSubresourceRange {
+                            aspectMask: VK_IMAGE_ASPECT_COLOR_BIT,
+                            baseMipLevel: 0,
+                            levelCount: 1,
+                            baseArrayLayer: 0,
+                            layerCount: 1,
+                        };
+                        let to_src = VkImageMemoryBarrier {
+                            sType: VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                            pNext: ptr::null(),
+                            srcAccessMask: 0,
+                            dstAccessMask: VK_ACCESS_TRANSFER_READ_BIT,
+                            oldLayout: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                            newLayout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            srcQueueFamilyIndex: VK_QUEUE_FAMILY_IGNORED,
+                            dstQueueFamilyIndex: VK_QUEUE_FAMILY_IGNORED,
+                            image: sw_image,
+                            subresourceRange: subrange,
+                        };
+                        unsafe {
+                            (self.dd.cmd_pipeline_barrier)(
+                                cmd,
+                                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                0,
+                                0,
+                                ptr::null(),
+                                0,
+                                ptr::null(),
+                                1,
+                                &to_src,
+                            );
+                        }
+                        let region = VkBufferImageCopy {
+                            bufferOffset: 0,
+                            bufferRowLength: 0,
+                            bufferImageHeight: 0,
+                            imageSubresource: VkImageSubresourceLayers {
+                                aspectMask: VK_IMAGE_ASPECT_COLOR_BIT,
+                                mipLevel: 0,
+                                baseArrayLayer: 0,
+                                layerCount: 1,
+                            },
+                            imageOffset: VkOffset3D { x: 0, y: 0, z: 0 },
+                            imageExtent: VkExtent3D { width: self.width, height: self.height, depth: 1 },
+                        };
+                        unsafe { copy_fn(cmd, sw_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf.buf, 1, &region) };
+                        let to_present = VkImageMemoryBarrier {
+                            sType: VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                            pNext: ptr::null(),
+                            srcAccessMask: VK_ACCESS_TRANSFER_READ_BIT,
+                            dstAccessMask: VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                            oldLayout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            newLayout: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                            srcQueueFamilyIndex: VK_QUEUE_FAMILY_IGNORED,
+                            dstQueueFamilyIndex: VK_QUEUE_FAMILY_IGNORED,
+                            image: sw_image,
+                            subresourceRange: subrange,
+                        };
+                        unsafe {
+                            (self.dd.cmd_pipeline_barrier)(
+                                cmd,
+                                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                0,
+                                0,
+                                ptr::null(),
+                                0,
+                                ptr::null(),
+                                1,
+                                &to_present,
+                            );
+                        }
+                        capture = Some((buf, kind));
+                    } else {
+                        shot_early_err = true;
+                    }
+                } else {
+                    shot_early_err = true;
+                }
+            } else {
+                shot_early_err = true;
+            }
+        }
+
+        // If capture failed and nothing else needs rendering, abort cleanly without submitting.
+        if capture.is_none() && !has_meshes && tex_ops.is_empty() {
+            let _ = unsafe { (self.dd.end_command_buffer)(cmd) };
+            return (None, take_shot.then_some(Err(())));
         }
 
         // 1. Apply texture updates / frees
@@ -955,7 +1137,7 @@ impl OverlayRenderer {
         self.slots[idx].staging = new_staging;
         self.slots[idx].retired_tex = new_retired;
 
-        // 2. Upload & draw meshes
+        // 2. Upload (only when frame changed) & draw meshes
         if let Some(frame) = frame {
             let total_vbytes: usize = frame.meshes.iter().map(|m| m.vertices.len()).sum();
             let total_ibytes: usize = frame.meshes.iter().map(|m| m.indices.len() * 4).sum();
@@ -963,45 +1145,61 @@ impl OverlayRenderer {
                 let mut vb_opt = self.slots[idx].vb.take();
                 let mut ib_opt = self.slots[idx].ib.take();
 
+                let mut grew = false;
                 if vb_opt.as_ref().is_none_or(|b| b.cap < total_vbytes) {
                     if let Some(old) = vb_opt.take() {
                         unsafe { self.destroy_buf(old) };
                     }
                     vb_opt = unsafe { self.create_host_buf(total_vbytes.next_power_of_two(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) };
+                    grew = true;
                 }
                 if ib_opt.as_ref().is_none_or(|b| b.cap < total_ibytes) {
                     if let Some(old) = ib_opt.take() {
                         unsafe { self.destroy_buf(old) };
                     }
                     ib_opt = unsafe { self.create_host_buf(total_ibytes.next_power_of_two(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT) };
+                    grew = true;
                 }
 
                 if let (Some(vb), Some(ib)) = (vb_opt.as_ref(), ib_opt.as_ref()) {
-                    let mut vmap: *mut c_void = ptr::null_mut();
-                    let mut imap: *mut c_void = ptr::null_mut();
-                    let mapped_ok = unsafe {
-                        (self.dd.map_memory)(self.device, vb.mem, 0, total_vbytes as VkDeviceSize, 0, &mut vmap) == VK_SUCCESS
-                            && (self.dd.map_memory)(self.device, ib.mem, 0, total_ibytes as VkDeviceSize, 0, &mut imap) == VK_SUCCESS
-                    };
-                    if mapped_ok {
-                        let mut voff = 0usize;
-                        let mut ioff = 0usize;
-                        for m in &frame.meshes {
-                            if !m.vertices.is_empty() {
-                                unsafe { ptr::copy_nonoverlapping(m.vertices.as_ptr(), vmap.cast::<u8>().add(voff), m.vertices.len()) };
-                                voff += m.vertices.len();
+                    let same = !grew && self.slots[idx].uploaded.as_ref().is_some_and(|u| Arc::ptr_eq(u, frame));
+                    let mut ready = same;
+                    if !same {
+                        let mut vmap: *mut c_void = ptr::null_mut();
+                        let mut imap: *mut c_void = ptr::null_mut();
+                        let mapped_ok = unsafe {
+                            (self.dd.map_memory)(self.device, vb.mem, 0, total_vbytes as VkDeviceSize, 0, &mut vmap) == VK_SUCCESS
+                                && (self.dd.map_memory)(self.device, ib.mem, 0, total_ibytes as VkDeviceSize, 0, &mut imap) == VK_SUCCESS
+                        };
+                        if mapped_ok {
+                            let mut voff = 0usize;
+                            let mut ioff = 0usize;
+                            for m in &frame.meshes {
+                                if !m.vertices.is_empty() {
+                                    unsafe { ptr::copy_nonoverlapping(m.vertices.as_ptr(), vmap.cast::<u8>().add(voff), m.vertices.len()) };
+                                    voff += m.vertices.len();
+                                }
+                                if !m.indices.is_empty() {
+                                    let bytes = m.indices.len() * 4;
+                                    unsafe { ptr::copy_nonoverlapping(m.indices.as_ptr().cast::<u8>(), imap.cast::<u8>().add(ioff), bytes) };
+                                    ioff += bytes;
+                                }
                             }
-                            if !m.indices.is_empty() {
-                                let bytes = m.indices.len() * 4;
-                                unsafe { ptr::copy_nonoverlapping(m.indices.as_ptr().cast::<u8>(), imap.cast::<u8>().add(ioff), bytes) };
-                                ioff += bytes;
+                            unsafe {
+                                (self.dd.unmap_memory)(self.device, vb.mem);
+                                (self.dd.unmap_memory)(self.device, ib.mem);
                             }
+                            self.slots[idx].uploaded = Some(Arc::clone(frame));
+                            ready = true;
+                        } else {
+                            if !vmap.is_null() {
+                                unsafe { (self.dd.unmap_memory)(self.device, vb.mem) };
+                            }
+                            self.slots[idx].uploaded = None;
                         }
-                        unsafe {
-                            (self.dd.unmap_memory)(self.device, vb.mem);
-                            (self.dd.unmap_memory)(self.device, ib.mem);
-                        }
+                    }
 
+                    if ready {
                         let rp_bi = VkRenderPassBeginInfo {
                             sType: VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
                             pNext: ptr::null(),
@@ -1083,8 +1281,6 @@ impl OverlayRenderer {
                             idx_base += icount;
                         }
                         unsafe { (self.dd.cmd_end_render_pass)(cmd) };
-                    } else if !vmap.is_null() {
-                        unsafe { (self.dd.unmap_memory)(self.device, vb.mem) };
                     }
                 }
                 self.slots[idx].vb = vb_opt;
@@ -1093,10 +1289,13 @@ impl OverlayRenderer {
         }
 
         if unsafe { (self.dd.end_command_buffer)(cmd) } != VK_SUCCESS {
-            return None;
+            if let Some((buf, _)) = capture {
+                unsafe { self.destroy_buf(buf) };
+            }
+            return (None, take_shot.then_some(Err(())));
         }
 
-        let wait_stages = vec![VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; wait_sems.len()];
+        let wait_stages = vec![VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; wait_sems.len()];
         let submit = VkSubmitInfo {
             sType: VK_STRUCTURE_TYPE_SUBMIT_INFO,
             pNext: ptr::null(),
@@ -1108,11 +1307,34 @@ impl OverlayRenderer {
             signalSemaphoreCount: 1,
             pSignalSemaphores: &done_sem,
         };
-        if unsafe { (self.dd.queue_submit)(queue, 1, &submit, fence) } == VK_SUCCESS {
-            Some(done_sem)
+        if unsafe { (self.dd.queue_submit)(queue, 1, &submit, fence) } != VK_SUCCESS {
+            if let Some((buf, _)) = capture {
+                unsafe { self.destroy_buf(buf) };
+            }
+            return (None, take_shot.then_some(Err(())));
+        }
+        self.slots[idx].fence_pending = true;
+
+        let shot_res = if let Some((buf, kind)) = capture {
+            let mut rgb_res = Err(());
+            if unsafe { (self.dd.wait_for_fences)(self.device, 1, &fence, VK_TRUE, 2_000_000_000) } == VK_SUCCESS {
+                let mut mapped: *mut c_void = ptr::null_mut();
+                if unsafe { (self.dd.map_memory)(self.device, buf.mem, 0, buf.cap as VkDeviceSize, 0, &mut mapped) } == VK_SUCCESS {
+                    let slice = unsafe { std::slice::from_raw_parts(mapped.cast::<u8>(), buf.cap) };
+                    let rgb = vk_pixels_to_rgb(kind, slice, self.width, self.height);
+                    unsafe { (self.dd.unmap_memory)(self.device, buf.mem) };
+                    rgb_res = Ok((self.width, self.height, rgb));
+                }
+            }
+            unsafe { self.destroy_buf(buf) };
+            Some(rgb_res)
+        } else if shot_early_err {
+            Some(Err(()))
         } else {
             None
-        }
+        };
+
+        (Some(done_sem), shot_res)
     }
 
     pub fn destroy(&mut self) {

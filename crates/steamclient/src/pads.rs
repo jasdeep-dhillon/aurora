@@ -112,14 +112,32 @@ fn mapped() -> Option<&'static Shared> {
     unsafe { (*MAP as *const Shared).as_ref() }
 }
 
-/// The shared pads, while the app keeps them up to date.
+/// The shared pads, while the app keeps them up to date and Steam Input is enabled.
 fn shared() -> Option<&'static Shared> {
+    if !steam_input_enabled() {
+        return None;
+    }
     mapped().filter(|s| s.live())
 }
 
-/// Shared slots with a pad in them.
+pub fn steam_input_enabled() -> bool {
+    pads_shm::steam_input_env_enabled(std::env::var(pads_shm::ENV_STEAM_INPUT).ok().as_deref())
+}
+
+pub fn family_mask() -> u32 {
+    pads_shm::parse_family_mask(std::env::var(pads_shm::ENV_INPUT_FAMILIES).ok().as_deref())
+}
+
+pub fn calibration() -> pads_shm::PadCalibration {
+    std::env::var(pads_shm::ENV_INPUT_CALIBRATION).ok().map(|s| pads_shm::PadCalibration::decode(&s)).unwrap_or_default()
+}
+
+/// Shared slots with a pad in them whose controller family is enabled.
 fn shared_pads(s: &Shared) -> Vec<usize> {
-    (0..pads_shm::SLOTS).filter(|k| s.slots[*k].read().is_some()).collect()
+    let mask = family_mask();
+    (0..pads_shm::SLOTS)
+        .filter(|k| s.slots[*k].read().is_some_and(|st| pads_shm::family_allowed(mask, st.family)))
+        .collect()
 }
 
 // ------------------------------------------------------------- real pads
@@ -167,7 +185,14 @@ fn shared_at(i: usize) -> Option<(&'static Shared, usize)> {
 
 // ---------------------------------------------------- what Steam Input sees
 
-/// The four pads as games see them.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct SteamInputPad {
+    pub pad: Pad,
+    pub calibrated: bool,
+    pub family: u8,
+}
+
+/// The four pads as XInput / games see them.
 pub fn all() -> [Option<Pad>; 4] {
     let mut pads: [Option<Pad>; 4] = std::array::from_fn(|i| XINPUT.as_ref().and_then(|x| real_state(x, i)));
     if let Some(s) = shared() {
@@ -181,8 +206,52 @@ pub fn all() -> [Option<Pad>; 4] {
     pads
 }
 
+/// The four pads as Steam Input sees them, respecting per-game disable and
+/// global controller family toggles.
+pub fn steam_input_pads() -> [Option<SteamInputPad>; 4] {
+    steam_input_pads_with(
+        steam_input_enabled(),
+        family_mask(),
+        std::array::from_fn(|i| XINPUT.as_ref().and_then(|x| real_state(x, i))),
+        shared(),
+    )
+}
+
+fn steam_input_pads_with(
+    enabled: bool,
+    mask: u32,
+    real: [Option<Pad>; 4],
+    shm: Option<&Shared>,
+) -> [Option<SteamInputPad>; 4] {
+    if !enabled {
+        return [None; 4];
+    }
+    let xbox_on = mask & pads_shm::FAMILY_XBOX != 0;
+    let mut out: [Option<SteamInputPad>; 4] = real.map(|p| {
+        p.filter(|_| xbox_on)
+            .map(|pad| SteamInputPad { pad, calibrated: false, family: pads_shm::SLOT_FAMILY_XBOX })
+    });
+    if let Some(s) = shm {
+        let active_shared: Vec<usize> = (0..pads_shm::SLOTS)
+            .filter(|k| s.slots[*k].read().is_some_and(|st| pads_shm::family_allowed(mask, st.family)))
+            .collect();
+        let seats = pads_shm::seats(real.map(|p| p.is_some()), &active_shared);
+        for (i, k) in seats.iter().enumerate() {
+            if let Some(k) = k
+                && let Some(st) = s.slots[*k].read()
+            {
+                out[i] = Some(SteamInputPad { pad: Pad::from(st), calibrated: st.calibrated, family: st.family });
+            }
+        }
+    }
+    out
+}
+
 /// Rumble on XInput slot `i`.
 pub fn rumble(i: usize, low: u16, high: u16) {
+    if !steam_input_enabled() || !calibration().rumble_enabled {
+        return;
+    }
     if let Some((s, k)) = shared_at(i) {
         s.slots[k].set_rumble(low, high);
     } else if let Some(x) = XINPUT.as_ref() {
@@ -194,9 +263,20 @@ pub fn rumble(i: usize, low: u16, high: u16) {
 /// Motion sensors (accel in m/s^2, gyro in rad/s) for XInput slot `i`, when
 /// backed by an SDL3 pad that exposes IMU sensors.
 pub fn motion(i: usize) -> Option<([f32; 3], [f32; 3])> {
+    let cal = calibration();
+    if !steam_input_enabled() || !cal.gyro_enabled {
+        return None;
+    }
     let (s, k) = shared_at(i)?;
     let st = s.slots[k].read()?;
-    st.has_motion.then(|| (st.accel(), st.gyro()))
+    if !st.has_motion {
+        return None;
+    }
+    let mut gyro = st.gyro();
+    if !st.calibrated && (cal.gyro_sensitivity - 1.0).abs() > f32::EPSILON {
+        gyro = [gyro[0] * cal.gyro_sensitivity, gyro[1] * cal.gyro_sensitivity, gyro[2] * cal.gyro_sensitivity];
+    }
+    Some((st.accel(), gyro))
 }
 
 // ------------------------------------------------------- the game's XInput
@@ -232,7 +312,7 @@ unsafe extern "system" fn hook_get_state_ex(i: u32, out: *mut Pad) -> u32 {
 
 unsafe extern "system" fn hook_set_state(i: u32, v: *mut [u16; 2]) -> u32 {
     if let (Some((s, k)), false) = (shared_at(i as usize), v.is_null()) {
-        let [low, high] = unsafe { v.read_unaligned() };
+        let [low, high] = if calibration().rumble_enabled { unsafe { v.read_unaligned() } } else { [0, 0] };
         s.slots[k].set_rumble(low, high);
         return 0;
     }
@@ -395,11 +475,11 @@ fn patch_all() -> usize {
 }
 
 /// Show the app's pads to the game's own XInput. Only when the app shares
-/// pads (Windows; under Proton, Wine's XInput already sees every pad).
+/// pads and Steam Input is enabled (Windows; under Proton, Wine's XInput already sees every pad).
 pub fn install() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        if mapped().is_none() || XINPUT.is_none() {
+        if !steam_input_enabled() || mapped().is_none() || XINPUT.is_none() {
             return;
         }
         let _ = std::thread::Builder::new().name("pads-imports".into()).spawn(|| {
@@ -502,5 +582,48 @@ mod tests {
         let h = unsafe { CreateFileMappingW(-1, std::ptr::null(), 0x4, 0, std::mem::size_of::<Shared>() as u32, wide(&rogue).as_ptr()) };
         assert!(!h.is_null());
         assert!(open_shm(&rogue).is_none(), "must reject mapping names outside Local\\sir-pads-");
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn steam_input_pads_respects_enabled_and_family_mask() {
+        let shm: Shared = unsafe { std::mem::zeroed() };
+        shm.magic.store(pads_shm::MAGIC, Ordering::Release);
+        shm.heartbeat.store(pads_shm::now_ms(), Ordering::Relaxed);
+        shm.slots[0].write(Some(State {
+            buttons: 0x1000,
+            calibrated: true,
+            family: pads_shm::SLOT_FAMILY_PLAYSTATION,
+            ..Default::default()
+        }));
+        shm.slots[1].write(Some(State {
+            buttons: 0x2000,
+            calibrated: true,
+            family: pads_shm::SLOT_FAMILY_SWITCH_PRO,
+            ..Default::default()
+        }));
+        let real = [Some(Pad { buttons: 0x4000, ..Default::default() }), None, None, None];
+
+        assert_eq!(steam_input_pads_with(false, pads_shm::FAMILY_ALL, real, Some(&shm)), [None; 4]);
+
+        let all = steam_input_pads_with(true, pads_shm::FAMILY_ALL, real, Some(&shm));
+        assert_eq!(all[0].map(|p| p.pad.buttons), Some(0x4000));
+        assert_eq!(all[1].map(|p| (p.pad.buttons, p.family)), Some((0x1000, pads_shm::SLOT_FAMILY_PLAYSTATION)));
+        assert_eq!(all[2].map(|p| (p.pad.buttons, p.family)), Some((0x2000, pads_shm::SLOT_FAMILY_SWITCH_PRO)));
+
+        let no_xbox = steam_input_pads_with(true, pads_shm::FAMILY_PLAYSTATION | pads_shm::FAMILY_SWITCH_PRO, real, Some(&shm));
+        assert!(no_xbox[0].is_none());
+        assert_eq!(no_xbox[1].map(|p| p.pad.buttons), Some(0x1000));
+        assert_eq!(no_xbox[2].map(|p| p.pad.buttons), Some(0x2000));
+
+        let only_switch = steam_input_pads_with(true, pads_shm::FAMILY_SWITCH_PRO, real, Some(&shm));
+        assert!(only_switch[0].is_none());
+        assert_eq!(only_switch[1].map(|p| (p.pad.buttons, p.family)), Some((0x2000, pads_shm::SLOT_FAMILY_SWITCH_PRO)));
+        assert!(only_switch[2].is_none());
     }
 }

@@ -86,6 +86,8 @@ pub const VK_FORMAT_R8G8B8A8_UNORM: i32 = 37;
 pub const VK_FORMAT_R8G8B8A8_SRGB: i32 = 43;
 pub const VK_FORMAT_B8G8R8A8_UNORM: i32 = 44;
 pub const VK_FORMAT_B8G8R8A8_SRGB: i32 = 50;
+pub const VK_FORMAT_A2R10G10B10_UNORM_PACK32: i32 = 58;
+pub const VK_FORMAT_A2B10G10R10_UNORM_PACK32: i32 = 64;
 pub const VK_FORMAT_R32G32_SFLOAT: i32 = 103;
 pub const VK_FORMAT_R16G16B16A16_SFLOAT: i32 = 97;
 
@@ -93,15 +95,18 @@ pub const VK_FORMAT_R16G16B16A16_SFLOAT: i32 = 97;
 pub const VK_IMAGE_LAYOUT_UNDEFINED: i32 = 0;
 pub const VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: i32 = 2;
 pub const VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: i32 = 5;
+pub const VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: i32 = 6;
 pub const VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: i32 = 7;
 pub const VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: i32 = 1000001002;
 
 // Usage / Flags
+pub const VK_IMAGE_USAGE_TRANSFER_SRC_BIT: VkFlags = 0x0000_0001;
 pub const VK_IMAGE_USAGE_TRANSFER_DST_BIT: VkFlags = 0x0000_0002;
 pub const VK_IMAGE_USAGE_SAMPLED_BIT: VkFlags = 0x0000_0004;
 pub const VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT: VkFlags = 0x0000_0010;
 
 pub const VK_BUFFER_USAGE_TRANSFER_SRC_BIT: VkFlags = 0x0000_0001;
+pub const VK_BUFFER_USAGE_TRANSFER_DST_BIT: VkFlags = 0x0000_0002;
 pub const VK_BUFFER_USAGE_INDEX_BUFFER_BIT: VkFlags = 0x0000_0040;
 pub const VK_BUFFER_USAGE_VERTEX_BUFFER_BIT: VkFlags = 0x0000_0080;
 
@@ -123,6 +128,7 @@ pub const VK_PIPELINE_STAGE_TRANSFER_BIT: VkFlags = 0x0000_1000;
 pub const VK_ACCESS_SHADER_READ_BIT: VkFlags = 0x0000_0020;
 pub const VK_ACCESS_COLOR_ATTACHMENT_READ_BIT: VkFlags = 0x0000_0080;
 pub const VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT: VkFlags = 0x0000_0100;
+pub const VK_ACCESS_TRANSFER_READ_BIT: VkFlags = 0x0000_0800;
 pub const VK_ACCESS_TRANSFER_WRITE_BIT: VkFlags = 0x0000_1000;
 
 pub const VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT: VkFlags = 0x0000_0002;
@@ -989,6 +995,7 @@ pub type PFN_vkDestroyPipeline = unsafe extern "C" fn(VkDevice, VkPipeline, *con
 
 pub type PFN_vkCmdPipelineBarrier = unsafe extern "C" fn(VkCommandBuffer, VkFlags, VkFlags, VkFlags, u32, *const c_void, u32, *const c_void, u32, *const VkImageMemoryBarrier);
 pub type PFN_vkCmdCopyBufferToImage = unsafe extern "C" fn(VkCommandBuffer, VkBuffer, VkImage, i32, u32, *const VkBufferImageCopy);
+pub type PFN_vkCmdCopyImageToBuffer = unsafe extern "C" fn(VkCommandBuffer, VkImage, i32, VkBuffer, u32, *const VkBufferImageCopy);
 pub type PFN_vkCmdBeginRenderPass = unsafe extern "C" fn(VkCommandBuffer, *const VkRenderPassBeginInfo, i32);
 pub type PFN_vkCmdEndRenderPass = unsafe extern "C" fn(VkCommandBuffer);
 pub type PFN_vkCmdBindPipeline = unsafe extern "C" fn(VkCommandBuffer, i32, VkPipeline);
@@ -1079,6 +1086,7 @@ pub struct DeviceDispatch {
 
     pub cmd_pipeline_barrier: PFN_vkCmdPipelineBarrier,
     pub cmd_copy_buffer_to_image: PFN_vkCmdCopyBufferToImage,
+    pub cmd_copy_image_to_buffer: Option<PFN_vkCmdCopyImageToBuffer>,
     pub cmd_begin_render_pass: PFN_vkCmdBeginRenderPass,
     pub cmd_end_render_pass: PFN_vkCmdEndRenderPass,
     pub cmd_bind_pipeline: PFN_vkCmdBindPipeline,
