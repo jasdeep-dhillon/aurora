@@ -48,7 +48,17 @@ pub mod state;
 pub mod store;
 
 pub use auth::Guard;
-pub use launch::{LaunchArgs, LaunchMode, STEAM_DRM, anti_cheat_headless, mode as launch_mode, mode_cached as launch_mode_cached, mode_peek as launch_mode_peek, proton_builds, proton_override, app_proton, app_protons, default_proton, native_build, NATIVE, DEFAULT_PROTON, safe_connect_args, set_app_proton, set_app_protons, set_anti_cheat_headless, set_prefer_official as launch_through_steam, set_proton_override, set_steam_setting, steam_setting, steam_settings_locked, SteamSetting, apply_steam_prefs, gameplay_downloads, set_gameplay_downloads, spawn_non_steam};
+pub use input_config::{
+    ActionSetSummary, BindingChoice, BindingOption, BindingOrigin, InputConfigReport, app_binding, app_bindings,
+    inspect_local as inspect_input_config_local, parse_vdf_summary, player_config_dir, set_app_binding, set_app_bindings,
+};
+pub use pads::{
+    ConnectionKind, ControllerFamily, ControllerSettings, DetectedController, DetectionSnapshot, FamilyToggles,
+    LiveInput, PadCalibration, SteamInputDecision, app_controller, effective_controller_override, poll_ui as poll_controllers,
+    refresh_ui as refresh_controllers, resolve_steam_input, set_app_controller, set_app_controllers,
+    set_settings as set_controller_settings, settings as controller_settings, trigger_test_rumble,
+};
+pub use launch::{LaunchArgs, LaunchMode, STEAM_DRM, anti_cheat_headless, app_overlay_enabled, mode as launch_mode, mode_cached as launch_mode_cached, mode_peek as launch_mode_peek, overlay_enabled, proton_builds, proton_override, app_proton, app_protons, default_proton, native_build, NATIVE, DEFAULT_PROTON, safe_connect_args, set_app_overlay, set_app_proton, set_app_protons, set_anti_cheat_headless, set_overlay_disabled_apps, set_overlay_enabled, set_overlay_hotkeys, set_prefer_official as launch_through_steam, set_proton_override, set_steam_setting, steam_setting, steam_settings_locked, SteamSetting, apply_steam_prefs, gameplay_downloads, set_gameplay_downloads, spawn_non_steam};
 pub use state::State;
 pub use store::SavedAccount;
 
@@ -283,6 +293,8 @@ pub enum Command {
     /// Download every subscribed Workshop item of an installed game that
     /// is missing or outdated (also done before each launch, like Steam).
     SyncWorkshop { app_id: AppId },
+    /// Inspect Steam Input controller configurations (local + Workshop + official) for a game.
+    InspectInputConfig { app_id: AppId, install_dir: PathBuf },
     /// The game's own Workshop tag groups (for filters).
     LoadWorkshopTags { app_id: AppId, language: String },
     LoadWishlist,
@@ -430,6 +442,7 @@ impl std::fmt::Debug for Command {
             Command::CancelRestore => f.write_str("CancelRestore"),
             Command::RequestFreeLicense { app_id } => f.debug_struct("RequestFreeLicense").field("app_id", app_id).finish(),
             Command::SyncWorkshop { app_id } => f.debug_struct("SyncWorkshop").field("app_id", app_id).finish(),
+            Command::InspectInputConfig { app_id, install_dir } => f.debug_struct("InspectInputConfig").field("app_id", app_id).field("install_dir", install_dir).finish(),
             Command::LoadWorkshopTags { app_id, language } => f.debug_struct("LoadWorkshopTags").field("app_id", app_id).field("language", language).finish(),
             Command::LoadWishlist => f.write_str("LoadWishlist"),
             Command::WishlistAdd { app_id } => f.debug_struct("WishlistAdd").field("app_id", app_id).finish(),
@@ -608,6 +621,8 @@ pub enum Event {
     FreeLicense { app_id: AppId, result: Result<(), String> },
     /// Workshop items were downloaded (or failed) for a game.
     WorkshopSync { app_id: AppId, result: Result<crate::workshop::Report, String> },
+    /// Controller bindings / action sets inspected for a game.
+    InputConfigInspected(InputConfigReport),
     WorkshopTags { app_id: AppId, result: Result<Vec<model::WorkshopTagCategory>, String> },
     /// (app id, date added)
     Wishlist(Vec<(AppId, u64)>),

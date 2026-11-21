@@ -12,6 +12,16 @@ use egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect, Vec2};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub struct PollResult {
+    pub alive: bool,
+    pub opened: Option<bool>,
+    pub fps: Option<u32>,
+    pub screenshot_saved: Option<bool>,
+    pub screenshot_rgb: Option<(u32, u32, Vec<u8>)>,
+}
+
+const MAX_SCREENSHOT_BYTES: usize = 64 * 1024 * 1024;
+
 pub struct Session {
     pub conn: Conn,
     pub ctx: egui::Context,
@@ -28,6 +38,8 @@ pub struct Session {
     sent_empty: bool,
     pixels_per_point: f32,
     theme: Option<ui::Theme>,
+    fps: Option<u32>,
+    shot_buf: Option<(u32, u32, Vec<u8>)>,
 }
 
 impl Session {
@@ -63,18 +75,27 @@ impl Session {
             sent_empty: false,
             pixels_per_point: 1.0,
             theme: Some(theme.clone()),
+            fps: None,
+            shot_buf: None,
         }
     }
 
-    /// Read what the game sent. Returns `Some(open)` when the game opened or
-    /// closed the overlay (Shift+Tab), and false once the game is gone.
-    pub fn poll(&mut self) -> (bool, Option<bool>) {
-        let mut opened = None;
+    pub fn send_config(&self, overlay_mods: u8, overlay_vk: u32, shot_mods: u8, shot_vk: u32) {
+        self.conn.send(&ToGame::Config { overlay_mods, overlay_vk, shot_mods, shot_vk });
+    }
+
+    pub fn take_screenshot(&self) {
+        self.conn.send(&ToGame::TakeScreenshot);
+    }
+
+    /// Read what the game sent. Returns events and whether the game is still alive.
+    pub fn poll(&mut self) -> PollResult {
+        let mut res = PollResult { alive: true, opened: None, fps: None, screenshot_saved: None, screenshot_rgb: None };
         loop {
             match self.conn.from_game.try_recv() {
                 Ok(FromGame::Opened(open)) => {
                     self.game_open = open;
-                    opened = Some(open);
+                    res.opened = Some(open);
                     self.wake_now();
                 }
                 Ok(FromGame::Resize { width, height }) => {
@@ -85,9 +106,46 @@ impl Session {
                     self.input(modifiers, events);
                     self.wake_now();
                 }
+                Ok(FromGame::Fps(n)) => {
+                    if self.fps != Some(n) {
+                        self.fps = Some(n);
+                        self.wake_now();
+                    }
+                    res.fps = Some(n);
+                }
+                Ok(FromGame::Screenshot(ok)) => {
+                    res.screenshot_saved = Some(ok);
+                    self.wake_now();
+                }
+                Ok(FromGame::ScreenshotStart { width, height }) => {
+                    let expected = (width as usize).checked_mul(height as usize).and_then(|px| px.checked_mul(3));
+                    if let Some(cap) = expected.filter(|&c| c > 0 && c <= MAX_SCREENSHOT_BYTES) {
+                        self.shot_buf = Some((width, height, Vec::with_capacity(cap)));
+                    } else {
+                        self.shot_buf = None;
+                    }
+                }
+                Ok(FromGame::ScreenshotChunk(chunk)) => {
+                    if let Some((_, _, buf)) = self.shot_buf.as_mut() {
+                        if buf.len().saturating_add(chunk.len()) <= MAX_SCREENSHOT_BYTES {
+                            buf.extend_from_slice(&chunk);
+                        } else {
+                            self.shot_buf = None;
+                        }
+                    }
+                }
+                Ok(FromGame::ScreenshotEnd) => {
+                    if let Some((w, h, rgb)) = self.shot_buf.take() {
+                        res.screenshot_rgb = Some((w, h, rgb));
+                        self.wake_now();
+                    }
+                }
                 Ok(FromGame::Hello { .. }) => {}
-                Err(std::sync::mpsc::TryRecvError::Empty) => return (true, opened),
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => return (false, opened),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return res,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    res.alive = false;
+                    return res;
+                }
             }
         }
     }

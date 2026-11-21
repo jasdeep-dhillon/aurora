@@ -360,6 +360,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "winresource",
  "x11rb",
+ "zbus 5.13.2",
 ]
 
 [[package]]

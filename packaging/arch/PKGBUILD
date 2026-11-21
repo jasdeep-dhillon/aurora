@@ -28,10 +28,11 @@ sha256sums=('SKIP')
 package() {
   cd Aurora-Linux-x86_64
 
-  # steamhost and the steamclient DLLs must sit beside aurora (it looks for
-  # them next to its own executable, symlinks resolved).
+  # steamhost, libVkLayer_aurora_overlay.so and the steamclient DLLs must sit beside
+  # aurora (it looks for them next to its own executable, symlinks resolved).
   install -Dm755 aurora "$pkgdir/opt/aurora/aurora"
   install -Dm755 steamhost "$pkgdir/opt/aurora/steamhost"
+  install -Dm755 libVkLayer_aurora_overlay.so "$pkgdir/opt/aurora/libVkLayer_aurora_overlay.so"
   local dll
   for dll in steamclient64.dll steamclient32.dll; do
     if [ -f "$dll" ]; then install -Dm644 "$dll" "$pkgdir/opt/aurora/$dll"; fi

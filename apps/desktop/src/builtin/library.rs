@@ -381,7 +381,7 @@ impl Extension for Library {
             client::Event::RelaunchForSteamDrm { app_id } => {
                 let Some(g) = ctx.local.games.iter().find(|g| g.app_id == *app_id).cloned() else { return };
                 ctx.toast(t!("{name} uses Steam DRM: starting it again through Steam", name = g.name.clone()));
-                let args = client::LaunchArgs::user(self.games.get(app_id).map(|s| s.args.clone()).unwrap_or_default());
+                let args = self.launch_args_for(*app_id);
                 self.launch_or_notice(ctx, *app_id, g.install_dir, args);
             }
             client::Event::SteamCollections(Ok(list)) => self.merge_steam_collections(list),
@@ -568,6 +568,7 @@ impl Extension for Library {
         self.collections_base = saved.collections_base;
         self.through_steam = saved.through_steam;
         client::launch_through_steam(self.through_steam);
+        self.sync_controller_overrides();
         self.shortcut_after_install = saved.pending_shortcuts;
     }
 }
@@ -898,7 +899,7 @@ impl Library {
                 }
             };
             if running {
-                item(ui, icons::STOP, t!("Stop"), MenuAct::Stop);
+                item(ui, icons::X, t!("Stop"), MenuAct::Stop);
             } else if let Some(paused) = self.downloading.get(&id) {
                 if *paused {
                     item(ui, icons::PLAY, t!("Resume download"), MenuAct::ResumeDownload);
@@ -971,7 +972,7 @@ impl Library {
         match act {
             MenuAct::Play => {
                 if let Some(g) = local {
-                    let args = client::LaunchArgs::user(self.games.get(&id).map(|s| s.args.clone()).unwrap_or_default());
+                    let args = self.launch_args_for(id);
                     self.launch_or_notice(ctx, id, g.install_dir.clone(), args);
                 }
             }
@@ -1743,7 +1744,7 @@ impl Library {
                                 busy_bar(ui, t, t!("Backing up… {pct}%", pct = (p * 100.0).round() as u32), p);
                             }
                             Some(_) if playing => {
-                                if w::button(ui, t, Some(icons::STOP), t!("Stop"), w::Kind::Danger, w::Size::Lg).on_hover_text(t!("Close the game")).clicked() {
+                                if w::button(ui, t, Some(icons::X), t!("Stop"), w::Kind::Danger, w::Size::Lg).on_hover_text(t!("Close the game")).clicked() {
                                     ctx.send(Command::StopGame { app_id: id });
                                 }
                             }
@@ -1775,7 +1776,7 @@ impl Library {
                             Some(g) => {
                                 let r = w::button(ui, t, Some(icons::PLAY), t!("Play"), w::Kind::Play, w::Size::Lg);
                                 if r.clicked() {
-                                    let args = client::LaunchArgs::user(self.games.get(&id).map(|s| s.args.clone()).unwrap_or_default());
+                                    let args = self.launch_args_for(id);
                                     self.launch_or_notice(ctx, id, g.install_dir.clone(), args);
                                 }
                             }
@@ -2281,6 +2282,22 @@ impl Library {
         *build != 0 && latest != 0 && latest != *build
     }
 
+    fn launch_args_for(&self, id: AppId) -> client::LaunchArgs {
+        let s = self.games.get(&id);
+        client::LaunchArgs::user(s.map(|x| x.args.clone()).unwrap_or_default())
+            .with_controller(s.map(|x| x.controller).unwrap_or(0))
+    }
+
+    fn sync_controller_overrides(&self) {
+        let map = self
+            .games
+            .iter()
+            .filter(|(_, s)| s.controller != 0)
+            .map(|(id, s)| (*id, s.controller))
+            .collect();
+        client::set_app_controllers(map);
+    }
+
     /// The game's main button, like Steam's: Play, Update, or what's running.
     /// Start a game, or — the first time a Steam-DRM game is launched — show
     /// the one-time notice about the background Steam instance first.
@@ -2312,7 +2329,7 @@ impl Library {
                 self.queue_install(ctx, id, Some(g.library.clone()));
             }
         } else if w::button(ui, t, Some(icons::PLAY), t!("Play"), w::Kind::Play, w::Size::Lg).clicked() {
-            let args = client::LaunchArgs::user(self.games.get(&id).map(|s| s.args.clone()).unwrap_or_default());
+            let args = self.launch_args_for(id);
             self.launch_or_notice(ctx, id, g.install_dir.clone(), args);
         }
     }
@@ -3590,5 +3607,22 @@ mod themed_library_tests {
             (3, "Local only".into(), 250),
             (1, "Account name".into(), 200),
         ]);
+    }
+
+    #[test]
+    fn launch_args_for_carries_controller_override() {
+        let mut lib = Library::default();
+        lib.games.insert(
+            620,
+            GameSettings {
+                args: "-novid".into(),
+                controller: 2,
+                ..Default::default()
+            },
+        );
+        let args = lib.launch_args_for(620);
+        assert_eq!(args.user, "-novid");
+        assert_eq!(args.controller, 2);
+        assert_eq!(lib.launch_args_for(440).controller, 0);
     }
 }
