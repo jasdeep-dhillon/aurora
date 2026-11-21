@@ -191,6 +191,8 @@ pub(crate) fn tab_menu_items(app: &SteamApp, page: &str) -> Vec<Option<MenuEntry
         "library" => vec![
             e(icons::HOUSE, t!("Home"), "library", None),
             e(icons::DOWNLOAD, t!("Downloads"), "downloads", None),
+            None,
+            e(icons::RESTORE, t!("Restore game backup…"), "library", Some("restore".into())),
         ],
         "community" => vec![
             e(icons::USERS, t!("Friends"), "community", None),

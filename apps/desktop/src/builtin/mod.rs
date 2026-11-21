@@ -16,6 +16,7 @@ mod reviews;
 pub mod settings;
 mod settings_account;
 mod settings_controller;
+mod storage_ui;
 pub mod store;
 mod workshop;
 
