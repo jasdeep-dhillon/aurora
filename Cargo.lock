@@ -346,6 +346,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "store",
+ "themes",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -5413,6 +5414,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "themes"
+version = "0.9.2"
+dependencies = [
+ "egui",
+ "libloading 0.8.9",
+ "rhai",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "toml 1.2.1+spec-1.1.0",
+ "tracing",
+ "ui",
+ "zip",
+]
+
+[[package]]
 name = "thin-vec"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5940,6 +5957,7 @@ dependencies = [
  "memmap2",
  "resvg",
  "serde",
+ "skrifa",
  "wgpu",
 ]
 

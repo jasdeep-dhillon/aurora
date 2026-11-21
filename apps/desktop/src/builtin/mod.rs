@@ -8,8 +8,8 @@ pub mod community_home;
 pub mod group_chat;
 mod downloads;
 pub mod hub;
-mod inventory;
-mod library;
+pub mod inventory;
+pub mod library;
 mod plugins;
 mod support;
 mod profile;
@@ -21,10 +21,16 @@ mod workshop;
 
 use extensions::Registry;
 
-pub fn registry(rt: tokio::runtime::Handle, ctx: egui::Context, flags: settings::SharedFlags) -> Registry {
+pub fn registry(
+    rt: tokio::runtime::Handle,
+    ctx: egui::Context,
+    flags: settings::SharedFlags,
+    themes: crate::app::SharedThemeManager,
+    library_layout: crate::app::SharedLibraryLayout,
+) -> Registry {
     let mut r = Registry::default();
     r.register(store::Store::new(rt.clone(), ctx.clone()));
-    r.register(library::Library::new(rt.clone(), ctx.clone(), flags.clone()));
+    r.register(library::Library::new(rt.clone(), ctx.clone(), flags.clone(), library_layout));
     r.register(community_home::CommunityHome::new(rt.clone(), ctx.clone()));
     r.register(community::Community::default());
     r.register(profile::Profile::default());
@@ -34,7 +40,7 @@ pub fn registry(rt: tokio::runtime::Handle, ctx: egui::Context, flags: settings:
     r.register(inventory::Inventory::default());
     r.register(support::Support::default());
     r.register(plugins::Plugins::new());
-    r.register(settings::Settings::new(flags));
+    r.register(settings::Settings::new(flags, themes));
     r
 }
 

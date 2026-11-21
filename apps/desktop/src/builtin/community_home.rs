@@ -1393,7 +1393,15 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = egui::Context::default();
         let flags = std::sync::Arc::new(std::sync::Mutex::new(crate::builtin::settings::AppFlags::default()));
-        let reg = crate::builtin::registry(rt.handle().clone(), ctx, flags);
+        let themes = std::sync::Arc::new(std::sync::Mutex::new(crate::app::ThemeState {
+            manager: themes::ThemeManager::new(std::env::temp_dir(), std::env::temp_dir()),
+            hot_reload: false,
+            last_error: None,
+            dirty: false,
+            revision: 0,
+        }));
+        let layout = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reg = crate::builtin::registry(rt.handle().clone(), ctx, flags, themes, layout);
         let main_ids: Vec<String> = reg
             .pages()
             .into_iter()

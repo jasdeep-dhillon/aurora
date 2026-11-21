@@ -1,0 +1,133 @@
+# AdwSteamGtk-inspired chrome around Aurora's unchanged default library.
+# There are deliberately NO [[library]] nodes or replacement content shelves.
+
+[[shell]]
+type = "panel"
+side = "top"
+size = 44
+drag_window = true
+style = { bg = "$chrome", border_bottom = { width = 1, color = "$border" } }
+
+[[shell.children]]
+type = "row"
+align = "center"
+style = { height = 36, padding = [4, 8], gap = 6 }
+
+[[shell.children.children]]
+type = "back_forward"
+size = 28
+style = { color = "$text_dim", hover_color = "$text", font_size = 16 }
+
+[[shell.children.children]]
+type = "spacer"
+flex = true
+
+[[shell.children.children]]
+type = "nav_tabs"
+direction = "horizontal"
+show_icons = true
+uppercase = false
+profile_as_username = true
+indicator = "pill"
+tab_gap = 2
+style = { height = 32, radius = 6, font_size = 13, font_weight = "bold", color = "$text_dim", hover_color = "$text", active_color = "$text", active_bg = "$text@0.08", hover_bg = "$text@0.05" }
+
+[[shell.children.children]]
+type = "spacer"
+flex = true
+
+[[shell.children.children]]
+type = "account"
+show_avatar = true
+show_name = false
+show_wallet = false
+show_caret = false
+avatar_size = 28
+avatar_radius = 6
+action = "navigate:profile"
+style = { height = 32, radius = 8, padding = [2, 4], bg = "$text@0.05", hover_bg = "$text@0.12" }
+
+[[shell.children.children]]
+type = "notifications"
+size = 28
+highlight_unread_bg = "$accent"
+style = { width = 28, radius = 6, bg = "transparent", color = "$text_dim" }
+
+[[shell.children.children]]
+type = "button"
+label = ""
+icon = "chats"
+action = "open_friends"
+style = { width = 28, height = 28, radius = 6, bg = "transparent", hover_bg = "$surface_hover", color = "$text_dim", hover_color = "$text", font_size = 15 }
+
+[[shell.children.children]]
+type = "button"
+label = ""
+icon = "download"
+action = "navigate:downloads"
+style = { width = 28, height = 28, radius = 6, bg = "transparent", hover_bg = "$surface_hover", color = "$text_dim", hover_color = "$text", font_size = 15 }
+
+[[shell.children.children]]
+type = "menu"
+label = ""
+icon = "menu"
+style = { width = 28, height = 28, radius = 6, bg = "transparent", hover_bg = "$surface_hover", color = "$text", font_size = 16 }
+items = [{ label = "Settings", icon = "gear", action = "navigate:settings" }, { label = "Downloads", icon = "download", action = "navigate:downloads" }, { label = "Friends & Chat", icon = "chats", action = "open_friends" }, "separator", { label = "Add a Game…", icon = "plus", action = "add_game" }, { label = "Activate a Product…", icon = "key", action = "activate_product" }, { label = "Check for Updates", icon = "refresh", action = "check_updates" }, "separator", { label = "Minimize", action = "window:minimize" }, { label = "Maximize / Restore", action = "window:maximize" }, "separator", { label = "Switch Account…", action = "logout" }, { label = "Quit Aurora", icon = "power", action = "exit" }]
+
+[[shell.children.children]]
+type = "button"
+label = ""
+icon = "close"
+action = "window:close"
+style = { width = 26, height = 26, radius = 13, bg = "$text@0.10", hover_bg = "$text@0.18", color = "$text", font_size = 13 }
+
+[[shell]]
+type = "panel"
+side = "bottom"
+size = 28
+style = { bg = "$chrome", border_top = { width = 1, color = "$border" } }
+
+[[shell.children]]
+type = "row"
+align = "center"
+style = { height = 24, padding = [2, 10], gap = 6 }
+
+[[shell.children.children]]
+type = "button"
+label = "Add a Game"
+icon = "plus"
+action = "add_game"
+style = { height = 24, padding = [2, 6], font_size = 12, radius = 6, bg = "transparent", hover_bg = "$surface_hover", color = "$text_dim", hover_color = "$text" }
+
+[[shell.children.children]]
+type = "spacer"
+flex = true
+
+[[shell.children.children]]
+type = "downloads_bar"
+width = 320
+style = { height = 24, color = "$text_dim" }
+
+[[shell.children.children]]
+type = "spacer"
+flex = true
+
+[[shell.children.children]]
+type = "button"
+label = "Friends & Chat"
+icon = "chats"
+action = "open_friends"
+style = { height = 24, padding = [2, 6], font_size = 12, radius = 6, bg = "transparent", hover_bg = "$surface_hover", color = "$text_dim", hover_color = "$text" }
+
+[[shell]]
+type = "friends_drawer"
+width = 290
+style = { bg = "$chrome" }
+
+[[shell]]
+type = "panel"
+side = "center"
+style = { bg = "$bg" }
+
+[[shell.children]]
+type = "page_content"
