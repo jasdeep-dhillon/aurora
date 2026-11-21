@@ -1,12 +1,13 @@
 //! A game's reviews in a window, shared by the library and the store: what
-//! players say (Steam's review feed, most helpful first, in your language or
-//! all), and your own review, which you can write, edit or delete.
+//! players say (Steam's review feed with polarity, sort, time-window and
+//! language filters), and your own review, which you can write, edit or delete.
+//! Filter controls adapted from upstream work by `madonchik123` (PR #74 `be8d333`).
 
 use client::Command;
 use egui::{Align, Layout, Margin, Ui, vec2};
 use extensions::Ctx;
 use i18n::t;
-use model::AppId;
+use model::{AppId, ReviewFilter, ReviewKind, ReviewOrder, ReviewWindow as TimeWindow};
 use ui::{Theme, icons, widgets as w};
 
 /// Steam's limits for a review's text.
@@ -17,7 +18,7 @@ pub struct ReviewWindow {
     name: String,
     /// The game is on the account (Steam only takes reviews of owned games).
     owned: bool,
-    all_languages: bool,
+    filter: ReviewFilter,
     /// The editor is open (always, when you haven't written one yet).
     editing: bool,
     text: String,
@@ -34,11 +35,16 @@ pub struct ReviewWindow {
 impl ReviewWindow {
     /// `write`: open with the editor ready (the store's "Write a review").
     pub fn new(app: AppId, name: &str, owned: bool, write: bool) -> Self {
+        Self::with_filter(app, name, owned, write, ReviewFilter::default())
+    }
+
+    /// Open with a specific review filter selected (used by Store game page chips).
+    pub fn with_filter(app: AppId, name: &str, owned: bool, write: bool, filter: ReviewFilter) -> Self {
         Self {
             app,
             name: name.to_string(),
             owned,
-            all_languages: false,
+            filter,
             editing: write,
             text: String::new(),
             recommended: None,
@@ -52,15 +58,33 @@ impl ReviewWindow {
     }
 
     fn language(&self) -> String {
-        if self.all_languages { "all".into() } else { i18n::language().steam_name().to_string() }
+        i18n::language().steam_name().to_string()
     }
 
     fn load(&mut self, ctx: &mut Ctx) {
-        ctx.send(Command::LoadAppReviews { app_id: self.app, language: self.language(), cursor: None });
+        if ctx.state.account != "demo" {
+            ctx.send(Command::LoadAppReviews { app_id: self.app, language: self.language(), cursor: None, filter: self.filter });
+        }
         if self.owned {
             ctx.send(Command::LoadMyReview { app_id: self.app });
         }
         self.loaded = true;
+    }
+
+    /// Look up cached reviews for `self.filter`; in `--demo` mode, filter and sort
+    /// the seeded baseline reviews locally so every filter stays responsive offline.
+    fn visible_reviews(&self, ctx: &Ctx) -> Option<Result<model::AppReviews, String>> {
+        if let Some(res) = ctx.state.app_reviews.get(&(self.app, self.filter)) {
+            return Some(res.clone());
+        }
+        if ctx.state.account != "demo" {
+            return None;
+        }
+        let base = ctx.state.app_reviews.get(&(self.app, ReviewFilter::default()))?;
+        Some(base.clone().map(|mut r| {
+            r.items = filter_demo_reviews(&r.items, self.filter);
+            r
+        }))
     }
 
     /// Results of saving or deleting. Returns nothing; toasts say how it went.
@@ -118,21 +142,49 @@ impl ReviewWindow {
     }
 
     fn summary(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
-        let reviews = ctx.state.app_reviews.get(&self.app).and_then(|r| r.as_ref().ok());
+        let reviews = self.visible_reviews(ctx).and_then(|r| r.ok());
+        let before = self.filter;
         ui.horizontal_wrapped(|ui| {
-            let before = self.all_languages;
-            w::segmented(ui, t, &mut self.all_languages, &[(false, t!("Your language")), (true, t!("All languages"))]);
-            if before != self.all_languages {
-                ctx.send(Command::LoadAppReviews { app_id: self.app, language: self.language(), cursor: None });
+            ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+            w::segmented(ui, t, &mut self.filter.kind, &[(ReviewKind::All, t!("All reviews")), (ReviewKind::Positive, t!("Positive|review")), (ReviewKind::Negative, t!("Negative|review"))]);
+            w::segmented(ui, t, &mut self.filter.all_languages, &[(false, t!("Your language")), (true, t!("All languages"))]);
+            egui::ComboBox::from_id_salt(("reviews-order", self.app))
+                .selected_text(order_label(self.filter.order))
+                .show_ui(ui, |ui| {
+                    for o in [ReviewOrder::Helpful, ReviewOrder::Recent, ReviewOrder::Funny] {
+                        ui.selectable_value(&mut self.filter.order, o, order_label(o));
+                    }
+                });
+            if self.filter.order == ReviewOrder::Helpful {
+                egui::ComboBox::from_id_salt(("reviews-window", self.app))
+                    .selected_text(window_label(self.filter.window))
+                    .show_ui(ui, |ui| {
+                        for win in [
+                            TimeWindow::AllTime,
+                            TimeWindow::Day,
+                            TimeWindow::Week,
+                            TimeWindow::Month,
+                            TimeWindow::ThreeMonths,
+                            TimeWindow::SixMonths,
+                            TimeWindow::Year,
+                        ] {
+                            ui.selectable_value(&mut self.filter.window, win, window_label(win));
+                        }
+                    });
             }
-            ui.add_space(8.0);
-            if let Some(r) = reviews.filter(|r| r.total > 0) {
+        });
+        if before != self.filter && ctx.state.account != "demo" {
+            ctx.send(Command::LoadAppReviews { app_id: self.app, language: self.language(), cursor: None, filter: self.filter });
+        }
+        if let Some(r) = reviews.filter(|r| r.total > 0) {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
                 let pct = r.positive * 100 / (r.positive + r.negative).max(1);
                 let color = if pct >= 70 { t.play } else if pct >= 40 { t.away } else { t.danger };
                 ui.label(w::text_semibold(capitalized(&i18n::tr_dyn(&r.label)), 15.0, color));
                 ui.label(w::text(t!("{pct}% of {n} reviews are positive", pct = pct, n = r.total), 13.0, t.text_dim));
-            }
-        });
+            });
+        }
     }
 
     /// Your review, or the editor.
@@ -245,11 +297,11 @@ impl ReviewWindow {
         });
     }
 
-    /// What players say, most helpful first.
+    /// What players say, filtered and sorted according to `self.filter`.
     fn list(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
         ui.label(w::caption_text(t, t!("WHAT PLAYERS SAY")));
         ui.add_space(4.0);
-        let Some(result) = ctx.state.app_reviews.get(&self.app).cloned() else {
+        let Some(result) = self.visible_reviews(ctx) else {
             w::loading(ui, t, t!("Loading reviews…"));
             return;
         };
@@ -261,7 +313,8 @@ impl ReviewWindow {
             }
         };
         if reviews.items.is_empty() {
-            ui.label(w::text(t!("No reviews in this language yet."), 13.0, t.text_faint));
+            let msg = if self.filter == ReviewFilter::default() { t!("No reviews in this language yet.") } else { t!("No reviews match these filters.") };
+            ui.label(w::text(msg, 13.0, t.text_faint));
             return;
         }
         for r in &reviews.items {
@@ -306,7 +359,7 @@ impl ReviewWindow {
         if let Some(cursor) = reviews.cursor.clone().filter(|_| reviews.items.len() < reviews.total as usize) {
             ui.vertical_centered(|ui| {
                 if w::button(ui, t, Some(icons::CARET_DOWN), t!("More reviews"), w::Kind::Secondary, w::Size::Md).clicked() {
-                    ctx.send(Command::LoadAppReviews { app_id: self.app, language: self.language(), cursor: Some(cursor) });
+                    ctx.send(Command::LoadAppReviews { app_id: self.app, language: self.language(), cursor: Some(cursor), filter: self.filter });
                 }
             });
         }
@@ -348,4 +401,53 @@ fn capitalized(s: &str) -> String {
         Some(f) => f.to_uppercase().chain(c).collect(),
         None => String::new(),
     }
+}
+
+fn order_label(order: ReviewOrder) -> &'static str {
+    match order {
+        ReviewOrder::Helpful => t!("Most helpful"),
+        ReviewOrder::Recent => t!("Most recent"),
+        ReviewOrder::Funny => t!("Funniest"),
+    }
+}
+
+fn window_label(window: TimeWindow) -> &'static str {
+    match window {
+        TimeWindow::AllTime => t!("All time"),
+        TimeWindow::Day => t!("Today"),
+        TimeWindow::Week => t!("This week"),
+        TimeWindow::Month => t!("This month"),
+        TimeWindow::ThreeMonths => t!("Past 3 months"),
+        TimeWindow::SixMonths => t!("Past 6 months"),
+        TimeWindow::Year => t!("This year"),
+    }
+}
+
+fn filter_demo_reviews(items: &[model::AppReview], filter: ReviewFilter) -> Vec<model::AppReview> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let cutoff = match (filter.order, filter.window) {
+        (ReviewOrder::Helpful, TimeWindow::Day) => now.saturating_sub(86_400),
+        (ReviewOrder::Helpful, TimeWindow::Week) => now.saturating_sub(86_400 * 7),
+        (ReviewOrder::Helpful, TimeWindow::Month) => now.saturating_sub(86_400 * 30),
+        (ReviewOrder::Helpful, TimeWindow::ThreeMonths) => now.saturating_sub(86_400 * 90),
+        (ReviewOrder::Helpful, TimeWindow::SixMonths) => now.saturating_sub(86_400 * 180),
+        (ReviewOrder::Helpful, TimeWindow::Year) => now.saturating_sub(86_400 * 365),
+        _ => 0,
+    };
+    let mut out: Vec<model::AppReview> = items
+        .iter()
+        .filter(|r| match filter.kind {
+            ReviewKind::All => true,
+            ReviewKind::Positive => r.recommended,
+            ReviewKind::Negative => !r.recommended,
+        })
+        .filter(|r| r.created >= cutoff)
+        .cloned()
+        .collect();
+    match filter.order {
+        ReviewOrder::Helpful => out.sort_by_key(|r| std::cmp::Reverse(r.helpful)),
+        ReviewOrder::Recent => out.sort_by_key(|r| std::cmp::Reverse(r.created)),
+        ReviewOrder::Funny => out.sort_by_key(|r| std::cmp::Reverse(r.funny)),
+    }
+    out
 }

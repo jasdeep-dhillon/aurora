@@ -1,5 +1,7 @@
 //! Store: rendered natively from Steam's store JSON (no web view).
 //! Payment is the only step that leaves the app: Steam only accepts it on its website.
+//! Search suggestions, redesigned Store bar, Discovery Queue walkthrough,
+//! microtrailers on hover, and wishlist reordering adapted from upstream work by `madonchik123`.
 
 use ui::widgets::EditMenu;
 use i18n::t;
@@ -7,7 +9,7 @@ use egui::text::{LayoutJob, TextFormat};
 use egui::{Align, Align2, Color32, CornerRadius, Layout, Margin, Rect, Sense, Stroke, Ui, pos2, vec2};
 use extensions::{Ctx, Extension, Manifest, PageSpec};
 use model::AppId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use store::browse::BrowseInfo;
@@ -16,6 +18,14 @@ use ui::{Theme, icons, widgets as w};
 
 #[path = "store_more.rs"]
 mod more;
+#[path = "store_discovery.rs"]
+mod discovery;
+#[path = "store_suggest.rs"]
+mod suggest;
+#[path = "store_micro.rs"]
+mod micro;
+#[path = "store_points.rs"]
+mod points;
 
 enum Load<T> {
     Loading,
@@ -39,6 +49,8 @@ enum View {
     Creator(String, String),
     App(AppId),
     Browse,
+    Discovery(usize),
+    Points,
     Wishlist,
     Cart,
 }
@@ -69,6 +81,8 @@ pub struct Store {
     /// People playing each game right now, refreshed every minute.
     players: HashMap<AppId, Players>,
     tags: Option<Shared<HashMap<u32, String>>>,
+    /// When the tag names were last asked for (to retry after failure/empty answer).
+    tags_asked: Option<std::time::Instant>,
     /// (country, language) the caches were loaded with.
     locale: (String, String),
     /// Content descriptors per app, for the mature content filter.
@@ -78,7 +92,25 @@ pub struct Store {
     /// Descriptor ids the user chose to hide.
     hidden: std::collections::BTreeSet<u32>,
     /// Mature pages the user chose to view this session.
-    allowed: std::collections::HashSet<AppId>,
+    allowed: HashSet<AppId>,
+    /// Text in the Store subnav search bar.
+    bar_query: String,
+    /// Search-as-you-type game suggestions under the Store search bar.
+    suggest: suggest::Suggest,
+    /// Active microtrailer hovering on a store card.
+    micro: micro::Micro,
+    /// Points Shop catalog state.
+    points: points::Points,
+    /// Discovery Queue walkthrough state.
+    discovery: Option<Result<Vec<AppId>, String>>,
+    discovery_wait: bool,
+    discovery_late: bool,
+    discovery_asked: Option<std::time::Instant>,
+    /// Local demo toggles so `--demo` interactions stay responsive without Steam.
+    demo_followed: HashMap<AppId, bool>,
+    demo_ignored: HashMap<AppId, bool>,
+    demo_wish_removed: HashSet<AppId>,
+    demo_wish_added: Vec<(AppId, u64)>,
     search: Option<(String, Shared<Vec<Item>>)>,
     view: View,
     hero: usize,
@@ -88,13 +120,17 @@ pub struct Store {
     /// The strip item last scrolled into view, so a new pick gets centered once.
     shot_centered: Option<usize>,
     /// Games on your account (library + installed), for "In library" marks.
-    owned: std::collections::HashSet<AppId>,
+    owned: HashSet<AppId>,
     /// The trailer playing in the media area: (source URL, player).
     trailer: Option<(String, video::Player)>,
+    /// Frame counters for freeing trailer/microtrailer players when leaving Store.
+    frames: u64,
+    drawn_frame: u64,
     filters: store::query::Filters,
     browse_page: u32,
     query: Option<(store::query::Filters, u32, Shared<(Vec<store::query::QueryItem>, u64)>)>,
     hide_owned: bool,
+    wish: more::WishView,
     wish_items: Option<(Vec<AppId>, Shared<Vec<store::query::QueryItem>>)>,
     cart_names: Option<(Vec<u32>, Shared<Vec<(u32, String, String, AppId)>>)>,
     /// Steam's "Added to your cart!" popup, for one game.
@@ -130,16 +166,30 @@ impl Store {
             recent: super::RecentApps::new(24),
             players: HashMap::new(),
             tags: None,
+            tags_asked: None,
             locale: ("us".into(), "english".into()),
             ratings: Default::default(),
             ratings_pending: Vec::new(),
             ratings_busy: Default::default(),
             hidden: [3, 4].into_iter().collect(),
             allowed: Default::default(),
+            bar_query: String::new(),
+            suggest: Default::default(),
+            micro: Default::default(),
+            points: Default::default(),
+            discovery: None,
+            discovery_wait: false,
+            discovery_late: false,
+            discovery_asked: None,
+            demo_followed: HashMap::new(),
+            demo_ignored: HashMap::new(),
+            demo_wish_removed: HashSet::new(),
+            demo_wish_added: Vec::new(),
             filters: Default::default(),
             browse_page: 0,
             query: None,
             hide_owned: false,
+            wish: Default::default(),
             wish_items: None,
             cart_names: None,
             cart_popup: None,
@@ -162,6 +212,8 @@ impl Store {
             shot_centered: None,
             owned: Default::default(),
             trailer: None,
+            frames: 0,
+            drawn_frame: 0,
         }
     }
 
@@ -250,14 +302,30 @@ impl Store {
     }
 
     fn tag_name(&mut self, id: u32) -> Option<String> {
-        if self.tags.is_none() {
-            let api = self.api.clone();
-            self.tags = Some(self.fetch(async move { api.tag_names().await }));
-        }
+        self.tag_names_ready();
         match &*self.tags.as_ref()?.lock().unwrap() {
             Load::Ready(m) => m.get(&id).cloned(),
             _ => None,
         }
+    }
+
+    /// Steam's tag names, requested once and retried after 10s on failure or empty answer.
+    fn tag_names_ready(&mut self) -> bool {
+        const RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+        let state = self.tags.as_ref().map(|s| match &*s.lock().unwrap() {
+            Load::Ready(m) if !m.is_empty() => Some(true),
+            Load::Loading => None,
+            _ => Some(false),
+        });
+        let retry = matches!(state, Some(Some(false))) && self.tags_asked.is_none_or(|a| a.elapsed() >= RETRY);
+        if self.tags.is_none() || retry {
+            let api = self.api.clone();
+            self.tags = Some(self.fetch(async move { api.tag_names().await }));
+            self.tags_asked = Some(std::time::Instant::now());
+        } else if matches!(state, Some(Some(false))) {
+            self.egui.request_repaint_after(RETRY);
+        }
+        matches!(state, Some(Some(true)))
     }
 
     /// Follow the wallet's country (prices) and the interface language.
@@ -330,7 +398,9 @@ impl Store {
 
     fn open(&mut self, view: View) {
         self.trailer = None;
-        if let View::App(_) = view {
+        self.micro = Default::default();
+        self.suggest.open = false;
+        if let View::App(_) | View::Discovery(_) = view {
             self.shot = 0;
             self.shot_centered = None;
         }
@@ -340,6 +410,50 @@ impl Store {
             self.nav_out = Some(view_arg(&view));
         }
         self.view = view;
+    }
+
+    pub(super) fn start_search(&mut self, q: String) {
+        let api = self.api.clone();
+        let qq = q.clone();
+        let slot = self.fetch(async move { api.search(&qq).await });
+        self.search = Some((q.clone(), slot));
+        self.open(View::Search(q));
+    }
+
+    pub(super) fn wishlist_entries(&self, ctx: &Ctx) -> Option<Vec<(AppId, u64)>> {
+        let base = ctx.state.wishlist.as_ref()?;
+        if ctx.state.account != "demo" {
+            return Some(base.clone());
+        }
+        let mut list: Vec<(AppId, u64)> = base.iter().filter(|(id, _)| !self.demo_wish_removed.contains(id)).copied().collect();
+        for &(id, added) in &self.demo_wish_added {
+            if !list.iter().any(|(x, _)| *x == id) {
+                list.push((id, added));
+            }
+        }
+        Some(list)
+    }
+
+    pub(super) fn is_wishlisted(&self, ctx: &Ctx, id: AppId) -> bool {
+        self.wishlist_entries(ctx).is_some_and(|l| l.iter().any(|(a, _)| *a == id))
+    }
+
+    pub(super) fn toggle_wishlist(&mut self, ctx: &mut Ctx, id: AppId, wished: bool) {
+        if ctx.state.account == "demo" {
+            if wished {
+                self.demo_wish_removed.insert(id);
+                self.demo_wish_added.retain(|(x, _)| *x != id);
+            } else {
+                self.demo_wish_removed.remove(&id);
+                if !self.demo_wish_added.iter().any(|(x, _)| *x == id) {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    self.demo_wish_added.push((id, now));
+                }
+            }
+            self.wish.pending = None;
+            return;
+        }
+        ctx.send(if wished { client::Command::WishlistRemove { app_id: id } } else { client::Command::WishlistAdd { app_id: id } });
     }
 
     /// A developer's or publisher's games, like their store page.
@@ -380,10 +494,27 @@ impl Extension for Store {
         if let Some(r) = &mut self.reviews {
             r.on_event(event, ctx);
         }
+        if let client::Event::Wishlist(_) = event {
+            self.wish.pending = None;
+        }
+        if let client::Event::DiscoveryQueue(r) = event {
+            self.discovery_wait = false;
+            self.discovery_late = false;
+            self.discovery_asked = None;
+            self.discovery = Some(r.clone());
+        }
         if let client::Event::LoggedIn { .. } = event {
-            // A new account: its own picks.
+            // A new account: its own picks and discovery queue.
             self.recs_asked = false;
             self.recs = None;
+            self.discovery = None;
+            self.discovery_wait = false;
+            self.discovery_late = false;
+            self.discovery_asked = None;
+            self.demo_followed.clear();
+            self.demo_ignored.clear();
+            self.demo_wish_removed.clear();
+            self.demo_wish_added.clear();
         }
         if let client::Event::FreeLicense { app_id, result } = event {
             if self.free_pending == Some(*app_id) {
@@ -401,14 +532,7 @@ impl Extension for Store {
         self.nav_out = None;
         match arg {
             Some(a) if a.starts_with("section:") => self.open(View::Section(a.trim_start_matches("section:").to_string())),
-            Some(a) if a.starts_with("search:") => {
-                let q = a.trim_start_matches("search:").to_string();
-                let api = self.api.clone();
-                let qq = q.clone();
-                let slot = self.fetch(async move { api.search(&qq).await });
-                self.search = Some((q.clone(), slot));
-                self.open(View::Search(q));
-            }
+            Some(a) if a.starts_with("search:") => self.start_search(a.trim_start_matches("search:").to_string()),
             Some(a) if a.starts_with("developer:") || a.starts_with("publisher:") => {
                 let (kind, name) = a.split_once(':').unwrap_or_default();
                 self.open_creator(kind, name);
@@ -419,6 +543,19 @@ impl Extension for Store {
                 }
             }
             Some("browse") => self.open(View::Browse),
+            Some("discovery") => self.open(View::Discovery(0)),
+            Some(a) if a.starts_with("discovery/") => {
+                let pos = a.trim_start_matches("discovery/").parse().unwrap_or(0);
+                self.open(View::Discovery(pos));
+            }
+            Some("points") => self.open(View::Points),
+            Some(a) if a.starts_with("points:") => {
+                if let Ok(id) = a.trim_start_matches("points:").parse() {
+                    self.open_points_game(id);
+                } else {
+                    self.open(View::Points);
+                }
+            }
             Some("wishlist") => self.open(View::Wishlist),
             Some("cart") => self.open(View::Cart),
             Some(a) => {
@@ -431,7 +568,16 @@ impl Extension for Store {
         self.in_nav = false;
     }
 
+    fn tick(&mut self, _ctx: &mut Ctx) {
+        self.frames += 1;
+        if self.frames.saturating_sub(self.drawn_frame) > 2 {
+            self.trailer = None;
+            self.micro = Default::default();
+        }
+    }
+
     fn page(&mut self, _page: &str, ui: &mut Ui, ctx: &mut Ctx) {
+        self.drawn_frame = self.frames;
         if let Some(arg) = self.nav_out.take() {
             ctx.navigate("store", arg);
         }
@@ -459,14 +605,39 @@ impl Extension for Store {
             self.front = Some(self.fetch(async move { api.front().await }));
         }
         egui::ScrollArea::vertical().id_salt(("store", view_key(&self.view))).auto_shrink([false, false]).show(ui, |ui| {
+            // Paint game background art from the very top of the page so the
+            // Store sub-bar and Discovery Queue bar merge seamlessly into it.
+            let bg_app = match &self.view {
+                View::App(id) => Some(*id),
+                View::Discovery(pos) => self.discovery.as_ref().and_then(|r| r.as_ref().ok()).and_then(|q| q.get(*pos).copied()),
+                _ => None,
+            };
+            if let Some(id) = bg_app {
+                let bg_url = self.details.get(&id).and_then(|s| match &*s.lock().unwrap() {
+                    Load::Ready(d) => Some(d.background.clone()),
+                    _ => None,
+                });
+                if let Some(url) = bg_url {
+                    let full = ui.max_rect();
+                    let bg = Rect::from_min_size(full.min, vec2(full.width(), 580.0));
+                    if w::paint_cover(ui, bg, &url, CornerRadius::ZERO) {
+                        ui.painter().rect_filled(bg, CornerRadius::ZERO, t.bg.gamma_multiply(0.55));
+                    }
+                    w::fade_down(ui, bg, t.bg, 0.0);
+                }
+            }
+            ui.add_space(6.0);
+            w::centered(ui, 1200.0, 28.0, |ui| {
+                self.subnav(ui, &t, ctx);
+            });
+            ui.add_space(4.0);
             match self.view.clone() {
                 View::App(id) if !self.allowed.contains(&id) && self.details_mature(id) => self.mature_gate(ui, &t, id),
                 View::App(id) => self.app_page(ui, &t, ctx, id),
+                View::Discovery(pos) => self.discovery_page(ui, &t, ctx, pos),
                 view => {
-                    ui.add_space(20.0);
+                    ui.add_space(8.0);
                     w::centered(ui, 1200.0, 28.0, |ui| {
-                        self.subnav(ui, &t, ctx);
-                        ui.add_space(18.0);
                         match view {
                             View::Home => self.home(ui, &t),
                             View::Section(id) => self.section(ui, &t, &id),
@@ -476,9 +647,10 @@ impl Extension for Store {
                                 self.search_results(ui, &t, &title)
                             }
                             View::Browse => self.browse_page(ui, &t, ctx),
+                            View::Points => self.points_page(ui, &t, ctx),
                             View::Wishlist => self.wishlist_page(ui, &t, ctx),
                             View::Cart => self.cart_page(ui, &t, ctx),
-                            View::App(_) => {}
+                            View::App(_) | View::Discovery(_) => {}
                         }
                         ui.add_space(40.0);
                     });
@@ -491,6 +663,7 @@ impl Extension for Store {
             }
         }
         self.flush_ratings();
+        self.micro_end_frame();
         self.gift_dialog(ui, &t, ctx);
         self.cart_popup_ui(ui, &t, ctx);
     }
@@ -549,6 +722,8 @@ fn view_key(v: &View) -> String {
         View::Creator(k, n) => format!("c:{k}:{n}"),
         View::App(id) => format!("a:{id}"),
         View::Browse => "browse".into(),
+        View::Discovery(pos) => format!("d:{pos}"),
+        View::Points => "points".into(),
         View::Wishlist => "wishlist".into(),
         View::Cart => "cart".into(),
     }
@@ -568,49 +743,84 @@ impl Store {
         }
     }
 
-    fn subnav(&mut self, ui: &mut Ui, t: &Theme, ctx: &Ctx) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if w::chip(ui, t, &format!("{}  {}", icons::SPARKLE, t!("Featured")), self.view == View::Home).clicked() {
-                self.open(View::Home);
-            }
-            if w::chip(ui, t, &format!("{}  {}", icons::SLIDERS, t!("Browse")), self.view == View::Browse).clicked() {
+    /// Single-line Store bar: Home, Browse dropdown (filters + lists), Discovery queue,
+    /// search-as-you-type search box, and Wishlist & Cart on the right.
+    fn subnav(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+        let width = ui.available_width();
+        let (bar, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
+        let mut row = ui.new_child(egui::UiBuilder::new().max_rect(bar).layout(Layout::left_to_right(Align::Center)));
+        let ui = &mut row;
+        ui.spacing_mut().item_spacing.x = 6.0;
+
+        let sections = match self.front_data() {
+            Some(Ok((_, sections))) => sections,
+            _ => Vec::new(),
+        };
+        if w::nav_tab_icon(ui, t, Some(icons::SPARKLE), t!("Featured"), self.view == View::Home, 34.0).clicked() {
+            self.open(View::Home);
+        }
+        let in_browse = matches!(self.view, View::Browse | View::Section(_));
+        let browse_btn = w::nav_tab_icon(ui, t, Some(icons::SLIDERS), &format!("{}  {}", t!("Browse|store"), icons::CARET_DOWN), in_browse, 34.0);
+        egui::Popup::from_toggle_button_response(&browse_btn).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(230.0).show(|ui| {
+            w::menu_spacing(ui);
+            if w::menu_item(ui, t, icons::SLIDERS, t!("All games, with filters")).clicked() {
                 self.open(View::Browse);
+                ui.close();
             }
-            if let Some(Ok((_, sections))) = self.front_data() {
-                for s in &sections {
-                    let icon = match s.id.as_str() {
-                        "specials" => icons::TAG,
-                        "top_sellers" => icons::FIRE,
-                        "new_releases" => icons::STAR,
-                        _ => icons::CALENDAR,
-                    };
-                    if w::chip(ui, t, &format!("{icon}  {}", i18n::tr_dyn(&s.title)), self.view == View::Section(s.id.clone())).clicked() {
-                        self.open(View::Section(s.id.clone()));
-                    }
-                }
-            }
-            if let Some((q, _)) = &self.search {
-                let q = q.clone();
-                // The last search, or the developer/publisher page you came from.
-                let (label, view) = match q.split_once(':') {
-                    Some((kind, name)) if kind == "developer" || kind == "publisher" => (format!("{}  {name}", icons::USERS), View::Creator(kind.to_string(), name.to_string())),
-                    _ => (format!("{}  \"{q}\"", icons::SEARCH), View::Search(q.clone())),
+            for s in &sections {
+                let icon = match s.id.as_str() {
+                    "specials" => icons::TAG,
+                    "top_sellers" => icons::FIRE,
+                    "new_releases" => icons::STAR,
+                    _ => icons::CALENDAR,
                 };
-                if w::chip(ui, t, &label, self.view == view).clicked() {
-                    self.open(view);
+                if w::menu_item(ui, t, icon, &i18n::tr_dyn(&s.title)).clicked() {
+                    self.open(View::Section(s.id.clone()));
+                    ui.close();
                 }
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let cart = ctx.state.cart.as_ref().map(|c| c.len()).unwrap_or(0);
-                if w::chip(ui, t, &format!("{}  {} ({cart})", icons::CART, t!("Cart")), self.view == View::Cart).clicked() {
-                    self.open(View::Cart);
-                }
-                let wish = ctx.state.wishlist.as_ref().map(|w| w.len()).unwrap_or(0);
-                if w::chip(ui, t, &format!("{}  {} ({wish})", icons::HEART, t!("Wishlist")), self.view == View::Wishlist).clicked() {
-                    self.open(View::Wishlist);
-                }
-            });
+        });
+        if ctx.state.steam_id != 0
+            && w::nav_tab_icon(ui, t, Some(icons::STACK), t!("Discovery queue"), matches!(self.view, View::Discovery(_)), 34.0).clicked()
+        {
+            self.open(View::Discovery(0));
+        }
+        if w::nav_tab_icon(ui, t, Some(icons::GIFT), t!("Points Shop"), self.view == View::Points, 34.0).clicked() {
+            self.open(View::Points);
+        }
+        if let Some((q, _)) = &self.search {
+            let q = q.clone();
+            let (label, view) = match q.split_once(':') {
+                Some((kind, name)) if kind == "developer" || kind == "publisher" => (name.to_string(), View::Creator(kind.to_string(), name.to_string())),
+                _ => (format!("“{q}”"), View::Search(q.clone())),
+            };
+            if ui.available_width() > 540.0 && w::nav_tab_icon(ui, t, Some(icons::SEARCH), &label, self.view == view, 34.0).clicked() {
+                self.open(view);
+            }
+        }
+
+        let cart = ctx.state.cart.as_ref().map(|c| c.len()).unwrap_or(0);
+        let wish = self.wishlist_entries(ctx).map(|w| w.len()).unwrap_or(0);
+        let cart_label = format!("{} ({cart})", t!("Cart"));
+        let wish_label = format!("{} ({wish})", t!("Wishlist"));
+        let tab_w = |lbl: &str| ui.painter().layout_no_wrap(lbl.to_string(), w::font_medium(13.0), t.text).size().x + 48.0;
+        let right_reserve = tab_w(&cart_label) + if ctx.state.steam_id != 0 { tab_w(&wish_label) + 6.0 } else { 0.0 } + 16.0;
+        let search_w = (ui.available_width() - right_reserve).clamp(150.0, 320.0);
+        if ui.available_width() > right_reserve + 90.0 {
+            ui.add_space(4.0);
+            self.search_box(ui, t, ctx, search_w);
+        }
+
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if w::nav_tab_icon(ui, t, Some(icons::CART), &cart_label, self.view == View::Cart, 34.0).clicked() {
+                self.open(View::Cart);
+            }
+            if ctx.state.steam_id != 0
+                && w::nav_tab_icon(ui, t, Some(icons::HEART), &wish_label, self.view == View::Wishlist, 34.0).clicked()
+            {
+                self.open(View::Wishlist);
+            }
         });
     }
 
@@ -886,7 +1096,8 @@ impl Store {
                     w::skeleton(ui, t, r, t.corner());
                     continue;
                 }
-                if card(ui, t, item, actual_w, self.owned.contains(&item.app_id)).clicked() {
+                let owned = self.owned.contains(&item.app_id);
+                if self.store_card(ui, t, item, actual_w, owned).clicked() {
                     self.open(View::App(item.app_id));
                 }
             }
@@ -915,7 +1126,8 @@ impl Store {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
                 for item in row {
-                    if card(ui, t, item, cw, self.owned.contains(&item.app_id)).clicked() {
+                    let owned = self.owned.contains(&item.app_id);
+                    if self.store_card(ui, t, item, cw, owned).clicked() {
                         self.open(View::App(item.app_id));
                     }
                 }
@@ -998,15 +1210,7 @@ impl Store {
             }
         };
 
-        // Background art fading into the page.
-        let full = ui.max_rect();
-        let bg = Rect::from_min_size(full.min, vec2(full.width(), 560.0));
-        if w::paint_cover(ui, bg, &d.background, CornerRadius::ZERO) {
-            ui.painter().rect_filled(bg, CornerRadius::ZERO, t.bg.gamma_multiply(0.55));
-        }
-        w::fade_down(ui, bg, t.bg, 0.0);
-
-        ui.add_space(20.0);
+        ui.add_space(6.0);
         w::centered(ui, max, pad.min(28.0), |ui| {
             ui.horizontal(|ui| {
                 if w::button(ui, t, Some(icons::ARROW_LEFT), t!("Store"), w::Kind::Ghost, w::Size::Sm).clicked() {
@@ -1251,6 +1455,7 @@ impl Store {
             let tr = &trailers[self.shot];
             let source = tr.hls.clone().map(video::Source::Hls).or_else(|| tr.micro_mp4.clone().map(video::Source::Mp4));
             if let Some(src) = source {
+                self.drawn_frame = self.frames;
                 if self.trailer.as_ref().is_none_or(|(url, _)| url != src.url()) {
                     // A picked trailer plays right away (muted until the user
                     // turns sound on once), like Steam; full screen carries over.
@@ -1400,12 +1605,25 @@ pub(crate) fn thousands(n: u64) -> String {
     out
 }
 
-/// One store card: header art, name, price.
-fn card(ui: &mut Ui, t: &Theme, item: &Item, width: f32, owned: bool) -> egui::Response {
+impl Store {
+    /// Store game card with hover microtrailer playback, keeping `"In library"`
+    /// painted above any playing preview clip.
+    pub(super) fn store_card(&mut self, ui: &mut Ui, t: &Theme, item: &Item, width: f32, owned: bool) -> egui::Response {
+        let (r, img) = card(ui, t, item, width, owned);
+        self.micro(ui, item.app_id, img, CornerRadius { nw: t.radius, ne: t.radius, sw: 0, se: 0 }, r.hovered());
+        if owned && ui.is_rect_visible(img) {
+            in_library_badge(ui, t, img);
+        }
+        r
+    }
+}
+
+/// One store card: header art, name, price. Returns the card response and art rect.
+fn card(ui: &mut Ui, t: &Theme, item: &Item, width: f32, owned: bool) -> (egui::Response, Rect) {
     let h = width * 215.0 / 460.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(width, h + 64.0), Sense::click());
     if !ui.is_rect_visible(rect) {
-        return resp;
+        return (resp, Rect::from_min_size(rect.min, vec2(width, h)));
     }
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.15);
     let lift = rect.translate(vec2(0.0, -3.0 * hover));
@@ -1416,9 +1634,6 @@ fn card(ui: &mut Ui, t: &Theme, item: &Item, width: f32, owned: bool) -> egui::R
     p.rect_filled(lift, t.corner(), w::mix(t.surface, t.surface_hover, hover));
     let img = Rect::from_min_size(lift.min, vec2(width, h));
     w::image_or_skeleton(ui, t, img, &item.header, CornerRadius { nw: t.radius, ne: t.radius, sw: 0, se: 0 });
-    if owned {
-        in_library_badge(ui, t, img);
-    }
     let body = Rect::from_min_max(pos2(lift.left() + 12.0, img.bottom() + 8.0), lift.max - vec2(12.0, 8.0));
     let mut c = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)));
     c.spacing_mut().item_spacing.y = 2.0;
@@ -1436,7 +1651,7 @@ fn card(ui: &mut Ui, t: &Theme, item: &Item, width: f32, owned: bool) -> egui::R
             }
         });
     });
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    (resp.on_hover_cursor(egui::CursorIcon::PointingHand), img)
 }
 
 /// "In library" ribbon on a store picture's top-left corner, like Steam's.
@@ -1590,6 +1805,23 @@ impl Store {
                         }
                     });
                 });
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                    ui.label(w::text(t!("Browse by:"), 12.5, t.text_dim));
+                    let presets = [
+                        (t!("Most helpful"), model::ReviewFilter::default()),
+                        (t!("Most recent"), model::ReviewFilter { order: model::ReviewOrder::Recent, ..Default::default() }),
+                        (t!("Funniest"), model::ReviewFilter { order: model::ReviewOrder::Funny, ..Default::default() }),
+                        (t!("Positive|review"), model::ReviewFilter { kind: model::ReviewKind::Positive, ..Default::default() }),
+                        (t!("Negative|review"), model::ReviewFilter { kind: model::ReviewKind::Negative, ..Default::default() }),
+                    ];
+                    for (label, filter) in presets {
+                        if w::chip(ui, t, label, false).clicked() {
+                            self.reviews = Some(super::reviews::ReviewWindow::with_filter(id, name, owned, false, filter));
+                        }
+                    }
+                });
             });
     }
 }
@@ -1685,12 +1917,27 @@ fn view_arg(view: &View) -> Option<String> {
         View::Creator(kind, name) => Some(format!("{kind}:{name}")),
         View::App(id) => Some(format!("app:{id}")),
         View::Browse => Some("browse".into()),
+        View::Discovery(0) => Some("discovery".into()),
+        View::Discovery(pos) => Some(format!("discovery/{pos}")),
+        View::Points => Some("points".into()),
         View::Wishlist => Some("wishlist".into()),
         View::Cart => Some("cart".into()),
     }
 }
 
 /// A store card from a store query result.
-fn query_card(q: store::query::QueryItem) -> Item {
+pub(super) fn query_card(q: store::query::QueryItem) -> Item {
     Item { app_id: q.app_id, name: q.name, header: q.header, large: q.capsule, price: q.price, windows: q.platforms.0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{View, view_arg};
+
+    #[test]
+    fn encodes_discovery_routes() {
+        assert_eq!(view_arg(&View::Discovery(0)).as_deref(), Some("discovery"));
+        assert_eq!(view_arg(&View::Discovery(4)).as_deref(), Some("discovery/4"));
+        assert_eq!(view_arg(&View::Browse).as_deref(), Some("browse"));
+    }
 }

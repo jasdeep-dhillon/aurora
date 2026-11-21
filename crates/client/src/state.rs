@@ -50,8 +50,14 @@ pub struct State {
     pub badges: HashMap<SteamId, Result<model::Badges, String>>,
     /// Profile reviews by (profile, page).
     pub reviews: HashMap<(SteamId, u32), Result<model::UserReviews, String>>,
-    /// Reviews of games (summary and the pages loaded so far).
-    pub app_reviews: HashMap<AppId, Result<model::AppReviews, String>>,
+    /// Reviews of games by filter (summary and pages loaded so far).
+    pub app_reviews: HashMap<(AppId, model::ReviewFilter), Result<model::AppReviews, String>>,
+    /// Games you marked "Not interested" in the store.
+    pub ignored_apps: std::collections::HashSet<AppId>,
+    /// Your Steam Points Shop balance, when loaded.
+    pub points_balance: Option<u64>,
+    /// Games you follow in the store.
+    pub followed_apps: std::collections::HashSet<AppId>,
     /// Your own review of each game looked up (`None`: none written).
     pub my_reviews: HashMap<AppId, Result<Option<model::UserReview>, String>>,
     /// The store's personal picks for this account (after sign-in).
@@ -197,19 +203,45 @@ impl State {
             Event::Reviews { steam_id, page, result } => {
                 self.reviews.insert((*steam_id, *page), result.clone());
             }
-            Event::AppReviews { app_id, more, result } => match (result, self.app_reviews.get_mut(app_id)) {
+            Event::AppReviews { app_id, filter, more, result } => match (result, self.app_reviews.get_mut(&(*app_id, *filter))) {
                 (Ok(page), Some(Ok(have))) if *more => {
                     have.items.extend(page.items.iter().cloned());
                     have.cursor = page.cursor.clone();
                 }
                 _ => {
-                    self.app_reviews.insert(*app_id, result.clone());
+                    self.app_reviews.insert((*app_id, *filter), result.clone());
                 }
             },
             Event::MyReview { app_id, result } => {
                 self.my_reviews.insert(*app_id, result.clone());
             }
+            Event::ReviewSaved { app_id, result: Ok(()), .. } => {
+                self.app_reviews.retain(|(id, _), _| id != app_id);
+            }
             Event::ReviewSaved { .. } => {}
+            Event::DiscoveryQueue(_) => {}
+            Event::PointsBalance(Ok(pts)) => {
+                self.points_balance = Some(*pts);
+            }
+            Event::PointsBalance(Err(_)) => {}
+            Event::AppIgnored { app_id, ignored, result } => {
+                if result.is_ok() && *ignored {
+                    self.ignored_apps.insert(*app_id);
+                } else if result.is_ok() {
+                    self.ignored_apps.remove(app_id);
+                }
+            }
+            Event::FollowedApps(ids) => {
+                self.followed_apps = ids.iter().copied().collect();
+            }
+            Event::AppFollowed { app_id, result: Ok(followed) } => {
+                if *followed {
+                    self.followed_apps.insert(*app_id);
+                } else {
+                    self.followed_apps.remove(app_id);
+                }
+            }
+            Event::AppFollowed { .. } | Event::WishlistChanging { .. } => {}
             Event::StoreRecommendations(r) => self.store_recs = Some(r.clone()),
             Event::TradeOfferSent { .. } => {}
             Event::Groups { steam_id, result } => {

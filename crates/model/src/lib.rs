@@ -795,6 +795,52 @@ pub struct AppReviews {
     pub cursor: Option<String>,
 }
 
+/// Which review polarity to request from Steam's review feed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReviewKind {
+    #[default]
+    All,
+    Positive,
+    Negative,
+}
+
+/// Sort order for Steam's review feed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReviewOrder {
+    #[default]
+    Helpful,
+    Recent,
+    Funny,
+}
+
+/// Time window used when sorting by [`ReviewOrder::Helpful`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReviewWindow {
+    AllTime,
+    Day,
+    Week,
+    #[default]
+    Month,
+    ThreeMonths,
+    SixMonths,
+    Year,
+}
+
+/// Filters for [`AppReviews`] fetched via `IUserReviewsService/GetAppReviews`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReviewFilter {
+    pub kind: ReviewKind,
+    pub order: ReviewOrder,
+    pub window: ReviewWindow,
+    pub all_languages: bool,
+}
+
+impl Default for ReviewFilter {
+    fn default() -> Self {
+        Self { kind: ReviewKind::All, order: ReviewOrder::Helpful, window: ReviewWindow::Month, all_languages: false }
+    }
+}
+
 /// The store's picks for you, from Steam's personal sources.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StoreRecommendations {

@@ -33,6 +33,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+/// Whether video decoding is available on this platform.
+pub fn supported() -> bool {
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        ffdec::available()
+    }
+}
+
 /// What to play.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Source {
@@ -413,6 +425,7 @@ impl Player {
             self.shown_epoch = epoch;
             self.shown_pts = f.pts;
             match &mut self.tex {
+                Some(t) if t.size() == f.image.size => t.set_partial([0, 0], f.image, egui::TextureOptions::LINEAR),
                 Some(t) => t.set(f.image, egui::TextureOptions::LINEAR),
                 None => self.tex = Some(ctx.load_texture("video-frame", f.image, egui::TextureOptions::LINEAR)),
             }

@@ -1032,12 +1032,12 @@ async fn online(
                     let result = crate::social::groups(web.as_deref().ok(), steam_id).await;
                     sink(Event::Groups { steam_id, result });
                 }),
-                Some(Command::LoadAppReviews { app_id, language, cursor }) => {
+                Some(Command::LoadAppReviews { app_id, language, cursor, filter }) => {
                     let sink = sink.clone();
                     tokio::spawn(async move {
                         let more = cursor.is_some();
-                        let result = crate::reviews::load(app_id, &language, cursor.as_deref().unwrap_or("*")).await;
-                        sink(Event::AppReviews { app_id, more, result });
+                        let result = crate::reviews::load_filtered(app_id, &language, cursor.as_deref().unwrap_or("*"), filter).await;
+                        sink(Event::AppReviews { app_id, filter, more, result });
                     });
                 }
                 Some(Command::LoadMyReview { app_id }) => st.with_web(sink, move |web, sink| async move {
@@ -1272,6 +1272,48 @@ async fn online(
                 Some(Command::LoadWishlist) => st.load_wishlist(sink),
                 Some(Command::WishlistAdd { app_id }) => st.wishlist_change(app_id, true, sink),
                 Some(Command::WishlistRemove { app_id }) => st.wishlist_change(app_id, false, sink),
+                Some(Command::WishlistMove { app_id, to }) => st.wishlist_move(app_id, to, sink),
+                Some(Command::LoadDiscoveryQueue { country, rebuild }) => st.load_discovery_queue(country, rebuild, sink),
+                Some(Command::LoadPointsBalance) => {
+                    let conn = conn.clone();
+                    let refresh = st.refresh_token.clone();
+                    let me = st.me;
+                    let sink = sink.clone();
+                    tokio::spawn(async move {
+                        let res = fetch_points_balance(&conn, &refresh, me).await;
+                        sink(Event::PointsBalance(res));
+                    });
+                }
+                Some(Command::SkipDiscoveryQueueItem { app_id }) => {
+                    let conn = conn.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::discovery::skip(&conn, app_id).await {
+                            tracing::warn!("discovery skip {app_id}: {e}");
+                        }
+                    });
+                }
+                Some(Command::IgnoreApp { app_id, ignore }) => st.with_web(sink, move |web, sink| async move {
+                    let result = match web {
+                        Ok(w) => crate::discovery::ignore(&w, app_id, ignore).await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = &result {
+                        tracing::warn!("ignore app {app_id}: {e}");
+                        sink(Event::StoreError(e.clone()));
+                    }
+                    sink(Event::AppIgnored { app_id, ignored: ignore, result });
+                }),
+                Some(Command::FollowApp { app_id, follow }) => st.with_web(sink, move |web, sink| async move {
+                    let result = match web {
+                        Ok(w) => crate::discovery::follow(&w, app_id, follow).await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = &result {
+                        tracing::warn!("follow app {app_id}: {e}");
+                        sink(Event::StoreError(e.clone()));
+                    }
+                    sink(Event::AppFollowed { app_id, result });
+                }),
                 Some(Command::LoadCart) => st.load_cart(sink),
                 Some(Command::CartAdd { package_id, gift, gift_to }) => st.cart_add(package_id, gift, gift_to, sink),
                 Some(Command::CartModify { line_item_id, gift, gift_to }) => st.cart_modify(line_item_id, gift, gift_to, sink),
@@ -2031,31 +2073,98 @@ impl Online {
         tokio::spawn(sync_installed(conn, me, cell, root, app_id, items, sink));
     }
 
+    fn load_discovery_queue(&self, country: String, rebuild: bool, sink: &Sink) {
+        let (conn, sink, me) = (self.conn.clone(), sink.clone(), self.me);
+        tokio::spawn(async move {
+            let result = crate::discovery::queue(&conn, &country, rebuild).await;
+            sink(Event::DiscoveryQueue(result));
+            if let Ok(followed) = crate::discovery::followed(&conn, me).await {
+                sink(Event::FollowedApps(followed));
+            }
+        });
+    }
+
     fn load_wishlist(&self, sink: &Sink) {
         let (conn, sink, me) = (self.conn.clone(), sink.clone(), self.me);
         tokio::spawn(async move {
             use proto::webui::*;
             match conn.call::<_, CWishlistGetWishlistResponse>("Wishlist.GetWishlist#1", &CWishlistGetWishlistRequest { steamid: Some(me) }).await {
-                Ok(r) => sink(Event::Wishlist(r.items.iter().map(|i| (i.appid(), i.date_added() as u64)).collect())),
+                Ok(r) => sink(Event::Wishlist(wishlist_in_order(&r.items))),
                 Err(e) => sink(Event::StoreError(e.to_string())),
             }
         });
     }
 
+    /// Add to or remove from the wishlist the way the store page does (Steam
+    /// can refuse the wishlist service from a client), with the service as a
+    /// fallback. Steam's list is sent again afterwards either way.
     fn wishlist_change(&self, app_id: AppId, add: bool, sink: &Sink) {
-        let (conn, sink, me) = (self.conn.clone(), sink.clone(), self.me);
-        tokio::spawn(async move {
+        sink(Event::WishlistChanging { app_id, add });
+        let (conn, me) = (self.conn.clone(), self.me);
+        self.with_web(sink, move |web, sink| async move {
             use proto::webui::*;
-            let r = if add {
-                conn.call::<_, CWishlistAddToWishlistResponse>("Wishlist.AddToWishlist#1", &CWishlistAddToWishlistRequest { appid: Some(app_id), navdata: None }).await.map(|_| ())
-            } else {
-                conn.call::<_, CWishlistRemoveFromWishlistResponse>("Wishlist.RemoveFromWishlist#1", &CWishlistRemoveFromWishlistRequest { appid: Some(app_id) }).await.map(|_| ())
+            let via_web = match &web {
+                Ok(w) => {
+                    let url = format!("https://store.steampowered.com/api/{}", if add { "addtowishlist" } else { "removefromwishlist" });
+                    match w.http.post(url).form(&[("sessionid", w.session_id.clone()), ("appid", app_id.to_string())]).send().await {
+                        Ok(r) => r.json::<serde_json::Value>().await.ok().and_then(|v| v.get("success").and_then(|s| s.as_bool().or_else(|| s.as_i64().map(|n| n == 1)))).unwrap_or(false),
+                        Err(_) => false,
+                    }
+                }
+                Err(_) => false,
             };
-            if let Err(e) = r {
-                sink(Event::StoreError(e.to_string()));
+            if !via_web {
+                let r = if add {
+                    conn.call::<_, CWishlistAddToWishlistResponse>("Wishlist.AddToWishlist#1", &CWishlistAddToWishlistRequest { appid: Some(app_id), navdata: None }).await.map(|_| ())
+                } else {
+                    conn.call::<_, CWishlistRemoveFromWishlistResponse>("Wishlist.RemoveFromWishlist#1", &CWishlistRemoveFromWishlistRequest { appid: Some(app_id) }).await.map(|_| ())
+                };
+                if let Err(e) = r {
+                    tracing::warn!("wishlist {}: {e}", if add { "add" } else { "remove" });
+                    sink(Event::StoreError(if add {
+                        "Couldn't add it to your wishlist. Try again in a moment.".into()
+                    } else {
+                        "Couldn't remove it from your wishlist. Try again in a moment.".into()
+                    }));
+                }
             }
             if let Ok(r) = conn.call::<_, CWishlistGetWishlistResponse>("Wishlist.GetWishlist#1", &CWishlistGetWishlistRequest { steamid: Some(me) }).await {
-                sink(Event::Wishlist(r.items.iter().map(|i| (i.appid(), i.date_added() as u64)).collect()));
+                sink(Event::Wishlist(wishlist_in_order(&r.items)));
+            }
+        });
+    }
+
+    fn wishlist_move(&self, app_id: AppId, to: usize, sink: &Sink) {
+        let (conn, me) = (self.conn.clone(), self.me);
+        self.with_web(sink, move |web, sink| async move {
+            use proto::webui::*;
+            let current = match conn.call::<_, CWishlistGetWishlistResponse>("Wishlist.GetWishlist#1", &CWishlistGetWishlistRequest { steamid: Some(me) }).await {
+                Ok(r) => r.items,
+                Err(e) => {
+                    sink(Event::StoreError(e.to_string()));
+                    return;
+                }
+            };
+            let ranked: Vec<crate::wishlist::Ranked> =
+                current.iter().map(|i| crate::wishlist::Ranked { app_id: i.appid(), priority: i.priority(), added: i.date_added() as u64 }).collect();
+            let updates = crate::wishlist::move_updates(&ranked, app_id, to);
+            let save = if updates.is_empty() {
+                Ok(())
+            } else {
+                match &web {
+                    Ok(w) => crate::wishlist::reorder(w, &updates).await,
+                    Err(e) => Err(e.clone()),
+                }
+            };
+            if let Err(e) = save {
+                tracing::warn!("wishlist move {app_id} -> {to}: {e}");
+                sink(Event::StoreError("Couldn't save your wishlist's order. Try again in a moment.".into()));
+                sink(Event::Wishlist(wishlist_in_order(&current)));
+                return;
+            }
+            match conn.call::<_, CWishlistGetWishlistResponse>("Wishlist.GetWishlist#1", &CWishlistGetWishlistRequest { steamid: Some(me) }).await {
+                Ok(r) => sink(Event::Wishlist(wishlist_in_order(&r.items))),
+                Err(_) => sink(Event::Wishlist(wishlist_in_order(&current))),
             }
         });
     }
@@ -3622,4 +3731,54 @@ mod reorder_tests {
         let none = super::build_disconnected_playtime_request(steam_id, &sessions[1..3]);
         assert!(none.is_none());
     }
+}
+
+/// The wishlist in its own order ("Your rank"), as (game, date added).
+fn wishlist_in_order(items: &[proto::webui::CWishlistGetWishlistResponseWishlistItem]) -> Vec<(AppId, u64)> {
+    let mut ranked: Vec<crate::wishlist::Ranked> =
+        items.iter().map(|i| crate::wishlist::Ranked { app_id: i.appid(), priority: i.priority(), added: i.date_added() as u64 }).collect();
+    crate::wishlist::sort(&mut ranked);
+    ranked.into_iter().map(|r| (r.app_id, r.added)).collect()
+}
+
+/// Fetch the signed-in user's Steam Points balance via `ILoyaltyRewardsService/GetSummary/v1/`.
+async fn fetch_points_balance(conn: &net::Connection, refresh_token: &str, me: SteamId) -> Result<u64, String> {
+    if refresh_token.is_empty() || me == 0 {
+        return Err("Not signed in".into());
+    }
+    let token_req = proto::CAuthenticationAccessTokenGenerateForAppRequest {
+        refresh_token: Some(refresh_token.to_string()),
+        steamid: Some(me),
+        ..Default::default()
+    };
+    let tok: proto::CAuthenticationAccessTokenGenerateForAppResponse = conn
+        .call("Authentication.GenerateAccessTokenForApp#1", &token_req)
+        .await
+        .map_err(|e| e.to_string())?;
+    let access = tok.access_token();
+    if access.is_empty() {
+        return Err("No access token".into());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let v: serde_json::Value = client
+        .get("https://api.steampowered.com/ILoyaltyRewardsService/GetSummary/v1/")
+        .query(&[("access_token", access), ("steamid", &me.to_string())])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+    let pts = v
+        .get("response")
+        .and_then(|r| r.get("summary"))
+        .and_then(|s| s.get("points"))
+        .and_then(|p| p.as_u64().or_else(|| p.as_str().and_then(|s| s.parse().ok())))
+        .ok_or_else(|| "Steam didn't return a points balance".to_string())?;
+    Ok(pts)
 }

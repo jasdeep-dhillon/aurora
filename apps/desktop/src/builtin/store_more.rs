@@ -1,8 +1,11 @@
-//! Store: filtered browsing, wishlist, cart (with gifting), price history.
+//! Store: filtered browsing, wishlist (sort, filter, list/grid, drag & rank reorder),
+//! cart (with gifting), and price history.
+//! Enriched rows, Clear (n) filter header, skeleton placeholders, and wishlist
+//! rank reordering adapted from upstream work by `madonchik123` (PR #68, #74, #108, #116).
 
 use super::{Load, Shared, Store, View};
 use client::Command;
-use egui::{Align, Align2, Color32, Layout, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align, Align2, Color32, Layout, Margin, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use extensions::Ctx;
 use i18n::t;
 use model::{AppId, SteamId};
@@ -11,6 +14,64 @@ use ui::{Theme, icons, widgets as w};
 
 /// Popular tags offered as quick filters (Steam tag ids).
 const TAGS: &[u32] = &[19, 21, 122, 9, 597, 599, 492, 1664, 1667, 1774, 1695, 3810, 1662, 4182, 3859, 1685, 701, 699, 1742, 3964, 128, 3871];
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum WishSort {
+    #[default]
+    Rank,
+    Discount,
+    PriceLow,
+    PriceHigh,
+    Name,
+    Released,
+    Reviews,
+}
+
+impl WishSort {
+    const ALL: [WishSort; 7] = [
+        WishSort::Rank,
+        WishSort::Discount,
+        WishSort::PriceLow,
+        WishSort::PriceHigh,
+        WishSort::Name,
+        WishSort::Released,
+        WishSort::Reviews,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            WishSort::Rank => "Your rank",
+            WishSort::Discount => "Discount",
+            WishSort::PriceLow => "Price: low to high",
+            WishSort::PriceHigh => "Price: high to low",
+            WishSort::Name => "Name",
+            WishSort::Released => "Release date",
+            WishSort::Reviews => "Reviews",
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct WishView {
+    pub sort: WishSort,
+    pub grid: bool,
+    pub query: String,
+    /// 0 = Any, 1 = Windows, 2 = macOS, 3 = Linux.
+    pub platform: u8,
+    /// Max price in cents.
+    pub max_price: Option<u64>,
+    pub on_sale: bool,
+    /// Rows can be dragged and renumbered (sorted by "Your rank", as a list).
+    reorderable: bool,
+    /// The game being dragged.
+    drag: Option<AppId>,
+    /// This frame's rows: (game, rank from 0, row rect) for drop targeting.
+    rows: Vec<(AppId, usize, Rect)>,
+    /// Inline rank editor: (game, text, just opened: autofocus once).
+    rank_edit: Option<(AppId, String, bool)>,
+    /// Optimistic order while Steam saves a move (and local order in `--demo`).
+    pub pending: Option<Vec<AppId>>,
+}
 
 pub struct Gift {
     pub app: AppId,
@@ -56,14 +117,15 @@ impl Store {
                     None => w::loading(ui, t, t!("Searching…")),
                     Some(Err(e)) => w::empty(ui, t, icons::WARNING, t!("Search failed"), &e),
                     Some(Ok((items, total))) => {
-                        let owned = |id: &AppId| ctx.state.apps.as_ref().is_some_and(|a| a.contains_key(id));
+                        let owned = |id: &AppId| self.owned.contains(id);
                         let items: Vec<QueryItem> = items.into_iter().filter(|i| !self.hide_owned || !owned(&i.app_id)).collect();
                         ui.label(w::text(t!("{n} results", n = total), 13.5, t.text_dim));
                         ui.add_space(8.0);
                         for it in &items {
-                            if self.result_row(ui, t, ctx, it) {
+                            if self.result_row(ui, t, ctx, it, None) {
                                 self.open(View::App(it.app_id));
                             }
+                            ui.add_space(6.0);
                         }
                         let pages = total.div_ceil(48).max(1) as u32;
                         ui.add_space(8.0);
@@ -88,17 +150,18 @@ impl Store {
 
     fn filter_panel(&mut self, ui: &mut Ui, t: &Theme) {
         let before = self.filters.clone();
-        let f = &mut self.filters;
-        w::card(t).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(w::caption_text(&t, t!("SORT BY")));
+        let active = browse_filter_count(&self.filters, self.hide_owned);
+        let mut hide_owned = self.hide_owned;
+        let reset = filter_column(ui, t, active, |ui| {
+            let f = &mut self.filters;
+            ui.label(w::caption_text(t, t!("SORT BY")));
             egui::ComboBox::from_id_salt("browse-sort").selected_text(i18n::tr_dyn(f.sort.label())).width(200.0).show_ui(ui, |ui| {
                 for s in Sort::ALL {
                     ui.selectable_value(&mut f.sort, s, i18n::tr_dyn(s.label()));
                 }
             });
             ui.add_space(10.0);
-            ui.label(w::caption_text(&t, t!("PRICE")));
+            ui.label(w::caption_text(t, t!("PRICE")));
             let options: [(Option<u32>, bool, &str); 6] = [
                 (None, false, "Any price"),
                 (None, true, "Free"),
@@ -116,51 +179,29 @@ impl Store {
             }
             w::check(ui, t, &mut f.only_discounted, t!("Special offers only"));
             ui.add_space(10.0);
-            ui.label(w::caption_text(&t, t!("REVIEWS")));
+            ui.label(w::caption_text(t, t!("REVIEWS")));
             for (min, label) in [(None, "Any reviews"), (Some(7), "Mostly positive and up"), (Some(8), "Very positive and up")] {
                 if w::radio(ui, t, f.min_review_score == min, i18n::tr_dyn(label)).clicked() {
                     f.min_review_score = min;
                 }
             }
             ui.add_space(10.0);
-            ui.label(w::caption_text(&t, t!("TYPE")));
+            ui.label(w::caption_text(t, t!("TYPE")));
             w::check(ui, t, &mut f.games, t!("Games"));
             w::check(ui, t, &mut f.dlc, t!("DLC"));
             w::check(ui, t, &mut f.software, t!("Software"));
             w::check(ui, t, &mut f.demos, t!("Demos"));
             w::check(ui, t, &mut f.soundtracks, t!("Soundtracks"));
             w::check(ui, t, &mut f.coming_soon, t!("Coming soon only"));
-        });
-        ui.add_space(10.0);
-        let mut hide_owned = self.hide_owned;
-        w::card(t).show(ui, |ui| {
-            ui.set_width(ui.available_width());
+            ui.add_space(8.0);
             w::check(ui, t, &mut hide_owned, t!("Hide games I own"));
         });
         self.hide_owned = hide_owned;
         ui.add_space(10.0);
         w::card(t).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(w::caption_text(&t, t!("TAGS")));
-            // Tags picked elsewhere (a game page, the search below) first,
-            // so every active tag is visible and can be turned off.
-            let extra: Vec<u32> = self.filters.tags.iter().copied().filter(|t| !TAGS.contains(t)).collect();
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                for tag in extra.iter().chain(TAGS.iter()) {
-                    let name = self.tag_name(*tag).unwrap_or_else(|| format!("#{tag}"));
-                    let on = self.filters.tags.contains(tag);
-                    if w::chip(ui, t, &name, on).clicked() {
-                        if on {
-                            self.filters.tags.retain(|x| x != tag);
-                        } else {
-                            self.filters.tags.push(*tag);
-                        }
-                    }
-                }
-            });
+            ui.label(w::caption_text(t, t!("TAGS")));
             // Any of Steam's tags, by name.
-            ui.add_space(8.0);
             let width = ui.available_width();
             w::search(ui, t, &mut self.tag_query, t!("Find a tag…"), width);
             let query = self.tag_query.trim().to_string();
@@ -180,57 +221,258 @@ impl Store {
                     }
                 });
             }
+            ui.add_space(8.0);
+            // Active tags not in the quick list stay visible first (waiting for names as skeletons, never `#19`).
+            let extra: Vec<u32> = self.filters.tags.iter().copied().filter(|tag| !TAGS.contains(tag)).collect();
+            if !extra.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                    for tag in extra {
+                        let Some(name) = self.tag_name(tag) else {
+                            let (r, _) = ui.allocate_exact_size(vec2(72.0, 26.0), Sense::hover());
+                            w::skeleton(ui, t, r, t.corner_small());
+                            continue;
+                        };
+                        if w::chip(ui, t, &format!("{name}  {}", icons::X), true).on_hover_text(t!("Remove this tag")).clicked() {
+                            self.filters.tags.retain(|x| *x != tag);
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+            }
+            if !self.tag_names_ready() {
+                for _ in 0..6 {
+                    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+                    w::skeleton(ui, t, r.shrink2(vec2(0.0, 3.0)), t.corner_small());
+                }
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                    for tag in TAGS {
+                        let Some(name) = self.tag_name(*tag) else { continue };
+                        let on = self.filters.tags.contains(tag);
+                        if w::chip(ui, t, &name, on).clicked() {
+                            if on {
+                                self.filters.tags.retain(|x| x != tag);
+                            } else {
+                                self.filters.tags.push(*tag);
+                            }
+                        }
+                    }
+                });
+            }
             if !self.filters.tags.is_empty() && ui.link(w::text(t!("Clear tags"), 12.5, t.text_dim)).clicked() {
                 self.filters.tags.clear();
             }
         });
-        if self.filters != before {
+        if reset {
+            self.filters = store::query::Filters { sort: self.filters.sort, ..Default::default() };
+            self.hide_owned = false;
+            self.tag_query.clear();
+        }
+        if self.filters != before || reset {
             self.browse_page = 0;
         }
     }
 
-    /// A wide result row; returns true when clicked.
-    fn result_row(&mut self, ui: &mut Ui, t: &Theme, ctx: &Ctx, it: &QueryItem) -> bool {
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 74.0), Sense::click());
+    /// One game in a list (Browse or Wishlist): rank column when reorderable,
+    /// header art, title, clickable tags, platforms/release date, review bar,
+    /// price/discount expiry, Add to Cart, and Wishlist heart. Returns true when clicked.
+    fn result_row(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, it: &QueryItem, rank: Option<(usize, usize)>) -> bool {
+        let h = 144.0;
+        let reorder = rank.is_some() && self.wish.reorderable;
+        let sense = if reorder { Sense::click_and_drag() } else { Sense::click() };
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), sense);
+        if let (true, Some((n, _))) = (reorder, rank) {
+            self.wish.rows.push((it.app_id, n, rect));
+            if resp.drag_started() {
+                self.wish.drag = Some(it.app_id);
+                self.wish.rank_edit = None;
+            }
+        }
         if !ui.is_rect_visible(rect) {
             return false;
         }
-        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
+        let dragging = self.wish.drag == Some(it.app_id);
+        let hover = if dragging { 0.0 } else { ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1) };
         ui.painter().rect_filled(rect, t.corner_small(), w::mix(t.surface, t.surface_hover, hover));
-        let img = Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(124.0, 58.0));
+        if dragging {
+            ui.painter().rect_filled(rect, t.corner_small(), Color32::from_black_alpha(120));
+        }
+        let mut x_left = rect.left() + 8.0;
+        if let Some((pos, total)) = rank {
+            if reorder {
+                let rank_rect = Rect::from_min_size(rect.min + vec2(4.0, 0.0), vec2(44.0, h));
+                self.rank_column(ui, t, ctx, it.app_id, pos, total, rank_rect);
+                x_left = rank_rect.right() + 4.0;
+            }
+        }
+        let img = Rect::from_min_size(pos2(x_left, rect.top() + 8.0), vec2((116.0_f32 * 460.0 / 215.0).round(), 116.0));
         w::image_or_skeleton(ui, t, img, &it.header, t.corner_small());
-        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(img.right() + 14.0, rect.top()), rect.max - vec2(14.0, 0.0))).layout(Layout::left_to_right(Align::Center)));
-        c.vertical(|ui| {
-            ui.add_space(10.0);
-            ui.add(egui::Label::new(w::text_semibold(&it.name, 15.0, t.text)).truncate());
-            ui.horizontal(|ui| {
-                let (win, mac, lin) = it.platforms;
-                let p: String = [(win, icons::WINDOWS), (mac, icons::APPLE), (lin, icons::LINUX)].iter().filter(|x| x.0).map(|x| x.1).collect::<Vec<_>>().join(" ");
-                ui.label(w::text(p, 12.5, t.text_faint));
-                if let Some(l) = &it.review_label {
-                    ui.label(w::text(format!("{}  {}%", i18n::tr_dyn(l), it.review_percent), 12.5, super::review_color(t, it.review_score)));
+        let owned = self.owned.contains(&it.app_id);
+        let wished = self.is_wishlisted(ctx, it.app_id);
+        let right_w = (rect.width() * 0.28).clamp(170.0, 290.0);
+        let mid = Rect::from_min_max(pos2(img.right() + 14.0, rect.top() + 8.0), pos2((rect.right() - right_w - 8.0).max(img.right() + 120.0), rect.bottom() - 4.0));
+        let opened = resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(mid).layout(Layout::top_down(Align::Min)));
+        c.set_clip_rect(mid.intersect(ui.clip_rect()));
+        c.spacing_mut().item_spacing.y = 3.0;
+        c.add(egui::Label::new(w::text_semibold(&it.name, 16.0, t.text)).truncate().selectable(false));
+        let mut open_tag = None;
+        let names: Vec<(u32, String)> = it.tags.iter().filter_map(|tag| Some((*tag, self.tag_name(*tag)?))).collect();
+        if !names.is_empty() || it.demo.is_some() {
+            c.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for (tag, name) in names.iter().take(4) {
+                    if small_tag(ui, t, name).on_hover_text(t!("Browse games with this tag")).clicked() {
+                        open_tag = Some(*tag);
+                    }
                 }
-                if ctx.state.apps.as_ref().is_some_and(|a| a.contains_key(&it.app_id)) {
-                    w::pill(ui, t!("In library"), t.play, t.play.gamma_multiply(0.15));
+                if names.len() > 4 {
+                    let more = small_tag(ui, t, &format!("+{}", names.len() - 4)).on_hover_text(t!("More tags"));
+                    egui::Popup::from_toggle_button_response(&more).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(320.0).show(|ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                            for (tag, name) in names.iter().skip(4) {
+                                if small_tag(ui, t, name).on_hover_text(t!("Browse games with this tag")).clicked() {
+                                    open_tag = Some(*tag);
+                                }
+                            }
+                        });
+                    });
+                }
+                if it.demo.is_some() {
+                    w::pill(ui, t!("Demo available"), t.accent, t.accent.gamma_multiply(0.15));
                 }
             });
-        });
-        c.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            match &it.formatted_price {
-                Some(p) => w::price_tag(ui, t, p, it.formatted_original.as_deref(), it.price.discount),
-                None => {
-                    ui.label(w::text_semibold(t!("Free"), 14.0, t.text));
-                }
+        }
+        if let Some(tag) = open_tag {
+            self.open_tag(tag);
+        }
+        c.horizontal(|ui| {
+            let (win, mac, lin) = it.platforms;
+            let systems: String = [(win, icons::WINDOWS), (mac, icons::APPLE), (lin, icons::LINUX)].iter().filter(|x| x.0).map(|x| x.1).collect::<Vec<_>>().join("  ");
+            ui.label(w::text(systems, 13.5, t.text_faint));
+            if it.coming_soon {
+                ui.label(w::text(format!("{}  {}", icons::CALENDAR, i18n::tr_dyn(&it.release_text)), 12.5, t.accent));
+            } else if it.released > 0 {
+                ui.label(w::text(ui::date(it.released), 12.5, t.text_faint));
+            }
+            if owned {
+                w::pill(ui, t!("In library"), t.play, t.play.gamma_multiply(0.15));
             }
         });
-        resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+        if it.review_count > 0 {
+            rating_bar(&mut c, t, it.review_percent, it.review_count, 130.0);
+        }
+
+        let side = Rect::from_min_max(pos2(rect.right() - right_w, rect.top() + 8.0), rect.max - vec2(10.0, 8.0));
+        let mut r = ui.new_child(egui::UiBuilder::new().max_rect(side).layout(Layout::right_to_left(Align::Min)));
+        r.set_clip_rect(side.intersect(ui.clip_rect()));
+        let heart = if wished { t!("Remove from wishlist") } else { t!("Add to wishlist") };
+        if w::heart_button(&mut r, t, wished, heart).clicked() {
+            self.toggle_wishlist(ctx, it.app_id, wished);
+        }
+        if let Some(ends) = discount_ends_text(it.discount_ends) {
+            let ends_rect = Rect::from_min_max(pos2(side.left(), side.bottom() - 48.0), pos2(side.right(), side.bottom() - 32.0));
+            let mut e = ui.new_child(egui::UiBuilder::new().max_rect(ends_rect).layout(Layout::right_to_left(Align::Center)));
+            e.set_clip_rect(ends_rect.intersect(ui.clip_rect()));
+            e.add(egui::Label::new(w::text(ends, 11.5, t.text_dim)).truncate().selectable(false));
+        }
+        let mut b = ui.new_child(egui::UiBuilder::new().max_rect(side).layout(Layout::right_to_left(Align::Max)));
+        b.set_clip_rect(side.intersect(ui.clip_rect()));
+        if !owned && !it.coming_soon {
+            if let Some(pkg) = it.package_id {
+                let clicked = if side.width() < 215.0 {
+                    w::icon_button(&mut b, t, icons::CART, t!("Add to cart"), false, 0).clicked()
+                } else {
+                    w::button(&mut b, t, Some(icons::CART), t!("Add to cart"), w::Kind::Primary, w::Size::Sm).clicked()
+                };
+                if clicked {
+                    let price = it.formatted_price.clone().map(|p| (p, it.formatted_original.clone(), it.price.discount));
+                    self.add_to_cart(ctx, it.app_id, pkg, &it.name, price, owned);
+                }
+            }
+        }
+        match &it.formatted_price {
+            _ if it.coming_soon => {
+                b.label(w::text_semibold(t!("Coming soon"), 14.0, t.text_dim));
+            }
+            Some(p) => {
+                b.horizontal(|ui| {
+                    w::price_tag(ui, t, p, it.formatted_original.as_deref(), it.price.discount);
+                });
+            }
+            None if it.is_free => {
+                b.label(w::text_semibold(t!("Free"), 14.0, t.text));
+            }
+            None => {}
+        }
+        opened
+    }
+
+    /// Drag handle + editable place number for reordering a wishlist row.
+    #[allow(clippy::too_many_arguments)]
+    fn rank_column(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, id: AppId, pos: usize, total: usize, col: Rect) {
+        let grip = Rect::from_min_size(pos2(col.left(), col.center().y - 26.0), vec2(col.width(), 24.0));
+        let g = ui.interact(grip, ui.scope_id().with(("wish-grip", id)), Sense::drag());
+        let drag_color = if g.hovered() || self.wish.drag == Some(id) { t.text } else { t.text_faint };
+        ui.painter().text(grip.center(), Align2::CENTER_CENTER, icons::LIST, w::font(15.0), drag_color);
+        let g = g.on_hover_text(t!("Drag to change its place in your wishlist")).on_hover_cursor(egui::CursorIcon::Grab);
+        if g.drag_started() {
+            self.wish.drag = Some(id);
+            self.wish.rank_edit = None;
+        }
+        let num = Rect::from_min_size(pos2(col.left() + 4.0, col.center().y + 2.0), vec2(col.width() - 8.0, 24.0));
+        let editing = self.wish.rank_edit.as_ref().is_some_and(|(a, _, _)| *a == id);
+        if editing {
+            let mut move_to = None;
+            let mut close = false;
+            if let Some((_, text, fresh)) = &mut self.wish.rank_edit {
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(num));
+                let te = child.add(
+                    egui::TextEdit::singleline(text)
+                        .font(w::font_semibold(12.5))
+                        .horizontal_align(Align::Center)
+                        .desired_width(num.width()),
+                );
+                w::autofocus(&te, *fresh);
+                *fresh = false;
+                if te.ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    close = true;
+                } else if te.lost_focus() && te.ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if let Ok(n) = text.trim().parse::<usize>() {
+                        move_to = Some(n.saturating_sub(1).min(total.saturating_sub(1)));
+                    }
+                    close = true;
+                } else if te.lost_focus() {
+                    close = true;
+                }
+            }
+            if close {
+                self.wish.rank_edit = None;
+            }
+            if let Some(to) = move_to {
+                self.wish_move(ctx, id, to);
+            }
+        } else {
+            let nr = ui.interact(num, ui.scope_id().with(("wish-num", id)), Sense::click());
+            let hover = ui.ctx().animate_bool_with_time(nr.id, nr.hovered(), 0.1);
+            if hover > 0.0 {
+                ui.painter().rect_filled(num, t.corner_small(), t.surface_hover.gamma_multiply(hover));
+            }
+            ui.painter().text(num.center(), Align2::CENTER_CENTER, format!("{}", pos + 1), w::font_semibold(13.0), if nr.hovered() { t.text } else { t.text_dim });
+            if nr.on_hover_text(t!("Type a number to move it to that place")).on_hover_cursor(egui::CursorIcon::Text).clicked() {
+                self.wish.rank_edit = Some((id, (pos + 1).to_string(), true));
+            }
+        }
     }
 
     // ---------- wishlist ----------
 
     pub(super) fn wishlist_page(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
         w::page_title(ui, t, t!("Your wishlist"), None);
-        let Some(list) = ctx.state.wishlist.clone() else {
+        let Some(list) = self.wishlist_entries(ctx) else {
             w::loading(ui, t, t!("Loading…"));
             return;
         };
@@ -238,45 +480,241 @@ impl Store {
             w::empty(ui, t, icons::HEART, t!("Your wishlist is empty"), t!("Add games from their store pages and you'll be told when they go on sale."));
             return;
         }
-        let ids: Vec<AppId> = list.iter().map(|x| x.0).collect();
-        if self.wish_items.as_ref().is_none_or(|(k, _)| *k != ids) {
-            let (api, ids2) = (self.api.clone(), ids.clone());
+        let mut sorted_ids: Vec<AppId> = list.iter().map(|x| x.0).collect();
+        sorted_ids.sort_unstable();
+        if self.wish_items.as_ref().is_none_or(|(k, _)| *k != sorted_ids) {
+            let (api, ids2) = (self.api.clone(), sorted_ids.clone());
             let slot = self.fetch(async move { api.items(&ids2).await });
-            self.wish_items = Some((ids.clone(), slot));
+            self.wish_items = Some((sorted_ids, slot));
         }
         let Some(Ok(items)) = self.wish_items.as_ref().and_then(|(_, s)| snapshot(s)) else {
             w::loading(ui, t, t!("Loading…"));
             return;
         };
+
+        // Order by pending drag result, else Steam's wishlist rank order.
+        let mut order: Vec<AppId> = if let Some(pending) = &self.wish.pending {
+            let mut v = pending.clone();
+            for &(id, _) in &list {
+                if !v.contains(&id) {
+                    v.push(id);
+                }
+            }
+            v.retain(|id| list.iter().any(|(a, _)| a == id));
+            v
+        } else {
+            list.iter().map(|(id, _)| *id).collect()
+        };
+        if order.is_empty() {
+            order = list.iter().map(|(id, _)| *id).collect();
+        }
+        let rank_of: std::collections::HashMap<AppId, usize> = order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let total_ranked = order.len();
         let on_sale = items.iter().filter(|i| i.price.discount > 0).count();
-        ui.label(w::text(t!("{n} games · {sale} on sale now", n = items.len(), sale = on_sale), 13.5, t.text_dim));
-        ui.add_space(8.0);
-        let mut sorted = items.clone();
-        sorted.sort_by_key(|i| std::cmp::Reverse(i.price.discount));
-        for it in &sorted {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_width(ui.available_width() - 150.0);
-                    if self.result_row(ui, t, ctx, it) {
-                        self.open(View::App(it.app_id));
-                    }
-                });
-                ui.vertical(|ui| {
-                    ui.add_space(20.0);
-                    ui.horizontal(|ui| {
-                        if let Some(pkg) = it.package_id {
-                            if w::icon_button(ui, t, icons::CART, t!("Add to cart"), false, 0).clicked() {
-                                let owned = self.owned.contains(&it.app_id);
-                                self.add_to_cart(ctx, it.app_id, pkg, &it.name, None, owned);
-                            }
-                        }
-                        if w::icon_button(ui, t, icons::TRASH, t!("Remove from wishlist"), false, 0).clicked() {
-                            ctx.send(Command::WishlistRemove { app_id: it.app_id });
+
+        let side_w = 240.0;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
+            ui.label(w::text(t!("{n} games · {sale} on sale now", n = items.len(), sale = on_sale), 13.5, t.text_dim));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                egui::ComboBox::from_id_salt("wish-sort")
+                    .selected_text(i18n::tr_dyn(self.wish.sort.label()))
+                    .show_ui(ui, |ui| {
+                        for s in WishSort::ALL {
+                            ui.selectable_value(&mut self.wish.sort, s, i18n::tr_dyn(s.label()));
                         }
                     });
-                });
+                ui.label(w::text(t!("Sort by"), 12.5, t.text_dim));
+                ui.add_space(6.0);
+                if w::icon_button(ui, t, icons::GRID, t!("Grid"), self.wish.grid, 0).clicked() {
+                    self.wish.grid = true;
+                    self.wish.drag = None;
+                    self.wish.rank_edit = None;
+                }
+                if w::icon_button(ui, t, icons::LIST, t!("List"), !self.wish.grid, 0).clicked() {
+                    self.wish.grid = false;
+                }
+                ui.label(w::text(t!("View|layout"), 12.5, t.text_dim));
             });
-            ui.add_space(4.0);
+        });
+        ui.add_space(10.0);
+
+        let q = self.wish.query.trim().to_lowercase();
+        let mut shown: Vec<QueryItem> = items
+            .into_iter()
+            .filter(|i| q.is_empty() || i.name.to_lowercase().contains(&q))
+            .filter(|i| match self.wish.platform {
+                1 => i.platforms.0,
+                2 => i.platforms.1,
+                3 => i.platforms.2,
+                _ => true,
+            })
+            .filter(|i| !self.wish.on_sale || i.price.discount > 0)
+            .filter(|i| match self.wish.max_price {
+                Some(0) => i.is_free || i.price.final_ == Some(0),
+                Some(max) => i.is_free || i.price.final_.is_some_and(|p| p <= max),
+                None => true,
+            })
+            .collect();
+        match self.wish.sort {
+            WishSort::Rank => shown.sort_by_key(|i| rank_of.get(&i.app_id).copied().unwrap_or(usize::MAX)),
+            WishSort::Discount => shown.sort_by_key(|i| (std::cmp::Reverse(i.price.discount), i.name.to_lowercase())),
+            WishSort::PriceLow => shown.sort_by_key(|i| (i.price.final_.unwrap_or(u64::MAX), i.name.to_lowercase())),
+            WishSort::PriceHigh => shown.sort_by_key(|i| (std::cmp::Reverse(i.price.final_.unwrap_or(0)), i.name.to_lowercase())),
+            WishSort::Name => shown.sort_by_key(|i| i.name.to_lowercase()),
+            WishSort::Released => shown.sort_by_key(|i| (std::cmp::Reverse(i.released), i.name.to_lowercase())),
+            WishSort::Reviews => shown.sort_by_key(|i| (std::cmp::Reverse(i.review_percent), std::cmp::Reverse(i.review_count))),
+        }
+
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 24.0;
+            ui.vertical(|ui| {
+                ui.set_width(side_w);
+                let active = wishlist_filter_count(&self.wish);
+                let v = &mut self.wish;
+                let reset = filter_column(ui, t, active, |ui| {
+                    let width = ui.available_width();
+                    w::search(ui, t, &mut v.query, t!("Search by name"), width);
+                    ui.add_space(10.0);
+                    w::check(ui, t, &mut v.on_sale, t!("Special offers only"));
+                    ui.add_space(10.0);
+                    ui.label(w::caption_text(t, t!("PLATFORM")));
+                    for (p, label) in [(0u8, "Any platform"), (1, "Windows"), (2, "macOS"), (3, "Linux")] {
+                        if w::radio(ui, t, v.platform == p, i18n::tr_dyn(label)).clicked() {
+                            v.platform = p;
+                        }
+                    }
+                    ui.add_space(10.0);
+                    ui.label(w::caption_text(t, t!("PRICE")));
+                    for (max, label) in [(None, "Any price"), (Some(0), "Free"), (Some(500), "Under $5"), (Some(1000), "Under $10"), (Some(2000), "Under $20"), (Some(4000), "Under $40")] {
+                        if w::radio(ui, t, v.max_price == max, i18n::tr_dyn(label)).clicked() {
+                            v.max_price = max;
+                        }
+                    }
+                });
+                if reset {
+                    v.query.clear();
+                    v.platform = 0;
+                    v.max_price = None;
+                    v.on_sale = false;
+                }
+            });
+            ui.vertical(|ui| {
+                if shown.is_empty() {
+                    w::empty(ui, t, icons::SEARCH, t!("No results"), t!("Try changing or clearing your filters."));
+                    return;
+                }
+                self.wish.rows.clear();
+                self.wish.reorderable = self.wish.sort == WishSort::Rank && !self.wish.grid;
+                if self.wish.grid {
+                    let gap = 16.0;
+                    let per = (((ui.available_width() + gap) / (250.0 + gap)).floor() as usize).max(1);
+                    let cw = (ui.available_width() - gap * (per as f32 - 1.0)) / per as f32;
+                    for row in shown.chunks(per) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            for it in row {
+                                let item = super::query_card(it.clone());
+                                let owned = self.owned.contains(&it.app_id);
+                                if self.store_card(ui, t, &item, cw, owned).clicked() {
+                                    self.open(View::App(it.app_id));
+                                }
+                            }
+                        });
+                        ui.add_space(gap);
+                    }
+                } else {
+                    for it in &shown {
+                        let rank = if self.wish.reorderable { rank_of.get(&it.app_id).map(|&pos| (pos, total_ranked)) } else { None };
+                        if self.result_row(ui, t, ctx, it, rank) {
+                            self.open(View::App(it.app_id));
+                        }
+                        ui.add_space(6.0);
+                    }
+                    self.wish_drag(ui, t, ctx, &order, &shown);
+                }
+            });
+        });
+    }
+
+    fn wish_drag(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, order: &[AppId], shown: &[QueryItem]) {
+        let Some(dragged) = self.wish.drag else { return };
+        let Some(pos) = ui.ctx().pointer_latest_pos() else {
+            if !ui.input(|i| i.pointer.primary_down()) {
+                self.wish.drag = None;
+            }
+            return;
+        };
+        let rows = &self.wish.rows;
+        let Some(&(first_id, first_rank, first_rect)) = rows.first() else {
+            self.wish.drag = None;
+            return;
+        };
+        let _ = first_id;
+        // Pick insertion index and indicator Y from pointer Y vs row midpoints.
+        let mut target = rows.last().map(|(_, r, _)| r + 1).unwrap_or(order.len());
+        let mut line_y = rows.last().map(|(_, _, r)| r.bottom() + 3.0).unwrap_or(first_rect.top());
+        for (i, (_, rank, rect)) in rows.iter().enumerate() {
+            if pos.y < rect.center().y {
+                target = *rank;
+                line_y = if i == 0 { rect.top() - 3.0 } else { (rows[i - 1].2.bottom() + rect.top()) / 2.0 };
+                break;
+            }
+        }
+        let from_rank = rows.iter().find(|(id, _, _)| *id == dragged).map(|(_, r, _)| *r).unwrap_or(first_rank);
+        let final_to = if target > from_rank { target.saturating_sub(1) } else { target };
+
+        // Draw accent drop line across the row column.
+        let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("wish-drop-line")));
+        let x0 = first_rect.left();
+        let x1 = first_rect.right();
+        p.line_segment([pos2(x0, line_y), pos2(x1, line_y)], Stroke::new(2.0, t.accent));
+        p.circle_filled(pos2(x0, line_y), 4.0, t.accent);
+        p.circle_filled(pos2(x1, line_y), 4.0, t.accent);
+
+        if let Some(it) = shown.iter().find(|i| i.app_id == dragged) {
+            let label = format!("#{}  {}", final_to + 1, it.name);
+            let galley = p.layout_no_wrap(label, w::font_semibold(12.5), t.on_accent);
+            let pill = Rect::from_min_size(pos + vec2(14.0, 12.0), galley.size() + vec2(16.0, 8.0));
+            p.rect_filled(pill, t.corner_small(), t.accent);
+            p.galley(pill.min + vec2(8.0, 4.0), galley, t.on_accent);
+        }
+
+        // Scroll gently if dragging near the top or bottom of the viewport.
+        let clip = ui.clip_rect();
+        if pos.y < clip.top() + 48.0 {
+            ui.scroll_with_delta(vec2(0.0, 10.0));
+            ui.ctx().request_repaint();
+        } else if pos.y > clip.bottom() - 48.0 {
+            ui.scroll_with_delta(vec2(0.0, -10.0));
+            ui.ctx().request_repaint();
+        }
+
+        if !ui.input(|i| i.pointer.primary_down()) {
+            self.wish.drag = None;
+            self.wish_move(ctx, dragged, final_to);
+        }
+    }
+
+    fn wish_move(&mut self, ctx: &mut Ctx, app_id: AppId, to: usize) {
+        let mut order: Vec<AppId> = if let Some(pending) = &self.wish.pending {
+            pending.clone()
+        } else if let Some(list) = self.wishlist_entries(ctx) {
+            list.into_iter().map(|(id, _)| id).collect()
+        } else {
+            return;
+        };
+        let Some(from) = order.iter().position(|id| *id == app_id) else { return };
+        let to = to.min(order.len().saturating_sub(1));
+        if from == to {
+            return;
+        }
+        order.remove(from);
+        order.insert(to, app_id);
+        self.wish.pending = Some(order);
+        if ctx.state.account != "demo" {
+            ctx.send(Command::WishlistMove { app_id, to });
         }
     }
 
@@ -301,7 +739,7 @@ impl Store {
         let names = self.cart_names.as_ref().and_then(|(_, s)| snapshot(s)).and_then(|r| r.ok()).unwrap_or_default();
         let mut acts = Vec::new();
         for l in &lines {
-            let (name, art, app) = names.iter().find(|n| n.0 == l.package_id).map(|n| (n.1.clone(), n.2.clone(), n.3)).unwrap_or_else(|| (format!("#{}", l.package_id), String::new(), 0));
+            let (name, art, app) = names.iter().find(|n| n.0 == l.package_id).map(|n| (n.1.clone(), n.2.clone(), n.3)).unwrap_or_else(|| (String::new(), String::new(), 0));
             let owned = app != 0 && self.owned.contains(&app);
             let same: Vec<model::CartLine> = lines.iter().filter(|x| x.package_id == l.package_id).cloned().collect();
             if let Some(a) = cart_row(ui, t, ctx, l, &same, &name, &art, None, owned) {
@@ -329,9 +767,9 @@ impl Store {
     /// "Add to Cart" (or "In Cart") button. Gifts are chosen in the cart.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn purchase_actions(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, id: AppId, package: Option<u32>, name: &str, price: Option<(String, Option<String>, u8)>, owned: bool) {
-        let wished = ctx.state.wishlist.as_ref().is_some_and(|w| w.iter().any(|x| x.0 == id));
-        if !owned && w::icon_button(ui, t, icons::HEART, if wished { t!("On wishlist") } else { t!("Add to wishlist") }, wished, 0).clicked() {
-            ctx.send(if wished { Command::WishlistRemove { app_id: id } } else { Command::WishlistAdd { app_id: id } });
+        let wished = self.is_wishlisted(ctx, id);
+        if !owned && w::heart_button(ui, t, wished, if wished { t!("On wishlist") } else { t!("Add to wishlist") }).clicked() {
+            self.toggle_wishlist(ctx, id, wished);
         }
         let Some(pkg) = package else { return };
         let copies = ctx.state.cart.as_ref().map(|c| c.iter().filter(|l| l.package_id == pkg).count()).unwrap_or(0);
@@ -671,7 +1109,12 @@ fn cart_row(ui: &mut Ui, t: &Theme, ctx: &Ctx, l: &model::CartLine, same: &[mode
             w::image_or_skeleton(ui, t, r, art, t.corner_small());
             ui.add_space(6.0);
             ui.vertical(|ui| {
-                ui.add(egui::Label::new(w::text_semibold(name, 15.0, t.text)).truncate());
+                if name.is_empty() {
+                    let (r, _) = ui.allocate_exact_size(vec2(220.0, 20.0), Sense::hover());
+                    w::skeleton(ui, t, r.shrink2(vec2(0.0, 3.0)), t.corner_small());
+                } else {
+                    ui.add(egui::Label::new(w::text_semibold(name, 15.0, t.text)).truncate());
+                }
                 ui.add_space(4.0);
                 let current = if l.is_gift { t!("This is a gift") } else { t!("For my account") };
                 egui::ComboBox::from_id_salt(("cart-line", l.line_item_id)).selected_text(current).width(170.0).show_ui(ui, |ui| {
@@ -727,4 +1170,135 @@ fn cart_row(ui: &mut Ui, t: &Theme, ctx: &Ctx, l: &model::CartLine, same: &[mode
         });
     });
     act
+}
+
+/// Filter card wrapper with "FILTERS" heading and a "Clear (n)" button.
+fn filter_column(ui: &mut Ui, t: &Theme, active: usize, add: impl FnOnce(&mut Ui)) -> bool {
+    let mut reset = false;
+    w::card(t).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(w::caption_text(t, &t!("Filters").to_uppercase()));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let label = if active > 0 { t!("Clear ({n})", n = active) } else { t!("Clear").to_string() };
+                let r = ui
+                    .add_enabled_ui(active > 0, |ui| w::button(ui, t, Some(icons::X), &label, w::Kind::Ghost, w::Size::Sm))
+                    .inner
+                    .on_hover_text(t!("Turn every filter off"))
+                    .on_disabled_hover_text(t!("No filters are on"));
+                reset = r.clicked();
+            });
+        });
+        ui.add_space(8.0);
+        add(ui);
+    });
+    reset
+}
+
+fn browse_filter_count(f: &store::query::Filters, hide_owned: bool) -> usize {
+    f.tags.len()
+        + usize::from(f.max_price.is_some() || f.only_free)
+        + usize::from(f.only_discounted)
+        + usize::from(f.coming_soon)
+        + usize::from(f.min_review_score.is_some())
+        + [(f.games, true), (f.dlc, false), (f.software, false), (f.demos, false), (f.soundtracks, false)]
+            .iter()
+            .filter(|(on, d)| on != d)
+            .count()
+        + usize::from(hide_owned)
+}
+
+fn wishlist_filter_count(v: &WishView) -> usize {
+    usize::from(v.platform != 0) + usize::from(v.max_price.is_some()) + usize::from(v.on_sale) + usize::from(!v.query.trim().is_empty())
+}
+
+/// Compact clickable tag pill for Browse / Wishlist rows.
+fn small_tag(ui: &mut Ui, t: &Theme, text: &str) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(text.to_string(), w::font_semibold(11.0), t.text_dim);
+    let (r, resp) = ui.allocate_exact_size(galley.size() + vec2(14.0, 6.0), Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.1);
+    ui.painter().rect_filled(r, egui::CornerRadius::same(4), w::mix(t.raised, t.accent.gamma_multiply(0.35), hover));
+    let color = w::mix(t.text_dim, t.text, hover);
+    ui.painter().galley(r.center() - galley.size() / 2.0, galley, color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Compact positive/negative split bar + review total for list rows.
+fn rating_bar(ui: &mut Ui, t: &Theme, positive: u32, count: u64, width: f32) {
+    let positive = positive.min(100);
+    let color = if positive >= 70 { t.accent } else if positive >= 40 { t.away } else { t.danger };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let bar_w = width.clamp(56.0, 88.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(bar_w, 6.0), Sense::hover());
+        if ui.is_rect_visible(rect) {
+            let p = ui.painter();
+            let r = egui::CornerRadius::same(3);
+            p.rect_filled(rect, r, t.raised);
+            if positive > 0 {
+                let fill_w = (rect.width() * positive as f32 / 100.0).max(4.0);
+                p.rect_filled(Rect::from_min_size(rect.min, vec2(fill_w, rect.height())), r, color);
+            }
+        }
+        ui.add(
+            egui::Label::new(w::text(
+                format!("{positive}% · {}", t!("{count} user reviews", count = super::thousands(count))),
+                11.5,
+                t.text_dim,
+            ))
+            .truncate()
+            .selectable(false),
+        );
+    });
+}
+
+/// Text telling when a sale ends (hours under 48h, short date beyond).
+pub(super) fn discount_ends_text(ends: u64) -> Option<String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    discount_ends_at(ends, now)
+}
+
+fn discount_ends_at(ends: u64, now: u64) -> Option<String> {
+    if ends <= now {
+        return None;
+    }
+    let left = ends - now;
+    if left < 48 * 3600 {
+        let hours = left.div_ceil(3600).max(1);
+        Some(t!("Ends in {n} hours", n = hours))
+    } else {
+        Some(t!("Offer ends {date}", date = ui::date_time(ends)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WishView, browse_filter_count, discount_ends_at, wishlist_filter_count};
+
+    #[test]
+    fn counts_browse_and_wishlist_filters_accurately() {
+        let mut f = store::query::Filters::default();
+        assert_eq!(browse_filter_count(&f, false), 0);
+        f.only_discounted = true;
+        f.coming_soon = true;
+        f.tags.push(19);
+        assert_eq!(browse_filter_count(&f, true), 4);
+
+        let mut w = WishView::default();
+        assert_eq!(wishlist_filter_count(&w), 0);
+        w.on_sale = true;
+        w.platform = 3;
+        w.max_price = Some(500);
+        w.query = "hades".into();
+        assert_eq!(wishlist_filter_count(&w), 4);
+    }
+
+    #[test]
+    fn formats_discount_expiry_windows() {
+        let now = 1_700_000_000;
+        assert_eq!(discount_ends_at(0, now), None);
+        assert_eq!(discount_ends_at(now, now), None);
+        assert!(discount_ends_at(now + 7_200, now).is_some_and(|s| s.contains('2')));
+        assert!(discount_ends_at(now + 86_400 * 5, now).is_some_and(|s| s.contains("2023")));
+    }
 }

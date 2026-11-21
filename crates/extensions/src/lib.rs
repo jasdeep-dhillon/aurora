@@ -143,6 +143,9 @@ pub trait Extension: 'static {
     /// Called when the user navigates to one of this extension's pages.
     fn on_navigate(&mut self, _page: &str, _arg: Option<&str>) {}
 
+    /// Called once per frame after the shell paints, or while hidden in the tray.
+    fn tick(&mut self, _ctx: &mut Ctx) {}
+
     /// Every event from the Steam engine, after `ctx.state` was updated.
     fn on_event(&mut self, _event: &Event, _ctx: &mut Ctx) {}
 
@@ -361,6 +364,16 @@ impl Registry {
         if let Some(i) = self.owner_of(page) {
             if let Some(x) = self.entries[i].ext.as_mut() {
                 x.on_navigate(page, arg);
+            }
+        }
+    }
+
+    pub fn tick(&mut self, env: Env<'_>) {
+        let Env { state, local, theme, zoom, client, actions } = env;
+        for i in 0..self.entries.len() {
+            if self.entries[i].enabled {
+                let env = Env { state, local, theme, zoom, client, actions: &mut *actions };
+                self.with(i, env, |ext, ctx| ext.tick(ctx));
             }
         }
     }

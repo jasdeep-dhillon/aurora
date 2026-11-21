@@ -21,7 +21,9 @@ pub mod market;
 pub mod social;
 pub mod cloud;
 pub mod reviews;
+pub mod discovery;
 pub mod store_recs;
+pub mod wishlist;
 pub mod collections;
 pub mod regions;
 pub mod a2s;
@@ -187,7 +189,17 @@ pub enum Command {
     LoadReviews { steam_id: SteamId, page: u32 },
     /// A game's reviews (Steam language name or "all"). `cursor`: the next
     /// page after the ones loaded (`AppReviews::cursor`); `None` for the first.
-    LoadAppReviews { app_id: AppId, language: String, cursor: Option<String> },
+    LoadAppReviews { app_id: AppId, language: String, cursor: Option<String>, filter: model::ReviewFilter },
+    /// Your store discovery queue (`rebuild` skips the current one and asks Steam for a fresh dozen).
+    LoadDiscoveryQueue { country: String, rebuild: bool },
+    /// Load your Steam Points Shop balance.
+    LoadPointsBalance,
+    /// Mark a game in your discovery queue as seen ("Next in queue").
+    SkipDiscoveryQueueItem { app_id: AppId },
+    /// "Not interested" (or undo it) on a store game.
+    IgnoreApp { app_id: AppId, ignore: bool },
+    /// Follow or unfollow a game's store hub.
+    FollowApp { app_id: AppId, follow: bool },
     /// Your own review of a game, if any.
     LoadMyReview { app_id: AppId },
     /// Write or replace your review of a game.
@@ -279,6 +291,8 @@ pub enum Command {
     LoadWishlist,
     WishlistAdd { app_id: AppId },
     WishlistRemove { app_id: AppId },
+    /// Put wishlisted `app_id` at `to` (0-based in "Your rank" order).
+    WishlistMove { app_id: AppId, to: usize },
     LoadCart,
     /// Add a package to the cart, optionally as a gift for a friend.
     /// Add a copy to the cart: for this account, or as a gift (optionally
@@ -364,7 +378,14 @@ impl std::fmt::Debug for Command {
             Command::DeleteComment { steam_id, comment_id } => f.debug_struct("DeleteComment").field("steam_id", steam_id).field("comment_id", comment_id).finish(),
             Command::LoadBadges { steam_id } => f.debug_struct("LoadBadges").field("steam_id", steam_id).finish(),
             Command::LoadReviews { steam_id, page } => f.debug_struct("LoadReviews").field("steam_id", steam_id).field("page", page).finish(),
-            Command::LoadAppReviews { app_id, language, cursor } => f.debug_struct("LoadAppReviews").field("app_id", app_id).field("language", language).field("cursor", cursor).finish(),
+            Command::LoadAppReviews { app_id, language, cursor, filter } => {
+                f.debug_struct("LoadAppReviews").field("app_id", app_id).field("language", language).field("cursor", cursor).field("filter", filter).finish()
+            }
+            Command::LoadDiscoveryQueue { country, rebuild } => f.debug_struct("LoadDiscoveryQueue").field("country", country).field("rebuild", rebuild).finish(),
+            Command::LoadPointsBalance => write!(f, "LoadPointsBalance"),
+            Command::SkipDiscoveryQueueItem { app_id } => f.debug_struct("SkipDiscoveryQueueItem").field("app_id", app_id).finish(),
+            Command::IgnoreApp { app_id, ignore } => f.debug_struct("IgnoreApp").field("app_id", app_id).field("ignore", ignore).finish(),
+            Command::FollowApp { app_id, follow } => f.debug_struct("FollowApp").field("app_id", app_id).field("follow", follow).finish(),
             Command::LoadMyReview { app_id } => f.debug_struct("LoadMyReview").field("app_id", app_id).finish(),
             Command::PostReview { app_id, text, recommended, public, allow_comments, language } => f.debug_struct("PostReview").field("app_id", app_id).field("text", text).field("recommended", recommended).field("public", public).field("allow_comments", allow_comments).field("language", language).finish(),
             Command::DeleteReview { app_id } => f.debug_struct("DeleteReview").field("app_id", app_id).finish(),
@@ -419,6 +440,7 @@ impl std::fmt::Debug for Command {
             Command::LoadWishlist => f.write_str("LoadWishlist"),
             Command::WishlistAdd { app_id } => f.debug_struct("WishlistAdd").field("app_id", app_id).finish(),
             Command::WishlistRemove { app_id } => f.debug_struct("WishlistRemove").field("app_id", app_id).finish(),
+            Command::WishlistMove { app_id, to } => f.debug_struct("WishlistMove").field("app_id", app_id).field("to", to).finish(),
             Command::LoadCart => f.write_str("LoadCart"),
             Command::CartAdd { package_id, gift, gift_to } => f.debug_struct("CartAdd").field("package_id", package_id).field("gift", gift).field("gift_to", gift_to).finish(),
             Command::CartModify { line_item_id, gift, gift_to } => f.debug_struct("CartModify").field("line_item_id", line_item_id).field("gift", gift).field("gift_to", gift_to).finish(),
@@ -539,7 +561,17 @@ pub enum Event {
     Badges { steam_id: SteamId, result: Result<model::Badges, String> },
     Reviews { steam_id: SteamId, page: u32, result: Result<model::UserReviews, String> },
     /// A page of a game's reviews (`more`: added after the loaded ones).
-    AppReviews { app_id: AppId, more: bool, result: Result<model::AppReviews, String> },
+    AppReviews { app_id: AppId, filter: model::ReviewFilter, more: bool, result: Result<model::AppReviews, String> },
+    /// Your store discovery queue (app ids, next to see first).
+    DiscoveryQueue(Result<Vec<AppId>, String>),
+    /// Your Steam Points Shop balance.
+    PointsBalance(Result<u64, String>),
+    /// "Not interested" was saved (or reverted if `result.is_err()`).
+    AppIgnored { app_id: AppId, ignored: bool, result: Result<(), String> },
+    /// Games you follow on Steam.
+    FollowedApps(Vec<AppId>),
+    /// Follow/unfollow finished (`result` holds the new followed state on `Ok`).
+    AppFollowed { app_id: AppId, result: Result<bool, String> },
     MyReview { app_id: AppId, result: Result<Option<model::UserReview>, String> },
     /// A review was posted (`deleted`: removed) or failed.
     ReviewSaved { app_id: AppId, deleted: bool, result: Result<(), String> },
@@ -590,6 +622,8 @@ pub enum Event {
     WorkshopTags { app_id: AppId, result: Result<Vec<model::WorkshopTagCategory>, String> },
     /// (app id, date added)
     Wishlist(Vec<(AppId, u64)>),
+    /// A wishlist add/remove is in flight.
+    WishlistChanging { app_id: AppId, add: bool },
     Cart(Vec<model::CartLine>),
     /// A store action failed (cart, wishlist).
     StoreError(String),
