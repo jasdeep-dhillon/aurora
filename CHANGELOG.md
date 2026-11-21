@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.0.0-rc1](https://github.com/mollie2999/Aurora/compare/v0.9.2...v1.0.0-rc1) (2026-11-22)
+
+> **Release Candidate / Test Version:** Aurora `1.0.0-rc1` is a pre-1.0 test release to validate all new features across Linux and Windows before tagging `1.0.0`. The updater now supports SemVer prerelease ordering, so anyone on `1.0.0-rc1` will automatically be offered `1.0.0` when it ships. Please report any bugs with your `aurora.log` file from your settings folder!
+
+### Highlights & New Features
+
+* **Declarative Theme Engine, Native Adwaita & Steam Desktop Replica:** build and install custom `.aurora-theme` packages with box-model layouts, custom fonts/weight presets, and Rhai hooks — includes built-in **Native Adwaita** and **Steam Desktop Replica** themes, plus full authoring docs in `docs/THEMING.md` ([#56](https://github.com/mollie2999/Aurora/pull/56)).
+* **Community Tab, Friends Activity Feed & Live Steam Broadcasts:** added the **Community** tab next to Library with **Friends activity** (status posting & filters), **Explore**, **Developers** news, and **Discussions** — plus native Linux **Steam Broadcasts** playback via `ffmpeg` + PulseAudio/PipeWire with audio, play/pause, mute/volume, `-10s`/`+10s` rewind, and a 30-second in-memory A/V DVR scrubber ([#62](https://github.com/mollie2999/Aurora/pull/62)).
+* **Complete Store, Search Bar, Discovery Queue & Points Shop:** restored the live Store search bar with autocomplete suggestions, merged the Store sub-bar into game pages, added the interactive **Discovery Queue** walkthrough, **Points Shop** with live Steam Points balance, Browse & Review filters, and fixed Wishlist drag-to-reorder ([#63](https://github.com/mollie2999/Aurora/pull/63)).
+* **In-Game Overlay Overhaul (Vulkan / Fullscreen + Features):** fixed the Linux Vulkan implicit layer for fullscreen DXVK/VKD3D games (including Helldivers 2) with swapchain texture replay, non-freezing X11 input shield, software cursor, and always-on Shift+Tab/Esc polling — plus **FPS counter HUD**, **F12 screenshots**, **persistent per-game notes**, and **in-game toasts** ([#57](https://github.com/mollie2999/Aurora/pull/57)).
+* **Complete Steam Input & Controller Settings:** added the full Controller settings menu with live USB/Bluetooth hotplug & Refresh, Xbox/`evdev` rumble testing, deadzone/trigger calibration, live button/stick tester, and per-game Steam Input overrides ([#58](https://github.com/mollie2999/Aurora/pull/58)).
+* **Move, Backup & Restore Games:** move installed games between Steam library folders and back up or restore game installations directly in Library Properties and Settings → Storage ([#60](https://github.com/mollie2999/Aurora/pull/60)).
+* **Native Profile Editing:** edit your Steam display name, real name, summary, custom URL, location, avatar, frame, background, favorite badge, theme, and privacy settings natively in-app ([#61](https://github.com/mollie2999/Aurora/pull/61)).
+* **Linux Polish (Dock Progress, CJK/Emoji Fonts & Native Notifications):** added Linux dock download progress (Unity/GNOME `LauncherEntry` D-Bus), system CJK & emoji fallback font discovery so non-Latin reviews/titles render cleanly, Steam Family desktop notification routing, and fixed the Library Stop button icon ([#59](https://github.com/mollie2999/Aurora/pull/59)).
+* **Persistent App Logs (`aurora.log`):** mirrors app logs to `aurora.log` (and `aurora.old.log`) in the settings folder on both Windows and Linux for easier bug reports ([#65](https://github.com/mollie2999/Aurora/pull/65)).
+
+### Fixes
+
+* **Updater SemVer prereleases:** prerelease versions like `1.0.0-rc1` now sort strictly below `1.0.0`, enabling seamless `0.9.2 → 1.0.0-rc1 → 1.0.0` updates ([#64](https://github.com/mollie2999/Aurora/pull/64)).
+
+### Credits
+
+* Huge thanks to **[@madonchik123](https://github.com/madonchik123)** (`madonchik123/SteamInRust`) for the upstream **Community / Friends Activity Feed**, **Discovery Queue**, and **Points Shop** work ported and adapted in this release.
+
 ## [0.9.2](https://github.com/mollie2999/Aurora/compare/v0.9.1...v0.9.2) (2026-11-19)
 
 ### New
