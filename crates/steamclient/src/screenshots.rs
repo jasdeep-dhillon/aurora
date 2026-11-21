@@ -138,6 +138,39 @@ extern "C" fn add_vr(_t: This, _kind: i32, file: *const c_char, _vr_file: *const
     finish(add_file(&f))
 }
 
+/// Whether the game takes its own screenshots (`HookScreenshots`).
+pub fn game_takes_them() -> bool {
+    HOOKED.load(Ordering::Relaxed)
+}
+
+/// The screenshot key was pressed: a game that hooked screenshots gets
+/// `ScreenshotRequested`, otherwise the overlay copies the next frame.
+pub fn requested_by_key() {
+    if game_takes_them() {
+        lock().post(REQUESTED, vec![0]);
+    }
+}
+
+/// Save a frame copied by an overlay renderer on a background thread.
+pub fn save_frame(rgb: Vec<u8>, width: u32, height: u32) {
+    std::thread::spawn(move || {
+        let r = save_rgb(rgb, width, height);
+        let ok = r.is_ok();
+        finish(r);
+        crate::overlay::tell_app(crate::overlay::wire::FromGame::Screenshot(ok));
+    });
+}
+
+/// Capture the game window from the screen when GPU readback isn't possible.
+pub fn capture_window() {
+    std::thread::spawn(|| {
+        let r = capture::game_window().ok_or_else(|| "couldn't capture the game window".to_string()).and_then(|(rgb, w, h)| save_rgb(rgb, w, h));
+        let ok = r.is_ok();
+        finish(r);
+        crate::overlay::tell_app(crate::overlay::wire::FromGame::Screenshot(ok));
+    });
+}
+
 extern "C" fn trigger(_t: This) {
     if HOOKED.load(Ordering::Relaxed) {
         lock().post(REQUESTED, vec![0]);

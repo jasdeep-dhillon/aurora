@@ -35,6 +35,10 @@ pub struct Prefs {
     pub page: String,
     pub friends_open: bool,
     pub overlay_enabled: bool,
+    #[serde(default)]
+    pub fps_counter: crate::builtin::settings::FpsCorner,
+    #[serde(default)]
+    pub fps_high_contrast: bool,
     /// Account to sign in automatically at startup (cleared on log out).
     pub auto_login: Option<String>,
     /// Interface language code; `None` follows the system.
@@ -82,6 +86,12 @@ pub struct Prefs {
     /// Steam's "Allow downloads during gameplay", set before every game.
     #[serde(default)]
     pub gameplay_downloads: bool,
+    /// Global controller & Steam Input settings (Settings → Controller).
+    #[serde(default)]
+    pub controller: client::ControllerSettings,
+    /// Per-game selected Steam Input configuration (Auto, LocalFile, Workshop).
+    #[serde(default)]
+    pub controller_bindings: std::collections::BTreeMap<model::AppId, client::BindingChoice>,
     /// The main window's last size, position and maximized state, restored on
     /// the next run (the sign-in and splash windows always center small).
     #[serde(default)]
@@ -112,6 +122,8 @@ impl Default for Prefs {
             page: "library".into(),
             friends_open: true,
             overlay_enabled: true,
+            fps_counter: crate::builtin::settings::FpsCorner::Off,
+            fps_high_contrast: false,
             auto_login: None,
             language: None,
             language_asked: false,
@@ -131,6 +143,8 @@ impl Default for Prefs {
             anti_cheat_headless: false,
             precompile_shaders: true,
             gameplay_downloads: false,
+            controller: client::ControllerSettings::default(),
+            controller_bindings: Default::default(),
             win_size: None,
             win_pos: None,
             win_maximized: false,
@@ -269,21 +283,6 @@ impl SteamApp {
         crate::image_cache::ImageCache::install(&cc.egui_ctx, rt.handle().clone());
         // Store pages and game news, saved next to the pictures.
         store::disk::init(crate::image_cache::dir().with_file_name("pages"));
-        let (tx, events) = mpsc::channel();
-        let demo_tx = tx.clone();
-        let repaint = cc.egui_ctx.clone();
-        let client = Client::spawn(
-            rt.handle(),
-            Arc::new(move |e| {
-                let _ = tx.send(e);
-                repaint.request_repaint_of(egui::ViewportId::ROOT);
-                repaint.request_repaint_of(egui::ViewportId::from_hash_of("friends-window"));
-            }),
-        );
-        // Tell the session the setting before it signs in and would otherwise
-        // resume saved downloads on its own.
-        client.send(Command::SetAutoDownloads(prefs.auto_updates));
-
         // `--no-local`: don't read this PC's Steam library (clean demo screenshots).
         let local = if std::env::args().any(|a| a == "--no-local") {
             LocalState::default()
@@ -292,6 +291,24 @@ impl SteamApp {
                 tracing::warn!("local Steam library: {e}");
                 LocalState::default()
             })
+        };
+
+        let demo = std::env::args().any(|a| a == "--demo");
+        let (tx, events) = mpsc::channel();
+        let repaint = cc.egui_ctx.clone();
+        let sink: client::Sink = Arc::new(move |e| {
+            let _ = tx.send(e);
+            repaint.request_repaint_of(egui::ViewportId::ROOT);
+            repaint.request_repaint_of(egui::ViewportId::from_hash_of("friends-window"));
+        });
+        let client = if demo {
+            crate::demo::spawn(rt.handle(), &local, sink)
+        } else {
+            let c = Client::spawn(rt.handle(), sink);
+            // Tell the session the setting before it signs in and would otherwise
+            // resume saved downloads on its own.
+            c.send(Command::SetAutoDownloads(prefs.auto_updates));
+            c
         };
 
         let flags = std::sync::Arc::new(std::sync::Mutex::new(crate::builtin::settings::AppFlags {
@@ -303,11 +320,16 @@ impl SteamApp {
             toast_notifications: prefs.toast_notifications,
             scroll_speed: prefs.scroll_speed,
             drm_host_ack: prefs.drm_host_ack,
+            overlay_enabled: prefs.overlay_enabled,
+            fps_counter: prefs.fps_counter,
+            fps_high_contrast: prefs.fps_high_contrast,
         }));
         client::set_proton_override(prefs.proton_override.clone());
         client::set_app_protons(prefs.proton_per_app.clone());
         client::set_anti_cheat_headless(prefs.anti_cheat_headless);
         client::set_gameplay_downloads(prefs.gameplay_downloads);
+        client::set_controller_settings(prefs.controller.clone());
+        client::set_app_bindings(prefs.controller_bindings.clone());
         #[cfg(not(windows))]
         client::shaders::set_precompile(prefs.precompile_shaders);
         let mut registry = crate::builtin::registry(rt.handle().clone(), cc.egui_ctx.clone(), flags.clone(), themes.clone(), library_layout.clone());
@@ -321,17 +343,14 @@ impl SteamApp {
         let saved = client::store::load();
         // Someone who already signed in here has used the app before.
         let ask_language = ask_language.filter(|_| saved.is_empty());
-        let demo = std::env::args().any(|a| a == "--demo");
         let mut auto_account = None;
-        if demo {
-            for e in crate::demo::events(&local) {
-                let _ = demo_tx.send(e);
-            }
-        } else if let Some(acc) = prefs.auto_login.as_ref().filter(|_| !prefs.ask_account && !std::env::args().any(|a| a == "--no-auto-login")) {
-            if saved.iter().any(|s| &s.account_name == acc) {
-                auto_account = Some(acc.clone());
-                // Offline mode sticks across restarts until "Go online".
-                client.send(if prefs.wants_offline { Command::StartOffline { account: acc.clone() } } else { Command::LoginSaved { account: acc.clone() } });
+        if !demo {
+            if let Some(acc) = prefs.auto_login.as_ref().filter(|_| !prefs.ask_account && !std::env::args().any(|a| a == "--no-auto-login")) {
+                if saved.iter().any(|s| &s.account_name == acc) {
+                    auto_account = Some(acc.clone());
+                    // Offline mode sticks across restarts until "Go online".
+                    client.send(if prefs.wants_offline { Command::StartOffline { account: acc.clone() } } else { Command::LoginSaved { account: acc.clone() } });
+                }
             }
         }
 
@@ -498,6 +517,11 @@ impl SteamApp {
                 }
                 Event::GameStopped { .. } => {
                     self.overlay.game_stopped();
+                    if let Ok(l) = local::load(Some(self.local.steam_root.clone())) {
+                        self.local = l;
+                    }
+                }
+                Event::MoveFinished { result: Ok(_), .. } | Event::RestoreFinished { result: Ok(_), .. } => {
                     if let Ok(l) = local::load(Some(self.local.steam_root.clone())) {
                         self.local = l;
                     }
@@ -969,10 +993,15 @@ impl eframe::App for SteamApp {
             self.prefs.toast_notifications = f.toast_notifications;
             self.prefs.scroll_speed = f.scroll_speed;
             self.prefs.drm_host_ack = f.drm_host_ack;
+            self.prefs.overlay_enabled = f.overlay_enabled;
+            self.prefs.fps_counter = f.fps_counter;
+            self.prefs.fps_high_contrast = f.fps_high_contrast;
             self.prefs.proton_override = client::proton_override();
             self.prefs.proton_per_app = client::app_protons();
             self.prefs.anti_cheat_headless = client::anti_cheat_headless();
             self.prefs.gameplay_downloads = client::gameplay_downloads();
+            self.prefs.controller = client::controller_settings();
+            self.prefs.controller_bindings = client::app_bindings();
             #[cfg(not(windows))]
             {
                 self.prefs.precompile_shaders = client::shaders::precompile();
@@ -1254,5 +1283,34 @@ fn sync_texture(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Prefs;
+
+    #[test]
+    fn prefs_controller_defaults_and_roundtrip() {
+        let legacy: Prefs = serde_json::from_str("{}").unwrap();
+        assert!(legacy.controller.families.xbox);
+        assert!(legacy.controller.families.playstation);
+        assert!(legacy.controller.families.switch_pro);
+        assert!(legacy.controller.families.generic);
+        assert_eq!(legacy.controller.calibration, client::PadCalibration::default());
+        assert!(legacy.controller_bindings.is_empty());
+
+        let mut prefs = Prefs::default();
+        prefs.controller.families.xbox = false;
+        prefs.controller.families.switch_pro = false;
+        prefs.controller.calibration.left_deadzone = 0.24;
+        prefs.controller.calibration.nintendo_layout = true;
+        prefs.controller.calibration.rumble_enabled = false;
+        prefs.controller_bindings.insert(620, client::BindingChoice::Workshop(987654));
+
+        let json = serde_json::to_string(&prefs).unwrap();
+        let restored: Prefs = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.controller, prefs.controller);
+        assert_eq!(restored.controller_bindings, prefs.controller_bindings);
     }
 }

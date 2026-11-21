@@ -575,6 +575,19 @@ pub struct ProfileInfo {
     /// VAC bans on record (from the public profile).
     #[serde(default)]
     pub vac_banned: bool,
+    /// Whether the background fills the window (Steam's "Full Screen")
+    /// rather than showing at its own size.
+    #[serde(default)]
+    pub background_full: bool,
+    /// An animated avatar from the Points Shop.
+    #[serde(default)]
+    pub animated_avatar: Option<String>,
+    /// The mini profile's background image.
+    #[serde(default)]
+    pub mini_background: Option<String>,
+    /// The profile's Steam theme ("Summer", "DarkMode"…; "" for the default).
+    #[serde(default)]
+    pub theme: String,
 }
 
 /// Steam community visibility of a profile.
@@ -726,6 +739,86 @@ pub struct Notifications {
     pub pending_friends: u32,
     /// Things waiting for confirmation in the Steam Mobile app.
     pub confirmations: u32,
+}
+
+/// Who can see a part of your profile: 1 only you, 2 friends, 3 everyone.
+/// Comments: 0 friends, 1 everyone, 2 nobody.
+/// Adapted from upstream SteamInRust PR #74 by madonchik123.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProfilePrivacy {
+    pub profile: u8,
+    pub inventory: u8,
+    pub gifts: u8,
+    pub games: u8,
+    pub playtime: u8,
+    pub friends: u8,
+    pub comments: u8,
+}
+
+/// A profile item you own (background, frame...).
+/// Adapted from upstream SteamInRust PR #74 / #101 by madonchik123.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileItemChoice {
+    pub id: u64,
+    pub name: String,
+    pub image: String,
+    pub app_id: AppId,
+    /// The full-size picture (backgrounds), when there's one.
+    #[serde(default)]
+    pub large: String,
+    /// Its video (MP4) for animated items.
+    #[serde(default)]
+    pub movie: String,
+    /// The game (or Steam collection) it comes from.
+    #[serde(default)]
+    pub app_name: String,
+}
+
+/// Your profile as Steam's Edit Profile pages show it.
+/// Adapted from upstream SteamInRust PR #74 / #101 by madonchik123.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileEdit {
+    pub persona_name: String,
+    pub real_name: String,
+    pub custom_url: String,
+    pub summary: String,
+    /// Location codes as Steam stores them (country "KZ", state, city id).
+    pub country: String,
+    pub state: String,
+    pub city: String,
+    /// "City, State, Country" as Steam names them.
+    pub location_text: String,
+    pub privacy: ProfilePrivacy,
+    pub hide_awards: bool,
+    pub theme: String,
+    /// (theme id, title)
+    pub themes: Vec<(String, String)>,
+    pub backgrounds: Vec<ProfileItemChoice>,
+    pub mini_backgrounds: Vec<ProfileItemChoice>,
+    pub frames: Vec<ProfileItemChoice>,
+    pub animated_avatars: Vec<ProfileItemChoice>,
+    /// Equipped item ids: background, mini profile background, frame,
+    /// animated avatar (0 = none).
+    pub equipped: [u64; 4],
+    /// The equipped background fills the window (Steam's "Full Screen").
+    #[serde(default)]
+    pub background_full: bool,
+    /// The featured badge (a community badge's id; 0 = none).
+    #[serde(default)]
+    pub favorite_badge: u32,
+}
+
+/// Which part of the profile a save was for.
+/// Adapted from upstream SteamInRust PR #74 / #101 by madonchik123.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileSave {
+    Info,
+    Privacy,
+    Avatar,
+    Item,
+    BackgroundFlags,
+    Theme,
+    Badge,
 }
 
 /// A comment on a profile.

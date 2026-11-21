@@ -52,6 +52,11 @@ impl Extension for Community {
 
     fn on_navigate(&mut self, _page: &str, arg: Option<&str>) {
         if let Some(arg) = arg {
+            if arg == "invites" {
+                self.selected = None;
+                self.tab = FriendsTab::Invites;
+                return;
+            }
             if let Some(rest) = arg.strip_prefix("group:") {
                 let (gid_s, cid_s) = rest.split_once(':').unwrap_or((rest, ""));
                 if let Ok(gid) = gid_s.parse::<GroupChatId>() {

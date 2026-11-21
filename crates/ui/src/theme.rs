@@ -477,11 +477,337 @@ fn text_tweak() -> egui::epaint::text::FontTweak {
 /// actually drawn get loaded, and they count as shared file cache rather than
 /// the app's own memory (the CJK fonts are 70+ MB together).
 fn map_font(path: &std::path::Path) -> Option<&'static [u8]> {
-    let file = std::fs::File::open(path).ok()?;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    static MAPPED: OnceLock<Mutex<HashMap<PathBuf, &'static [u8]>>> = OnceLock::new();
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let cache = MAPPED.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(bytes) = cache.lock().ok()?.get(&key).copied() {
+        return Some(bytes);
+    }
+    let file = std::fs::File::open(&key).ok()?;
+    if file.metadata().ok()?.len() == 0 {
+        return None;
+    }
     // SAFETY: system font files don't change while the app runs; the mapping
     // lives for the whole program, like the font itself.
     let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
-    Some(&Box::leak(Box::new(map))[..])
+    let bytes: &'static [u8] = &Box::leak(Box::new(map))[..];
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key, bytes);
+    }
+    Some(bytes)
+}
+
+/// Basic header check before handing a system font to epaint (which panics on corrupt files).
+fn valid_font_header(bytes: &[u8], index: u32) -> bool {
+    if bytes.len() < 12 {
+        return false;
+    }
+    match &bytes[..4] {
+        b"ttcf" => {
+            let num_fonts = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+            index < num_fonts && 12 + (index as usize + 1) * 4 <= bytes.len()
+        }
+        [0x00, 0x01, 0x00, 0x00] | b"OTTO" | b"true" | b"typ1" => index == 0,
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_fonts {
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    pub const MAX_FALLBACK_FONTS: usize = 12;
+    const MAX_SCAN_DEPTH: usize = 4;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct DiscoveredFont {
+        pub path: PathBuf,
+        pub index: u32,
+        pub is_emoji: bool,
+    }
+
+    pub fn discover() -> Vec<DiscoveredFont> {
+        let mut fonts = Vec::new();
+        fonts.extend(query_fc_match());
+        fonts.extend(discover_fonts_in_dirs(&standard_font_dirs(), MAX_FALLBACK_FONTS));
+        dedup_and_cap(fonts, MAX_FALLBACK_FONTS)
+    }
+
+    pub fn standard_font_dirs() -> Vec<PathBuf> {
+        let mut dirs = vec![
+            PathBuf::from("/usr/share/fonts"),
+            PathBuf::from("/usr/local/share/fonts"),
+        ];
+        if let Some(xdg_data) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+            dirs.push(PathBuf::from(xdg_data).join("fonts"));
+        } else if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            dirs.push(PathBuf::from(home).join(".local/share/fonts"));
+        }
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            dirs.push(PathBuf::from(home).join(".fonts"));
+        }
+        dirs
+    }
+
+    /// Mask away Fontconfig's named-instance high bits (upper 16 bits); TTC face index is lower 16 bits.
+    pub fn parse_fc_match_line(line: &str, expected_families: Option<&[&str]>, is_emoji: bool) -> Option<DiscoveredFont> {
+        let mut parts = line.trim().split('\t');
+        let path_str = parts.next()?.trim();
+        let index_str = parts.next()?.trim();
+        let family = parts.next().unwrap_or_default().trim();
+        if path_str.is_empty() || !is_font_ext(Path::new(path_str)) {
+            return None;
+        }
+        if let Some(expected) = expected_families {
+            let fam_lower = family.to_ascii_lowercase();
+            let file_lower = Path::new(path_str)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let matches = expected.iter().any(|e| fam_lower.contains(e) || file_lower.contains(&e.replace(' ', "")));
+            if !matches {
+                return None;
+            }
+        }
+        let raw_index: u32 = index_str.parse().ok()?;
+        let index = raw_index & 0xFFFF;
+        Some(DiscoveredFont {
+            path: PathBuf::from(path_str),
+            index,
+            is_emoji,
+        })
+    }
+
+    fn query_fc_match() -> Vec<DiscoveredFont> {
+        const LANG_QUERIES: &[&str] = &[
+            "sans-serif:lang=zh-cn",
+            "sans-serif:lang=zh-tw",
+            "sans-serif:lang=ja",
+            "sans-serif:lang=ko",
+            "sans-serif:lang=ar",
+            "sans-serif:lang=th",
+            "sans-serif:lang=hi",
+            "sans-serif:lang=he",
+        ];
+        const FAMILY_QUERIES: &[(&str, &[&str], bool)] = &[
+            ("DejaVu Sans", &["dejavu sans"], false),
+            ("Noto Sans Symbols", &["noto sans symbols"], false),
+            ("Noto Sans Symbols 2", &["noto sans symbols 2"], false),
+            ("Noto Color Emoji", &["noto color emoji", "emoji"], true),
+        ];
+
+        let run = |pattern: &str| -> Option<String> {
+            let out = Command::new("fc-match")
+                .args(["-f", "%{file}\t%{index}\t%{family}\n", pattern])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            String::from_utf8(out.stdout).ok()
+        };
+
+        let mut out = Vec::new();
+        for q in LANG_QUERIES {
+            if let Some(stdout) = run(q) {
+                if let Some(line) = stdout.lines().next() {
+                    if let Some(font) = parse_fc_match_line(line, None, false) {
+                        out.push(font);
+                    }
+                }
+            }
+        }
+        for &(pattern, expected, is_emoji) in FAMILY_QUERIES {
+            if let Some(stdout) = run(pattern) {
+                if let Some(line) = stdout.lines().next() {
+                    if let Some(font) = parse_fc_match_line(line, Some(expected), is_emoji) {
+                        out.push(font);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn is_font_ext(path: &Path) -> bool {
+        matches!(
+            path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+            Some("ttf" | "otf" | "ttc")
+        )
+    }
+
+    fn normalize_stem(path: &Path) -> Option<String> {
+        let stem = path.file_stem()?.to_str()?;
+        Some(
+            stem.chars()
+                .filter(|c| !matches!(c, '-' | '_' | ' '))
+                .flat_map(|c| c.to_lowercase())
+                .collect(),
+        )
+    }
+
+    /// Assign (group_slot, priority_order, weight_rank, is_emoji). Lower weight_rank is preferred.
+    fn classify_candidate(norm_stem: &str) -> Option<(usize, u8, bool)> {
+        if norm_stem.contains("italic")
+            || norm_stem.contains("oblique")
+            || norm_stem.contains("condensed")
+            || norm_stem.contains("thin")
+            || norm_stem.contains("light")
+            || norm_stem.contains("black")
+            || norm_stem.contains("serif")
+            || norm_stem.contains("mono")
+        {
+            return None;
+        }
+        let weight_rank = if norm_stem.contains("regular") {
+            0
+        } else if norm_stem.contains("medium") {
+            1
+        } else if !norm_stem.contains("bold") && !norm_stem.contains("semibold") {
+            2
+        } else if norm_stem.contains("bold") && !norm_stem.contains("semibold") {
+            3
+        } else {
+            return None;
+        };
+
+        // Order determines slot priority; one best weight is kept per slot.
+        const SLOTS: &[(&str, bool)] = &[
+            ("notosanscjksc", false),
+            ("notosanscjktc", false),
+            ("notosanscjkjp", false),
+            ("notosanscjkkr", false),
+            ("notosanscjk", false),
+            ("notosanssc", false),
+            ("notosanstc", false),
+            ("notosansjp", false),
+            ("notosanskr", false),
+            ("sourcehansanssc", false),
+            ("sourcehansanscn", false),
+            ("sourcehansanstc", false),
+            ("sourcehansanstw", false),
+            ("sourcehansansjp", false),
+            ("sourcehansanskr", false),
+            ("sourcehansans", false),
+            ("wqymicrohei", false),
+            ("wqyzenhei", false),
+            ("wenquanyi", false),
+            ("ipaexg", false),
+            ("ipag", false),
+            ("undotum", false),
+            ("notosansarabic", false),
+            ("notosansthai", false),
+            ("notosansdevanagari", false),
+            ("notosanshebrew", false),
+            ("notosansbengali", false),
+            ("notosanstamil", false),
+            ("notosanssymbols2", false),
+            ("notosanssymbols", false),
+            ("dejavusans", false),
+            ("notocoloremoji", true),
+            ("notoemoji", true),
+        ];
+
+        for (slot, &(pat, is_emoji)) in SLOTS.iter().enumerate() {
+            if norm_stem.starts_with(pat) || norm_stem.contains(pat) {
+                return Some((slot, weight_rank, is_emoji));
+            }
+        }
+        None
+    }
+
+    pub fn discover_fonts_in_dirs(dirs: &[PathBuf], cap: usize) -> Vec<DiscoveredFont> {
+        let mut best: Vec<Option<(u8, DiscoveredFont)>> = vec![None; 33];
+        let mut visited_dirs = HashSet::new();
+        for dir in dirs {
+            scan_dir(dir, 0, &mut visited_dirs, &mut best);
+        }
+        let list: Vec<DiscoveredFont> = best.into_iter().flatten().map(|(_, f)| f).collect();
+        dedup_and_cap(list, cap)
+    }
+
+    fn scan_dir(
+        dir: &Path,
+        depth: usize,
+        visited_dirs: &mut HashSet<PathBuf>,
+        best: &mut [Option<(u8, DiscoveredFont)>],
+    ) {
+        if depth > MAX_SCAN_DEPTH {
+            return;
+        }
+        let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        if !visited_dirs.insert(canon) {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for path in paths {
+            if path.is_dir() {
+                scan_dir(&path, depth + 1, visited_dirs, best);
+            } else if is_font_ext(&path) {
+                let Some(norm) = normalize_stem(&path) else {
+                    continue;
+                };
+                let Some((slot, rank, is_emoji)) = classify_candidate(&norm) else {
+                    continue;
+                };
+                let replace = match &best[slot] {
+                    None => true,
+                    Some((prev_rank, _)) => rank < *prev_rank,
+                };
+                if replace {
+                    best[slot] = Some((
+                        rank,
+                        DiscoveredFont {
+                            path,
+                            index: 0,
+                            is_emoji,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    pub fn dedup_and_cap(fonts: Vec<DiscoveredFont>, cap: usize) -> Vec<DiscoveredFont> {
+        if cap == 0 {
+            return Vec::new();
+        }
+        let mut seen = HashSet::new();
+        let mut non_emoji = Vec::new();
+        let mut emoji = Vec::new();
+        for f in fonts {
+            let Ok(meta) = std::fs::metadata(&f.path) else {
+                continue;
+            };
+            if !meta.is_file() || meta.len() == 0 {
+                continue;
+            }
+            let key = std::fs::canonicalize(&f.path).unwrap_or_else(|_| f.path.clone());
+            if !seen.insert(key) {
+                continue;
+            }
+            if f.is_emoji {
+                emoji.push(f);
+            } else {
+                non_emoji.push(f);
+            }
+        }
+        let reserve_emoji = usize::from(!emoji.is_empty());
+        non_emoji.truncate(cap.saturating_sub(reserve_emoji));
+        non_emoji.extend(emoji.into_iter().take(cap.saturating_sub(non_emoji.len())));
+        non_emoji
+    }
 }
 
 /// Install Geist (Bold and ExtraBold, Inter Bold behind it for scripts Geist lacks) plus
@@ -570,6 +896,8 @@ pub fn install_fonts_for_theme(
     // System fonts for scripts Geist and Inter don't cover, so game names in Chinese,
     // Japanese, Korean, Thai, Arabic, Hindi… show instead of empty boxes.
     let mut system: Vec<String> = Vec::new();
+    let mut system_emoji: Vec<String> = Vec::new();
+    #[cfg(windows)]
     if let Some(dir) = std::env::var_os("WINDIR").map(|w| std::path::PathBuf::from(w).join("Fonts")) {
         for file in ["msyh.ttc", "YuGothM.ttc", "malgun.ttf", "Nirmala.ttc", "tahoma.ttf", "seguisym.ttf"] {
             if let Some(bytes) = map_font(&dir.join(file)) {
@@ -579,9 +907,31 @@ pub fn install_fonts_for_theme(
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    for (i, f) in linux_fonts::discover().into_iter().enumerate() {
+        if let Some(bytes) = map_font(&f.path) {
+            if !valid_font_header(bytes, f.index) {
+                continue;
+            }
+            let file_name = f.path.file_name().and_then(|n| n.to_str()).unwrap_or("font");
+            let name = format!("system-{i}-{file_name}");
+            let mut data = egui::FontData::from_static(bytes);
+            data.index = f.index;
+            if !f.is_emoji {
+                data = data.lcd(lcd);
+            }
+            fonts.font_data.insert(name.clone(), Arc::new(data));
+            if f.is_emoji {
+                system_emoji.push(name);
+            } else {
+                system.push(name);
+            }
+        }
+    }
     // egui's bundled fonts stay as fallbacks for emoji and rare scripts.
-    let mut fallbacks: Vec<String> = system;
+    let mut fallbacks: Vec<String> = system.clone();
     fallbacks.extend(fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default());
+    fallbacks.extend(system_emoji.iter().cloned());
     // Phosphor has only private-use glyphs and Inter none, so the icon font
     // can sit right after the text fonts. (Geist's one private-use glyph,
     // U+F8FF, is outside Phosphor's range.)
@@ -617,12 +967,165 @@ pub fn install_fonts_for_theme(
         mono.insert(0, cm.to_string());
     }
     mono.push("phosphor".into());
+    mono.extend(fallbacks);
     ctx.set_fonts(fonts);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valid_font_header_checks_sfnt_and_ttc_bounds() {
+        assert!(!valid_font_header(&[], 0));
+        assert!(!valid_font_header(&[0; 12], 0));
+        let ttf = [0x00, 0x01, 0x00, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        assert!(valid_font_header(&ttf, 0));
+        assert!(!valid_font_header(&ttf, 1));
+
+        let otf = [b'O', b'T', b'T', b'O', 0, 1, 0, 0, 0, 0, 0, 0];
+        assert!(valid_font_header(&otf, 0));
+
+        // TTC with 2 fonts needs 12 + 2*4 = 20 bytes minimum.
+        let mut ttc = vec![0u8; 20];
+        ttc[..4].copy_from_slice(b"ttcf");
+        ttc[8..12].copy_from_slice(&2u32.to_be_bytes());
+        assert!(valid_font_header(&ttc, 0));
+        assert!(valid_font_header(&ttc, 1));
+        assert!(!valid_font_header(&ttc, 2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fc_match_line_parses_and_masks_variable_instance_bits() {
+        let f = linux_fonts::parse_fc_match_line(
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc\t2\tNoto Sans CJK SC",
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(f.path, std::path::Path::new("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"));
+        assert_eq!(f.index, 2);
+        assert!(!f.is_emoji);
+
+        // Variable font named-instance bits live in upper 16 bits.
+        let vf = linux_fonts::parse_fc_match_line(
+            "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf\t458752\tAdwaita Sans",
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(vf.index, 0);
+
+        // Family filter rejects mismatched fallback for explicit family queries.
+        assert!(linux_fonts::parse_fc_match_line(
+            "/usr/share/fonts/TTF/DejaVuSans.ttf\t0\tDejaVu Sans",
+            Some(&["noto color emoji"]),
+            true,
+        )
+        .is_none());
+        assert!(linux_fonts::parse_fc_match_line(
+            "/usr/share/fonts/noto/NotoColorEmoji.ttf\t0\tNoto Color Emoji",
+            Some(&["noto color emoji"]),
+            true,
+        )
+        .is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_dir_discovery_deduplicates_prefers_regular_and_caps() {
+        let tmp = std::env::temp_dir().join(format!("aurora-font-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let sub = tmp.join("noto-cjk");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let make = |p: &std::path::Path| {
+            std::fs::write(p, b"OTTO\x00\x01\x00\x00\x00\x00\x00\x00").unwrap();
+        };
+        make(&sub.join("NotoSansCJK-Bold.ttc"));
+        make(&sub.join("NotoSansCJK-Regular.ttc"));
+        make(&sub.join("NotoSansCJK-Italic.ttc"));
+        make(&tmp.join("SourceHanSansSC-Regular.otf"));
+        make(&tmp.join("wqy-microhei.ttc"));
+        make(&tmp.join("ipag.ttf"));
+        make(&tmp.join("UnDotum.ttf"));
+        make(&tmp.join("DejaVuSans.ttf"));
+        make(&tmp.join("NotoColorEmoji.ttf"));
+        make(&tmp.join("NotoSansArabic-Regular.ttf"));
+        make(&tmp.join("NotoSansThai-Regular.ttf"));
+        make(&tmp.join("NotoSansDevanagari-Regular.ttf"));
+        make(&tmp.join("NotoSansHebrew-Regular.ttf"));
+        make(&tmp.join("NotoSansBengali-Regular.ttf"));
+        make(&tmp.join("NotoSansTamil-Regular.ttf"));
+        make(&tmp.join("NotoSansSymbols-Regular.ttf"));
+        // Symlink duplicate should be deduplicated by canonical path.
+        let _ = std::os::unix::fs::symlink(tmp.join("DejaVuSans.ttf"), tmp.join("DejaVuSans-Regular.ttf"));
+
+        let discovered = linux_fonts::discover_fonts_in_dirs(&[tmp.clone()], 8);
+        assert_eq!(discovered.len(), 8);
+        // NotoSansCJK-Regular.ttc chosen over Bold/Italic.
+        assert!(discovered.iter().any(|f| f.path.ends_with("NotoSansCJK-Regular.ttc")));
+        assert!(!discovered.iter().any(|f| f.path.ends_with("NotoSansCJK-Bold.ttc")));
+        assert!(!discovered.iter().any(|f| f.path.ends_with("NotoSansCJK-Italic.ttc")));
+        // Emoji stays last so it never shadows symbol/text fonts.
+        assert!(discovered.last().unwrap().is_emoji);
+        assert!(discovered.last().unwrap().path.ends_with("NotoColorEmoji.ttf"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn install_fonts_registers_fallbacks_into_egui_context() {
+        let ctx = egui::Context::default();
+        install_fonts_with(&ctx, false);
+        let discovered = linux_fonts::discover();
+        // Verify fonts load cleanly and text layout works for Latin, CJK, and symbols without panic.
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let galley = ui.painter().layout_no_wrap(
+                "Aurora 永劫无间 コール オブ デューティ 한국어 ★".into(),
+                egui::FontId::proportional(14.0),
+                Color32::WHITE,
+            );
+            assert!(galley.size().x > 0.0);
+            assert_eq!(galley.rows.len(), 1);
+            assert!(galley.rows[0].glyphs.iter().all(|g| g.advance_width > 0.0 || g.chr == ' '));
+            if !discovered.is_empty() {
+                ui.fonts(|f| {
+                    let defs = f.definitions();
+                    for fam in [FontFamily::Proportional, medium(), semibold(), bold(), FontFamily::Monospace] {
+                        assert!(
+                            defs.families[&fam].iter().any(|n| n.starts_with("system-")),
+                            "missing Linux fallback font in {fam:?}"
+                        );
+                    }
+                });
+            }
+        });
+        out.textures_delta.clear();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn map_font_caches_mapped_slice_and_rejects_empty() {
+        let tmp = std::env::temp_dir().join(format!("aurora-map-font-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let empty = tmp.join("empty.ttf");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(map_font(&empty).is_none());
+
+        let font = tmp.join("dummy.ttf");
+        std::fs::write(&font, b"\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00").unwrap();
+        let first = map_font(&font).unwrap();
+        let second = map_font(&font).unwrap();
+        assert!(std::ptr::eq(first.as_ptr(), second.as_ptr()));
+        assert_eq!(first.len(), 12);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn malformed_custom_fonts_fall_back_without_crashing_text_layout() {

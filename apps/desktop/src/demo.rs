@@ -83,13 +83,17 @@ pub fn events(local: &local::LocalState) -> Vec<Event> {
         group_invite: Some(GroupInviteRef::Link { code: "DEMO99".into() }),
     });
     events.push(Event::History { friend: ferris, messages: history });
+    let summary = "Collector of indie gems and long co-op nights.\n\nCurrently: replaying Hades on the hardest heat, slowly finishing Stardew Valley's community center, and trying every Portal 2 workshop map my friends send me.\n\nAdd me if you want to play co-op, trade cards or just chat about games. I'm usually online in the evenings.";
     events.push(Event::Profile(model::ProfileInfo {
         steam_id: me,
         background: Some(model::art::hero(1145360)),
         real_name: "Demo Player".into(),
-        summary: "Collector of indie gems and long co-op nights.".into(),
-        location: "Earth".into(),
+        summary: summary.into(),
+        location: "Seattle, Washington, United States".into(),
         member_since: Some(now - 9 * 31_536_000),
+        background_full: true,
+        mini_background: Some(model::art::hero(1145360)),
+        theme: "Midnight".into(),
         ..Default::default()
     }));
     events.push(Event::Wallet { balance: 1234, currency: 1, pending: 250 });
@@ -479,6 +483,10 @@ fn inventory(me: u64, now: u64) -> Vec<Event> {
     });
     // Your badges, reviews and groups (`--page=profile --arg=<id>/reviews`).
     let me = 76561197960265729;
+    out.push(Event::ProfileEdit(Ok(demo_profile_edit())));
+    out.push(Event::Locations { country: None, state: None, result: Ok(demo_locations(None, None)) });
+    out.push(Event::Locations { country: Some("US".into()), state: None, result: Ok(demo_locations(Some("US"), None)) });
+    out.push(Event::Locations { country: Some("US".into()), state: Some("WA".into()), result: Ok(demo_locations(Some("US"), Some("WA"))) });
     let badge = |title: &str, detail: &str, unlocked: &str| model::Badge { title: title.into(), detail: detail.into(), unlocked: unlocked.into(), ..Default::default() };
     out.push(Event::Badges {
         steam_id: me,
@@ -489,9 +497,9 @@ fn inventory(me: u64, now: u64) -> Vec<Event> {
             progress: 0.6,
             items: vec![
                 model::Badge { url: format!("https://steamcommunity.com/profiles/{me}/gamecards/413150/"), ..badge("Stardew Valley Badge", "Level 2, 200 XP", "Unlocked 9 Mar, 2023") },
-                badge("Years of Service", "300 XP", "Unlocked 3 Feb, 2019"),
-                badge("Community Leader", "100 XP", "Unlocked 14 Jun, 2021"),
-                badge("Game Collector", "250 XP", "Unlocked 2 Jan, 2024"),
+                model::Badge { url: format!("https://steamcommunity.com/profiles/{me}/badges/1"), ..badge("Years of Service", "300 XP", "Unlocked 3 Feb, 2019") },
+                model::Badge { url: format!("https://steamcommunity.com/profiles/{me}/badges/2"), ..badge("Community Leader", "100 XP", "Unlocked 14 Jun, 2021") },
+                model::Badge { url: format!("https://steamcommunity.com/profiles/{me}/badges/13"), ..badge("Game Collector", "250 XP", "Unlocked 2 Jan, 2024") },
             ],
         }),
     });
@@ -533,4 +541,324 @@ fn inventory(me: u64, now: u64) -> Vec<Event> {
     let group = |name: &str, members: &str, online: &str| model::UserGroup { name: name.into(), url: "https://steamcommunity.com/groups/".into(), members: members.into(), online: online.into(), avatar: None };
     out.push(Event::Groups { steam_id: me, result: Ok(vec![group("Aurora Testers", "1,204 Members", "88 Online"), group("Cozy Farmers", "52,310 Members", "3,021 Online")]) });
     out
+}
+
+fn demo_profile_edit() -> model::ProfileEdit {
+    let item = |base_id: u64, i: usize, app: u32, name: &str, game: &str, image: String, large: String| model::ProfileItemChoice {
+        id: base_id + i as u64,
+        name: name.into(),
+        image,
+        large,
+        app_id: app,
+        app_name: game.into(),
+        ..Default::default()
+    };
+    model::ProfileEdit {
+        persona_name: "You".into(),
+        real_name: "Demo Player".into(),
+        custom_url: "demo-player".into(),
+        summary: "Collector of indie gems and long co-op nights.\n\nCurrently: replaying Hades on the hardest heat, slowly finishing Stardew Valley's community center, and trying every Portal 2 workshop map my friends send me.\n\nAdd me if you want to play co-op, trade cards or just chat about games. I'm usually online in the evenings.".into(),
+        country: "US".into(),
+        state: "WA".into(),
+        city: "47692".into(),
+        location_text: "Seattle, Washington, United States".into(),
+        privacy: model::ProfilePrivacy { profile: 3, inventory: 3, gifts: 1, games: 3, playtime: 1, friends: 2, comments: 1 },
+        themes: ["Summer", "Midnight", "Steel", "Cosmic", "DarkMode"]
+            .iter()
+            .map(|n| (n.to_string(), format!("#ProfileTheme_{n}")))
+            .collect(),
+        theme: "Midnight".into(),
+        backgrounds: [
+            (1145360, "Hades Underworld", "Hades"),
+            (413150, "Pelican Town", "Stardew Valley"),
+            (620, "Aperture Labs", "Portal 2"),
+            (440, "Mann Co. Workshop", "Team Fortress 2"),
+            (570, "Dire Ancient", "Dota 2"),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, (app, name, game))| item(9100, i, *app, name, game, model::art::header(*app), model::art::hero(*app)))
+        .collect(),
+        mini_backgrounds: [
+            (1145360, "Elysium Fields", "Hades"),
+            (413150, "Starry Farm", "Stardew Valley"),
+            (730, "Dust II Dawn", "Counter-Strike 2"),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, (app, name, game))| item(9200, i, *app, name, game, model::art::header(*app), model::art::hero(*app)))
+        .collect(),
+        frames: [
+            (1145360, "Underworld Flame", "Hades"),
+            (620, "Aperture Portal", "Portal 2"),
+            (570, "Aegis Crest", "Dota 2"),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, (app, name, game))| item(9400, i, *app, name, game, model::art::capsule(*app), String::new()))
+        .collect(),
+        animated_avatars: [
+            (413150, "Junimo Hop", "Stardew Valley"),
+            (1145360, "Zagreus", "Hades"),
+            (620, "Turret Blink", "Portal 2"),
+            (440, "Heavy Grin", "Team Fortress 2"),
+            (570, "Roshan Roar", "Dota 2"),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, (app, name, game))| item(9300, i, *app, name, game, model::art::capsule(*app), String::new()))
+        .collect(),
+        equipped: [9100, 9200, 0, 0],
+        background_full: true,
+        favorite_badge: 2,
+        ..Default::default()
+    }
+}
+
+fn demo_locations(country: Option<&str>, state: Option<&str>) -> Vec<(String, String)> {
+    match (country, state) {
+        (None, None) => vec![
+            ("US".into(), "United States".into()),
+            ("CA".into(), "Canada".into()),
+            ("GB".into(), "United Kingdom".into()),
+            ("FR".into(), "France".into()),
+            ("DE".into(), "Germany".into()),
+            ("ES".into(), "Spain".into()),
+            ("JP".into(), "Japan".into()),
+            ("KZ".into(), "Kazakhstan".into()),
+        ],
+        (Some("US"), None) => vec![("CA".into(), "California".into()), ("NY".into(), "New York".into()), ("WA".into(), "Washington".into())],
+        (Some("CA"), None) => vec![("BC".into(), "British Columbia".into()), ("ON".into(), "Ontario".into())],
+        (Some("KZ"), None) => vec![("02".into(), "Almaty".into()), ("01".into(), "Astana".into())],
+        (Some("US"), Some("WA")) => vec![("47692".into(), "Seattle".into()), ("47634".into(), "Bellevue".into())],
+        (Some("US"), Some("CA")) => vec![("4515".into(), "Los Angeles".into()), ("4801".into(), "San Francisco".into())],
+        (Some("US"), Some("NY")) => vec![("31400".into(), "New York".into())],
+        (Some("CA"), Some("BC")) => vec![("8432".into(), "Vancouver".into())],
+        (Some("CA"), Some("ON")) => vec![("8390".into(), "Toronto".into())],
+        (Some("KZ"), Some("02")) => vec![("1234".into(), "Almaty".into())],
+        _ => Vec::new(),
+    }
+}
+
+fn format_demo_location(country: &str, state: &str, city: &str) -> String {
+    let country_name = demo_locations(None, None).into_iter().find(|(c, _)| c == country).map(|(_, n)| n).unwrap_or_else(|| country.to_string());
+    let state_name = if country.is_empty() || state.is_empty() {
+        String::new()
+    } else {
+        demo_locations(Some(country), None).into_iter().find(|(c, _)| c == state).map(|(_, n)| n).unwrap_or_else(|| state.to_string())
+    };
+    let city_name = if country.is_empty() || state.is_empty() || city.is_empty() {
+        String::new()
+    } else {
+        demo_locations(Some(country), Some(state)).into_iter().find(|(c, _)| c == city).map(|(_, n)| n).unwrap_or_else(|| city.to_string())
+    };
+    [city_name, state_name, country_name].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ")
+}
+
+/// Start an offline interactive `--demo` session that seeds demo state and
+/// handles profile-edit commands in memory without touching Steam.
+pub fn spawn(rt: &tokio::runtime::Handle, local: &local::LocalState, sink: client::Sink) -> client::Client {
+    use client::Command;
+    let initial = events(local);
+    let mut demo_profile = initial
+        .iter()
+        .find_map(|e| match e {
+            Event::Profile(p) => Some(p.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let mut demo_edit = demo_profile_edit();
+    for e in initial {
+        sink(e);
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    rt.spawn(async move {
+        let me = demo_profile.steam_id;
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                Command::LoadProfileEdit { .. } => sink(Event::ProfileEdit(Ok(demo_edit.clone()))),
+                Command::LoadProfile { steam_id } if steam_id == me => sink(Event::Profile(demo_profile.clone())),
+                Command::LoadLocations { country, state } => {
+                    let list = demo_locations(country.as_deref(), state.as_deref());
+                    sink(Event::Locations { country, state, result: Ok(list) });
+                }
+                Command::SaveProfileInfo(e) => {
+                    let name_changed = demo_edit.persona_name != e.persona_name;
+                    demo_edit.persona_name = e.persona_name;
+                    demo_edit.real_name = e.real_name;
+                    demo_edit.custom_url = e.custom_url;
+                    demo_edit.country = e.country;
+                    demo_edit.state = e.state;
+                    demo_edit.city = e.city;
+                    demo_edit.summary = e.summary;
+                    demo_edit.hide_awards = e.hide_awards;
+                    demo_edit.location_text = format_demo_location(&demo_edit.country, &demo_edit.state, &demo_edit.city);
+
+                    demo_profile.real_name = demo_edit.real_name.clone();
+                    demo_profile.summary = demo_edit.summary.clone();
+                    demo_profile.location = demo_edit.location_text.clone();
+                    if name_changed {
+                        sink(Event::AccountInfo { persona_name: demo_edit.persona_name.clone(), country: "US".into() });
+                    }
+                    sink(Event::Profile(demo_profile.clone()));
+                    sink(Event::ProfileEdit(Ok(demo_edit.clone())));
+                    sink(Event::ProfileSaved { what: model::ProfileSave::Info, result: Ok(()) });
+                }
+                Command::SaveProfilePrivacy(p) => {
+                    demo_edit.privacy = p;
+                    sink(Event::ProfileEdit(Ok(demo_edit.clone())));
+                    sink(Event::ProfileSaved { what: model::ProfileSave::Privacy, result: Ok(()) });
+                }
+                Command::UploadAvatar { path } => {
+                    let result = client::profile_edit::read_avatar_file(&path).map(|_| ());
+                    sink(Event::ProfileSaved { what: model::ProfileSave::Avatar, result });
+                }
+                Command::EquipProfileItem { kind, id } => {
+                    if let Some(slot) = demo_edit.equipped.get_mut(kind as usize) {
+                        *slot = id;
+                    }
+                    let find_url = |list: &[model::ProfileItemChoice], large: bool| {
+                        list.iter()
+                            .find(|i| i.id == id)
+                            .map(|i| if large && !i.large.is_empty() { i.large.clone() } else { i.image.clone() })
+                    };
+                    match kind {
+                        0 => demo_profile.background = find_url(&demo_edit.backgrounds, true),
+                        1 => demo_profile.mini_background = find_url(&demo_edit.mini_backgrounds, true),
+                        2 => demo_profile.avatar_frame = find_url(&demo_edit.frames, false),
+                        3 => demo_profile.animated_avatar = find_url(&demo_edit.animated_avatars, false),
+                        _ => {}
+                    }
+                    sink(Event::Profile(demo_profile.clone()));
+                    sink(Event::ProfileEdit(Ok(demo_edit.clone())));
+                    sink(Event::ProfileSaved { what: model::ProfileSave::Item, result: Ok(()) });
+                }
+                Command::SetBackgroundFullScreen { id, full } => {
+                    if demo_edit.equipped[0] == id {
+                        demo_edit.background_full = full;
+                        demo_profile.background_full = full;
+                    }
+                    sink(Event::Profile(demo_profile.clone()));
+                    sink(Event::ProfileEdit(Ok(demo_edit.clone())));
+                    sink(Event::ProfileSaved { what: model::ProfileSave::BackgroundFlags, result: Ok(()) });
+                }
+                Command::SetFavoriteBadge { badge } => {
+                    demo_edit.favorite_badge = badge;
+                    sink(Event::ProfileEdit(Ok(demo_edit.clone())));
+                    sink(Event::ProfileSaved { what: model::ProfileSave::Badge, result: Ok(()) });
+                }
+                Command::SetProfileTheme(theme) => {
+                    demo_edit.theme = theme.clone();
+                    demo_profile.theme = theme;
+                    sink(Event::Profile(demo_profile.clone()));
+                    sink(Event::ProfileEdit(Ok(demo_edit.clone())));
+                    sink(Event::ProfileSaved { what: model::ProfileSave::Theme, result: Ok(()) });
+                }
+                _ => {}
+            }
+        }
+    });
+    client::Client::from_sender(tx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn demo_spawn_handles_profile_edit_commands() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let sink: client::Sink = std::sync::Arc::new(move |e| {
+                let _ = tx.send(e);
+            });
+            let client = spawn(rt.handle(), &local::LocalState::default(), sink);
+
+            async fn recv_until(
+                rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+                expected: model::ProfileSave,
+            ) -> Vec<Event> {
+                let mut out = Vec::new();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while let Some(ev) = rx.recv().await {
+                        let done = matches!(&ev, Event::ProfileSaved { what, result: Ok(()) } if *what == expected);
+                        out.push(ev);
+                        if done {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("timed out waiting for demo ProfileSaved event");
+                out
+            }
+
+            // Drain initial seed events before testing command round-trips.
+            let mut initial_has_profile = false;
+            while let Ok(ev) = rx.try_recv() {
+                if matches!(ev, Event::Profile(_)) {
+                    initial_has_profile = true;
+                }
+            }
+            assert!(initial_has_profile);
+
+            client.send(client::Command::LoadProfileEdit { language: "english".into() });
+            let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap().unwrap();
+            let mut edit = match ev {
+                Event::ProfileEdit(Ok(e)) => e,
+                other => panic!("expected ProfileEdit, got {other:?}"),
+            };
+            assert_eq!(edit.persona_name, "You");
+            assert_eq!(edit.theme, "Midnight");
+
+            client.send(client::Command::LoadLocations { country: Some("US".into()), state: Some("WA".into()) });
+            let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap().unwrap();
+            match ev {
+                Event::Locations { country, state, result: Ok(list) } => {
+                    assert_eq!(country.as_deref(), Some("US"));
+                    assert_eq!(state.as_deref(), Some("WA"));
+                    assert!(list.iter().any(|(c, n)| c == "47692" && n == "Seattle"));
+                }
+                other => panic!("expected Locations, got {other:?}"),
+            }
+
+            edit.persona_name = "AuroraTester".into();
+            edit.real_name = "Alice".into();
+            edit.summary = "Updated bio".into();
+            edit.country = "CA".into();
+            edit.state = "BC".into();
+            edit.city = "8432".into();
+            client.send(client::Command::SaveProfileInfo(Box::new(edit.clone())));
+            let info_events = recv_until(&mut rx, model::ProfileSave::Info).await;
+            assert!(info_events.iter().any(|e| matches!(e, Event::AccountInfo { persona_name, .. } if persona_name == "AuroraTester")));
+            assert!(info_events.iter().any(|e| matches!(e, Event::Profile(p) if p.real_name == "Alice" && p.summary == "Updated bio" && p.location == "Vancouver, British Columbia, Canada")));
+            assert!(info_events.iter().any(|e| matches!(e, Event::ProfileEdit(Ok(pe)) if pe.persona_name == "AuroraTester" && pe.location_text == "Vancouver, British Columbia, Canada")));
+
+            let new_privacy = model::ProfilePrivacy { profile: 2, inventory: 2, gifts: 0, games: 2, playtime: 0, friends: 1, comments: 2 };
+            client.send(client::Command::SaveProfilePrivacy(new_privacy.clone()));
+            let priv_events = recv_until(&mut rx, model::ProfileSave::Privacy).await;
+            assert!(priv_events.iter().any(|e| matches!(e, Event::ProfileEdit(Ok(pe)) if pe.privacy == new_privacy)));
+
+            client.send(client::Command::EquipProfileItem { kind: 0, id: 9101 });
+            let item_events = recv_until(&mut rx, model::ProfileSave::Item).await;
+            assert!(item_events.iter().any(|e| matches!(e, Event::ProfileEdit(Ok(pe)) if pe.equipped[0] == 9101)));
+            assert!(item_events.iter().any(|e| matches!(e, Event::Profile(p) if p.background.as_deref().is_some_and(|u| u.contains("413150")))));
+
+            client.send(client::Command::SetBackgroundFullScreen { id: 9101, full: false });
+            let bg_events = recv_until(&mut rx, model::ProfileSave::BackgroundFlags).await;
+            assert!(bg_events.iter().any(|e| matches!(e, Event::Profile(p) if !p.background_full)));
+            assert!(bg_events.iter().any(|e| matches!(e, Event::ProfileEdit(Ok(pe)) if !pe.background_full)));
+
+            client.send(client::Command::SetFavoriteBadge { badge: 13 });
+            let badge_events = recv_until(&mut rx, model::ProfileSave::Badge).await;
+            assert!(badge_events.iter().any(|e| matches!(e, Event::ProfileEdit(Ok(pe)) if pe.favorite_badge == 13)));
+
+            client.send(client::Command::SetProfileTheme("Cosmic".into()));
+            let theme_events = recv_until(&mut rx, model::ProfileSave::Theme).await;
+            assert!(theme_events.iter().any(|e| matches!(e, Event::Profile(p) if p.theme == "Cosmic")));
+            assert!(theme_events.iter().any(|e| matches!(e, Event::ProfileEdit(Ok(pe)) if pe.theme == "Cosmic")));
+        });
+    }
 }
