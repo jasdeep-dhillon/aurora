@@ -14,6 +14,7 @@
 //! one is due, so a paused player costs nothing.
 
 pub mod hls;
+pub mod live;
 pub mod mp4;
 pub mod widget;
 mod yuv;

@@ -52,6 +52,14 @@ pub enum Request {
     Vote { file_id: u64, up: bool },
     /// Add an item or guide to your favorites, or take it out.
     Favorite { app_id: AppId, file_id: u64, add: bool },
+    /// Your friends' activity feed (`start` = 0 for the newest, else the
+    /// `next` time of the page before). Read-only (madonchik123 PR #101).
+    Activity { start: u64, language: String },
+    /// Steam's community-wide feed of popular or recent posts (madonchik123 PR #101).
+    Explore(crate::feed::ExploreQuery),
+    /// Post a status for your friends (public to them, under your name),
+    /// tagged with a game (`app_id` 0: none). The user starts it (madonchik123 PR #107).
+    PostStatus { text: String, app_id: AppId },
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +74,9 @@ pub enum Response {
     Achievements { steam_id: SteamId, app_id: AppId, result: Result<Vec<model::Achievement>, String> },
     Voted { file_id: u64, up: bool, result: Result<(), String> },
     Favorited { file_id: u64, add: bool, result: Result<(), String> },
+    Activity { start: u64, result: Result<crate::feed::Feed, String> },
+    Explore { key: String, result: Result<crate::feed::Feed, String> },
+    StatusPosted { result: Result<(), String> },
 }
 
 /// Kinds of shared files a game can have.
@@ -308,6 +319,10 @@ pub struct Cache {
     pub achievements: HashMap<(SteamId, AppId), Result<Vec<model::Achievement>, String>>,
     /// Favorites you changed this session.
     pub favorites: HashMap<u64, bool>,
+    /// Pages of your friends' activity by their start time.
+    pub activity: HashMap<u64, Result<crate::feed::Feed, String>>,
+    /// Pages of the community-wide feed by [`crate::feed::ExploreQuery::key`].
+    pub explore: HashMap<String, Result<crate::feed::Feed, String>>,
 }
 
 impl Cache {
@@ -355,6 +370,18 @@ impl Cache {
             }
             Response::Favorited { file_id, add, result: Ok(()) } => {
                 self.favorites.insert(*file_id, *add);
+            }
+            Response::Activity { start, result } => {
+                self.activity.insert(*start, result.clone());
+            }
+            Response::Explore { key, result } => {
+                self.explore.insert(key.clone(), result.clone());
+            }
+            Response::StatusPosted { result } => {
+                // The feed changed: read it again.
+                if result.is_ok() {
+                    self.activity.clear();
+                }
             }
             Response::Voted { .. } | Response::Favorited { .. } => {}
         }
@@ -522,6 +549,44 @@ pub(crate) async fn handle(conn: Connection, me: SteamId, web: Result<Arc<Web>, 
                 Err(e) => Err(e),
             };
             out(Response::Favorited { file_id, add, result });
+        }
+        Request::Activity { start, language } => {
+            let result = match web {
+                Ok(w) => crate::feed::activity(&w, me, start, &language).await,
+                Err(e) => Err(e),
+            };
+            if let Ok(f) = &result {
+                want_personas(&conn, f.posts.iter().map(|p| p.author).collect());
+            }
+            out(Response::Activity { start, result });
+        }
+        Request::Explore(q) => {
+            let key = q.key();
+            let mut result = crate::feed::explore(&web_or_anon, &q).await;
+            // Ask Steam about the shared files: the page leaves most authors
+            // out, and only its label (in the reader's language) tells a
+            // screenshot from artwork.
+            if let Ok(f) = &mut result {
+                let ids: Vec<u64> = f.posts.iter().filter(|p| p.file_id != 0).map(|p| p.file_id).collect();
+                if !ids.is_empty() {
+                    if let Ok(found) = details(&conn, ids, &q.language, false).await {
+                        for d in found.iter().filter(|d| d.result() == 1) {
+                            for p in f.posts.iter_mut().filter(|p| p.file_id == d.publishedfileid()) {
+                                crate::feed::fill_from_details(p, d.creator(), d.file_type(), d.title(), d.time_created() as u64);
+                            }
+                        }
+                    }
+                }
+                want_personas(&conn, f.posts.iter().map(|p| p.author).collect());
+            }
+            out(Response::Explore { key, result });
+        }
+        Request::PostStatus { text, app_id } => {
+            let result = match web {
+                Ok(w) => crate::feed::post_status(&w, me, &text, app_id).await,
+                Err(e) => Err(e),
+            };
+            out(Response::StatusPosted { result });
         }
     }
 }

@@ -47,7 +47,7 @@ impl Extension for Community {
     }
 
     fn pages(&self) -> Vec<PageSpec> {
-        vec![PageSpec::new("community", "Community", icons::USERS).main().order(30)]
+        vec![PageSpec::new("community", "Friends", icons::USERS).hidden().order(35)]
     }
 
     fn on_navigate(&mut self, _page: &str, arg: Option<&str>) {
@@ -483,6 +483,10 @@ impl Community {
                         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                             self.tab = tab;
                         }
+                    }
+                    ui.add_space(14.0);
+                    if w::button(ui, t, Some(icons::LIGHTNING), t!("Friends activity"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                        ctx.navigate(super::community_home::PAGE, None);
                     }
                 });
                 ui.add_space(24.0);
