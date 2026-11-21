@@ -187,7 +187,11 @@ struct BroadcastModal {
 /// Extract the broadcaster SteamID64 from a Steam broadcast URL
 /// (`https://steamcommunity.com/broadcast/watch/7656119...`).
 fn broadcast_steam_id(url: &str) -> Option<u64> {
-    let rest = url.split("/broadcast/watch/").nth(1)?;
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    if parsed.scheme() != "https" || !parsed.host_str().is_some_and(|h| h.eq_ignore_ascii_case("steamcommunity.com")) {
+        return None;
+    }
+    let rest = parsed.path().strip_prefix("/broadcast/watch/")?;
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     let id: u64 = digits.parse().ok()?;
     (id > 0).then_some(id)
@@ -218,16 +222,14 @@ async fn fetch_broadcast_stream(steam_id: u64) -> Result<BroadcastStream, String
             let status = v.get("success").and_then(|s| s.as_str()).unwrap_or("offline");
             format!("Broadcast stream unavailable ({status})")
         })?;
-    if crate::links::validate_http_url(hls).is_none() {
-        return Err("Steam returned an unsupported broadcast URL.".into());
-    }
+    let hls = video::live::validate_live_hls_url(hls)?;
     let title = v.get("title").and_then(|s| s.as_str()).unwrap_or("").to_string();
     let viewers = v
         .get("num_viewers")
         .or_else(|| v.get("num_view"))
         .and_then(|n| n.as_u64().or_else(|| n.as_str().and_then(|s| s.parse().ok())))
         .unwrap_or(0);
-    Ok(BroadcastStream { hls_url: hls.to_string(), title, viewers })
+    Ok(BroadcastStream { hls_url: hls, title, viewers })
 }
 
 /// The "post a status" box at the top of your friends' activity, like
@@ -1409,5 +1411,13 @@ mod tests {
             .map(|p| p.id)
             .collect();
         assert_eq!(main_ids, vec!["store", "library", PAGE, "profile"]);
+    }
+
+    #[test]
+    fn broadcast_steam_id_only_accepts_steamcommunity_https() {
+        assert_eq!(broadcast_steam_id("https://steamcommunity.com/broadcast/watch/76561198000000001"), Some(76561198000000001));
+        assert_eq!(broadcast_steam_id("http://steamcommunity.com/broadcast/watch/76561198000000001"), None);
+        assert_eq!(broadcast_steam_id("https://evil.example/broadcast/watch/76561198000000001"), None);
+        assert_eq!(broadcast_steam_id("https://steamcommunity.com.evil.example/broadcast/watch/76561198000000001"), None);
     }
 }

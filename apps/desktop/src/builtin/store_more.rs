@@ -5,7 +5,7 @@
 
 use super::{Load, Shared, Store, View};
 use client::Command;
-use egui::{Align, Align2, Color32, Layout, Margin, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align, Align2, Color32, Layout, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use extensions::Ctx;
 use i18n::t;
 use model::{AppId, SteamId};

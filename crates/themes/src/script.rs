@@ -23,6 +23,19 @@ pub const MAX_STRING_SIZE: usize = 8192;
 pub const MAX_ARRAY_SIZE: usize = 512;
 /// Maximum map entries in Rhai.
 pub const MAX_MAP_SIZE: usize = 256;
+/// Maximum `theme.rhai` source size read from disk (256 KiB).
+pub const MAX_SCRIPT_BYTES: u64 = 256 * 1024;
+const MAX_COORD: f32 = 16_384.0;
+const MAX_RADIUS: f32 = 4_096.0;
+const MAX_STROKE: f32 = 128.0;
+
+fn clamp_coord(v: f32) -> f32 {
+    if v.is_finite() { v.clamp(-MAX_COORD, MAX_COORD) } else { 0.0 }
+}
+
+fn clamp_extent(v: f32) -> f32 {
+    if v.is_finite() { v.clamp(0.0, MAX_COORD) } else { 0.0 }
+}
 
 /// Drawing command emitted by a `theme.rhai` visual hook.
 ///
@@ -91,17 +104,18 @@ pub fn paint_draw_cmds(painter: &Painter, rect: Rect, cmds: &[DrawCmd]) {
     for cmd in cmds {
         match cmd {
             DrawCmd::Rect { x, y, w, h, radius, color } => {
-                let r = Rect::from_min_size(origin + Vec2::new(*x, *y), Vec2::new(*w, *h));
-                let cr = CornerRadius::same(radius.round().clamp(0.0, 255.0) as u8);
-                p.rect_filled(r, cr, *color);
+                let r = Rect::from_min_size(origin + Vec2::new(clamp_coord(*x), clamp_coord(*y)), Vec2::new(clamp_extent(*w), clamp_extent(*h)));
+                let rad = if radius.is_finite() { radius.round().clamp(0.0, 255.0) as u8 } else { 0 };
+                p.rect_filled(r, CornerRadius::same(rad), *color);
             }
             DrawCmd::RectStroke { x, y, w, h, radius, width, color } => {
-                let r = Rect::from_min_size(origin + Vec2::new(*x, *y), Vec2::new(*w, *h));
-                let cr = CornerRadius::same(radius.round().clamp(0.0, 255.0) as u8);
-                p.rect_stroke(r, cr, Stroke::new(width.max(0.0), *color), StrokeKind::Inside);
+                let r = Rect::from_min_size(origin + Vec2::new(clamp_coord(*x), clamp_coord(*y)), Vec2::new(clamp_extent(*w), clamp_extent(*h)));
+                let rad = if radius.is_finite() { radius.round().clamp(0.0, 255.0) as u8 } else { 0 };
+                let sw = if width.is_finite() { width.clamp(0.0, MAX_STROKE) } else { 0.0 };
+                p.rect_stroke(r, CornerRadius::same(rad), Stroke::new(sw, *color), StrokeKind::Inside);
             }
             DrawCmd::Gradient { x, y, w, h, from, to, horizontal } => {
-                let r = Rect::from_min_size(origin + Vec2::new(*x, *y), Vec2::new(*w, *h));
+                let r = Rect::from_min_size(origin + Vec2::new(clamp_coord(*x), clamp_coord(*y)), Vec2::new(clamp_extent(*w), clamp_extent(*h)));
                 let (tl, tr, br, bl) = if *horizontal {
                     (*from, *to, *to, *from)
                 } else {
@@ -119,20 +133,30 @@ pub fn paint_draw_cmds(painter: &Painter, rect: Rect, cmds: &[DrawCmd]) {
                 p.add(Shape::mesh(mesh));
             }
             DrawCmd::Circle { cx, cy, r, color } => {
-                p.circle_filled(origin + Vec2::new(*cx, *cy), r.max(0.0), *color);
+                let rad = if r.is_finite() { r.clamp(0.0, MAX_RADIUS) } else { 0.0 };
+                if rad > 0.0 {
+                    p.circle_filled(origin + Vec2::new(clamp_coord(*cx), clamp_coord(*cy)), rad, *color);
+                }
             }
             DrawCmd::Line { x1, y1, x2, y2, width, color } => {
-                p.line_segment(
-                    [origin + Vec2::new(*x1, *y1), origin + Vec2::new(*x2, *y2)],
-                    Stroke::new(width.max(0.0), *color),
-                );
+                let sw = if width.is_finite() { width.clamp(0.0, MAX_STROKE) } else { 0.0 };
+                if sw > 0.0 {
+                    p.line_segment(
+                        [
+                            origin + Vec2::new(clamp_coord(*x1), clamp_coord(*y1)),
+                            origin + Vec2::new(clamp_coord(*x2), clamp_coord(*y2)),
+                        ],
+                        Stroke::new(sw, *color),
+                    );
+                }
             }
             DrawCmd::Text { x, y, text, size, color } => {
+                let sz = if size.is_finite() { size.clamp(6.0, 128.0) } else { 14.0 };
                 p.text(
-                    origin + Vec2::new(*x, *y),
+                    origin + Vec2::new(clamp_coord(*x), clamp_coord(*y)),
                     Align2::LEFT_TOP,
                     text,
-                    FontId::proportional(size.clamp(6.0, 128.0)),
+                    FontId::proportional(sz),
                     *color,
                 );
             }
@@ -189,8 +213,15 @@ impl ThemeScript {
         })
     }
 
-    /// Load and compile a `theme.rhai` file from disk.
+    /// Load and compile a `theme.rhai` file from disk (rejecting symlinks and files > 256 KiB).
     pub fn from_file(path: &Path) -> Result<Self, String> {
+        let meta = std::fs::symlink_metadata(path).map_err(|e| format!("read error: {e}"))?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err("read error: refusing symlink or non-regular file".into());
+        }
+        if meta.len() > MAX_SCRIPT_BYTES {
+            return Err(format!("read error: theme.rhai exceeds {} KiB limit", MAX_SCRIPT_BYTES / 1024));
+        }
         let src = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
         Self::compile(&src)
     }
@@ -391,13 +422,14 @@ fn get_f32(map: &Map, key: &str, default: f32) -> f32 {
     let Some(v) = map.get(key) else {
         return default;
     };
-    if let Ok(f) = v.as_float() {
+    let out = if let Ok(f) = v.as_float() {
         f as f32
     } else if let Ok(i) = v.as_int() {
         i as f32
     } else {
-        default
-    }
+        return default;
+    };
+    if out.is_finite() { out } else { default }
 }
 
 fn get_bool(map: &Map, key: &str, default: bool) -> bool {

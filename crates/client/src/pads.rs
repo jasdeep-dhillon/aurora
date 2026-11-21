@@ -1082,15 +1082,27 @@ mod platform {
     /// Trigger a short rumble pulse directly via Linux evdev `EVIOCSFF` + `EV_FF`
     /// as a fallback when SDL3 rumble returns false (common on Bluetooth Xbox pads).
     fn evdev_rumble_fallback(vendor: u16, product: u16) {
+        static RUMBLE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if RUMBLE_BUSY.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let pads = discover_sysfs_pads(Path::new("/sys/class/input"), Path::new("/dev/input"));
         let target = pads
             .iter()
             .find(|p| (vendor == 0 || p.vendor_id == vendor) && (product == 0 || p.product_id == product))
             .or_else(|| pads.first());
         let Some(ev_path) = target.and_then(|p| p.event_node.clone()) else {
+            RUMBLE_BUSY.store(false, Ordering::Release);
             return;
         };
-        let _ = std::thread::Builder::new().name("pad-ff".into()).spawn(move || {
+        if std::thread::Builder::new().name("pad-ff".into()).spawn(move || {
+            struct ClearGuard;
+            impl Drop for ClearGuard {
+                fn drop(&mut self) {
+                    RUMBLE_BUSY.store(false, Ordering::Release);
+                }
+            }
+            let _guard = ClearGuard;
             use std::io::Write;
             let Ok(mut f) = File::options().read(true).write(true).open(&ev_path) else {
                 tracing::debug!("controllers: evdev rumble cannot open {} rw", ev_path.display());
@@ -1144,7 +1156,9 @@ mod platform {
             let _ = f.write_all(bytes);
             std::thread::sleep(Duration::from_millis(450));
             let _ = unsafe { libc::ioctl(f.as_raw_fd(), eviocrmff, eff.id as libc::c_int) };
-        });
+        }).is_err() {
+            RUMBLE_BUSY.store(false, Ordering::Release);
+        }
     }
 
     fn run_sdl_linux(sdl: &'static Sdl) {

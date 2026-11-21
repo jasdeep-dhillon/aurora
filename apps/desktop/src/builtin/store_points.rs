@@ -5,7 +5,7 @@
 //! Clicking an item opens Steam's Points Shop page in the browser for redeeming.
 
 use super::{Load, Shared, Store, View};
-use egui::{Align, Align2, CornerRadius, Layout, Margin, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, Align2, CornerRadius, Layout, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use extensions::Ctx;
 use i18n::t;
 use model::AppId;
