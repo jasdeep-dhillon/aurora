@@ -502,7 +502,7 @@ fn map_font(path: &std::path::Path) -> Option<&'static [u8]> {
 }
 
 /// Basic header check before handing a system font to epaint (which panics on corrupt files).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn valid_font_header(bytes: &[u8], index: u32) -> bool {
     if bytes.len() < 12 {
         return false;
