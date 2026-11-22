@@ -527,6 +527,12 @@ impl SteamApp {
                         self.local = l;
                     }
                 }
+                Event::ControllerLayoutRoute { app_id, enabled } => {
+                    self.overlay.set_controller_route(*app_id, *enabled);
+                }
+                Event::ControllerLayoutApplied { app_id, source } => {
+                    self.overlay.set_controller_applied(*app_id, source.clone());
+                }
                 Event::MoveFinished { result: Ok(_), .. } | Event::RestoreFinished { result: Ok(_), .. } => {
                     if let Ok(l) = local::load(Some(self.local.steam_root.clone())) {
                         self.local = l;

@@ -11,8 +11,10 @@
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
+use crate::legacy::{self, Sample};
 use crate::pads_shm::{self, GUIDE, MappedShm, Shared, State};
 use std::collections::VecDeque;
+use vdf::controller::LegacyMap;
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -66,6 +68,18 @@ unsafe extern "system" {
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
     fn RtlCaptureStackBackTrace(skip: u32, count: u32, frames: *mut *mut c_void, hash: *mut u32) -> u16;
 }
+#[cfg(not(windows))]
+mod non_windows {
+    #![allow(non_snake_case)]
+    use std::ffi::c_void;
+
+    pub unsafe fn LoadLibraryW(_: *const u16) -> *mut c_void { std::ptr::null_mut() }
+    pub unsafe fn GetModuleHandleW(_: *const u16) -> *mut c_void { std::ptr::null_mut() }
+    pub unsafe fn GetModuleFileNameW(_: *mut c_void, _: *mut u16, _: u32) -> u32 { 0 }
+    pub unsafe fn GetProcAddress(_: *mut c_void, _: *const u8) -> *mut c_void { std::ptr::null_mut() }
+}
+#[cfg(not(windows))]
+use non_windows::*;
 
 const ERROR_SUCCESS: u32 = 0;
 const NOT_CONNECTED: u32 = 1167;
@@ -379,6 +393,7 @@ pub struct SteamInputPad {
     pub pad: Pad,
     pub calibrated: bool,
     pub family: u8,
+    pub paddles: u8,
 }
 
 /// The four pads as XInput / games see them.
@@ -418,7 +433,7 @@ fn steam_input_pads_with(
     let xbox_on = mask & pads_shm::FAMILY_XBOX != 0;
     let mut out: [Option<SteamInputPad>; 4] = real.map(|p| {
         p.filter(|_| xbox_on)
-            .map(|pad| SteamInputPad { pad, calibrated: false, family: pads_shm::SLOT_FAMILY_XBOX })
+            .map(|pad| SteamInputPad { pad, calibrated: false, family: pads_shm::SLOT_FAMILY_XBOX, paddles: 0 })
     });
     if let Some(s) = shm {
         let active_shared: Vec<usize> = (0..pads_shm::SLOTS)
@@ -429,7 +444,7 @@ fn steam_input_pads_with(
             if let Some(k) = k
                 && let Some(st) = s.slots[*k].read()
             {
-                out[i] = Some(SteamInputPad { pad: Pad::from(st), calibrated: st.calibrated, family: st.family });
+                out[i] = Some(SteamInputPad { pad: Pad::from(st), calibrated: st.calibrated, family: st.family, paddles: st.paddles });
             }
         }
     }
@@ -578,6 +593,63 @@ static KEYSTROKES: LazyLock<Mutex<KeystrokeTracker>> = LazyLock::new(|| Mutex::n
 
 // ------------------------------------------------------- the game's XInput
 
+#[derive(Default)]
+struct LegacyState {
+    map: LegacyMap,
+    packets: [Option<Pad>; 4],
+    revision: u64,
+}
+
+static LEGACY: LazyLock<Mutex<LegacyState>> = LazyLock::new(|| Mutex::new(LegacyState::default()));
+
+pub(crate) fn set_legacy_map(map: LegacyMap) {
+    let mut legacy = LEGACY.lock().unwrap_or_else(|e| e.into_inner());
+    legacy.map = map;
+    legacy.revision = legacy.revision.wrapping_add(1);
+}
+
+#[cfg(windows)]
+pub(crate) fn synthetic_layout() -> (u64, LegacyMap) {
+    let state = LEGACY.lock().unwrap_or_else(|e| e.into_inner());
+    (state.revision, state.map.clone())
+}
+
+#[cfg(windows)]
+pub(crate) fn synthetic_revision() -> u64 {
+    LEGACY.lock().unwrap_or_else(|e| e.into_inner()).revision
+}
+
+#[cfg(windows)]
+pub(crate) fn synthetic_pad() -> Option<Sample> {
+    steam_input_pads().iter().enumerate().find_map(|(index, entry)| {
+        let entry = (*entry)?;
+        Some(Sample {
+            pad: entry.pad, paddles: entry.paddles,
+            gyro: motion(index).map(|(_, gyro)| gyro).unwrap_or_default(),
+        })
+    })
+}
+
+fn translated(i: usize, sample: Sample, family: u8) -> Pad {
+    if !steam_input_enabled() || !pads_shm::family_allowed(family_mask(), family) {
+        return sample.pad;
+    }
+    let mut state = LEGACY.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(previous) = state.packets.get(i).copied() else { return sample.pad };
+    if state.map.0.is_empty() && previous.is_none() {
+        return sample.pad;
+    }
+    let mut mapped = legacy::remap(sample, &state.map);
+    if let Some(previous) = previous {
+        mapped.packet = previous.packet;
+        if mapped != previous {
+            mapped.packet = mapped.packet.wrapping_add(1);
+        }
+    }
+    state.packets[i] = Some(mapped);
+    mapped
+}
+
 /// True when the immediate caller lives inside a loaded `sdl*.dll` module.
 #[cfg(windows)]
 fn caller_is_sdl() -> bool {
@@ -636,7 +708,11 @@ fn serve_get_state(i: u32, out: *mut Pad, ex: bool, real_fn: Option<GetState>, b
     note(i as usize, r == ERROR_SUCCESS);
     if r == ERROR_SUCCESS {
         if !out.is_null() {
-            let mut p = unsafe { out.read_unaligned() };
+            let raw = unsafe { out.read_unaligned() };
+            let mut p = translated(i as usize, Sample { pad: raw, ..Default::default() }, pads_shm::SLOT_FAMILY_XBOX);
+            if !ex {
+                p.buttons &= !GUIDE;
+            }
             apply_neutral_and_packet(i as usize, &mut p, crate::overlay::is_open());
             unsafe { out.write_unaligned(p) };
         }
@@ -650,7 +726,12 @@ fn serve_get_state(i: u32, out: *mut Pad, ex: bool, real_fn: Option<GetState>, b
             if !LOGGED_SERVED[i as usize].swap(true, Ordering::Relaxed) {
                 crate::log!("pads: serving shared controller on XInput slot {i} (family {})", st.family);
             }
-            let mut p = Pad::from(st);
+            let sample = Sample {
+                pad: Pad::from(st),
+                paddles: st.paddles,
+                gyro: motion(i as usize).map(|(_, gyro)| gyro).unwrap_or_default(),
+            };
+            let mut p = translated(i as usize, sample, st.family);
             if !ex {
                 p.buttons &= !GUIDE;
             }
@@ -1200,12 +1281,20 @@ fn patch_all() -> usize {
     patched
 }
 
-/// Show the app's pads to the game's own XInput. Only when the app shares
-/// pads and Steam Input is enabled (Windows; under Proton, Wine's XInput already sees every pad).
+/// Enable the launch layout worker and the game's XInput bridge (including under Proton).
+#[cfg(windows)]
 pub fn install() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        if !steam_input_enabled() || std::env::var_os(pads_shm::ENV_PADS).is_none() || XINPUT.is_none() {
+        if !steam_input_enabled() {
+            return;
+        }
+        let has_ipc = crate::ipc::target().is_some();
+        if has_ipc {
+            crate::input::load();
+            crate::synthetic_input::start();
+        }
+        if (!has_ipc && std::env::var_os(pads_shm::ENV_PADS).is_none()) || XINPUT.is_none() {
             return;
         }
         // Attempt initial SHM connection & hook pass synchronously so the very
@@ -1227,6 +1316,11 @@ pub fn install() {
             }
         });
     });
+}
+
+#[cfg(not(windows))]
+pub fn install() {
+    crate::input::load();
 }
 
 #[cfg(all(test, windows))]

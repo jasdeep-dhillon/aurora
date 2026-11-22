@@ -736,7 +736,11 @@ impl State {
             Event::OfflinePlaytime(list) => self.offline_playtime = list.iter().map(|&(a, total, pending)| (a, (total, pending))).collect(),
             Event::CloudPending(list) => self.cloud_pending = list.iter().copied().collect(),
             Event::CloudSkipped { .. } => {}
-            Event::InputConfigInspected(_) => {}
+            Event::InputConfigInspected { .. }
+            | Event::ControllerLayouts { .. }
+            | Event::ControllerLayoutDownloaded { .. }
+            | Event::ControllerLayoutRoute { .. }
+            | Event::ControllerLayoutApplied { .. } => {}
         }
     }
 

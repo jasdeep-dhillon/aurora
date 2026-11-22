@@ -4,8 +4,9 @@
 
 use super::settings::switch;
 use client::{
-    BindingChoice, BindingOrigin, Command, ConnectionKind, ControllerFamily, ControllerSettings,
-    DetectedController, InputConfigReport, PadCalibration,
+    BindingChoice, BindingOrigin, BuiltInTemplate, Command, CommunityCursor, CommunityLayout, ConnectionKind, Control,
+    ControllerFamily, ControllerSettings, DetectedController, InputConfigReport, LayoutDocument, LayoutRequest, Output,
+    PadCalibration, TemplateChoice,
 };
 use egui::{Align, Align2, CornerRadius, Layout, Margin, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use extensions::{Action, Ctx};
@@ -15,6 +16,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 use ui::{Theme, icons, widgets as w};
 
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum BindingsTab {
+    #[default]
+    Configuration,
+    Community,
+    Editor,
+}
+
 #[derive(Default)]
 pub struct ControllerPage {
     selected_controller: Option<String>,
@@ -23,24 +32,84 @@ pub struct ControllerPage {
     inspected_choice: Option<BindingChoice>,
     inspector_loading: bool,
     report: Option<InputConfigReport>,
+    tab: BindingsTab,
+    next_req_id: u64,
+    inspect_req: Option<LayoutRequest>,
+    community_app: Option<AppId>,
+    community_req: Option<LayoutRequest>,
+    community_loading: bool,
+    community_error: Option<String>,
+    community_items: Vec<CommunityLayout>,
+    community_next: Option<CommunityCursor>,
+    downloading_req: Option<(LayoutRequest, u64)>,
+    editor_app: Option<AppId>,
+    editor_doc: Option<LayoutDocument>,
+    editor_title: String,
+    editor_selected: Option<Control>,
+    editor_dirty: bool,
 }
 
 impl ControllerPage {
+    fn next_request(&mut self, account: u32, app_id: AppId) -> LayoutRequest {
+        self.next_req_id = self.next_req_id.wrapping_add(1).max(1);
+        LayoutRequest { account, app_id, request_id: self.next_req_id }
+    }
+
     /// Open with an optional navigation argument (`"controller"` or `"controller:<app_id>"`).
     pub fn open_arg(&mut self, arg: &str) {
         if let Some(id) = arg.strip_prefix("controller:").and_then(|s| s.parse::<AppId>().ok()) {
             self.selected_app = Some(id);
             self.inspected_app = None;
+            self.community_app = None;
         }
     }
 
-    /// Receive async inspection results from the Steam engine.
+    /// Receive async inspection, community layout, and download results from the Steam engine.
     pub fn on_event(&mut self, event: &client::Event) {
-        if let client::Event::InputConfigInspected(report) = event
-            && (self.selected_app == Some(report.app_id) || self.inspected_app == Some(report.app_id))
-        {
-            self.report = Some(report.clone());
-            self.inspector_loading = false;
+        match event {
+            client::Event::InputConfigInspected { key, report }
+                if self.inspect_req == Some(*key) && self.selected_app == Some(key.app_id) =>
+            {
+                self.report = Some(report.clone());
+                self.inspector_loading = false;
+            }
+            client::Event::ControllerLayouts { key, result }
+                if self.community_req == Some(*key) && self.selected_app == Some(key.app_id) =>
+            {
+                self.community_loading = false;
+                match result {
+                    Ok(page) => {
+                        self.community_error = None;
+                        for item in &page.items {
+                            if !self.community_items.iter().any(|existing| existing.id == item.id) {
+                                self.community_items.push(item.clone());
+                            }
+                        }
+                        self.community_next = page.next.clone();
+                    }
+                    Err(err) => {
+                        self.community_error = Some(err.clone());
+                    }
+                }
+            }
+            client::Event::ControllerLayoutDownloaded { key, result }
+                if self.downloading_req.is_some_and(|(req, _)| req == *key) =>
+            {
+                self.downloading_req = None;
+                match result {
+                    Ok(choice) => {
+                        self.community_error = None;
+                        client::set_app_binding(key.app_id, choice.clone());
+                        if self.selected_app == Some(key.app_id) {
+                            self.inspected_app = None;
+                        }
+                    }
+                    Err(err) => {
+                        self.community_error = Some(err.clone());
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -376,139 +445,662 @@ impl ControllerPage {
                             ui.selectable_value(&mut self.selected_app, Some(*id), name);
                         }
                     });
-                if w::button(ui, t, Some(icons::REFRESH), t!("Refresh"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                if editor_action_button(ui, t, Some(icons::REFRESH), t!("Refresh"), false).clicked() {
                     self.inspect_now(ctx, app_id, &install_dir, &current_choice);
+                    if self.tab == BindingsTab::Community {
+                        self.query_community(ctx, app_id, true);
+                    }
                 }
-                if w::button(ui, t, Some(icons::SLIDERS), t!("Game Properties…"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                if editor_action_button(ui, t, Some(icons::SLIDERS), t!("Game Properties…"), false).clicked() {
                     ctx.act(Action::Navigate { page: "library".into(), arg: Some(format!("props:{app_id}")) });
                 }
+                if editor_action_button(ui, t, Some(icons::FOLDER), t!("Aurora bindings folder"), false).clicked() {
+                    let account = (ctx.state.steam_id & 0xFFFF_FFFF) as u32;
+                    let dir = client::managed_bindings_dir(account, app_id);
+                    let _ = std::fs::create_dir_all(&dir);
+                    local::open_folder(&dir);
+                }
             });
 
             ui.add_space(8.0);
-            let Some(report) = &self.report else { return };
-
-            // Config selector row
-            let mut picked = current_choice.clone();
-            let chosen_label = match &picked {
-                BindingChoice::Auto => t!("Automatic (default)").to_string(),
-                BindingChoice::LocalFile(p) => report
-                    .available
-                    .iter()
-                    .find(|o| o.path.as_ref() == Some(p))
-                    .map(|o| option_label(o))
-                    .unwrap_or_else(|| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-                BindingChoice::Workshop(id) => report
-                    .available
-                    .iter()
-                    .find(|o| o.workshop_id == Some(*id))
-                    .map(|o| option_label(o))
-                    .unwrap_or_else(|| t!("Workshop #{id}", id = id)),
-            };
-
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                ui.label(w::text_medium(t!("Configuration:"), 13.0, t.text));
-                egui::ComboBox::from_id_salt(("ctrl-bindings-cfg", app_id))
-                    .selected_text(chosen_label)
-                    .width(260.0)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut picked, BindingChoice::Auto, t!("Automatic (default)"));
-                        for opt in &report.available {
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                let tabs = [
+                    (BindingsTab::Configuration, icons::CONTROLLER, t!("Configuration")),
+                    (BindingsTab::Community, icons::USERS, t!("Community Layouts")),
+                    (BindingsTab::Editor, icons::SLIDERS, t!("Edit Layout")),
+                ];
+                for (tab, icon, label) in tabs {
+                    let kind = if self.tab == tab { w::Kind::Primary } else { w::Kind::Secondary };
+                    if w::button(ui, t, Some(icon), label, kind, w::Size::Sm).clicked() {
+                        self.tab = tab;
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+            match self.tab {
+                BindingsTab::Configuration => {
+                    self.bindings_config_tab(ui, t, ctx, app_id, &install_dir, &current_choice);
+                }
+                BindingsTab::Community => {
+                    self.bindings_community_tab(ui, t, ctx, app_id, &current_choice);
+                }
+                BindingsTab::Editor => {
+                    self.bindings_editor_tab(ui, t, ctx, app_id, &install_dir);
+                }
+            }
+        });
+    }
+
+    fn bindings_config_tab(
+        &mut self,
+        ui: &mut Ui,
+        t: &Theme,
+        ctx: &mut Ctx,
+        app_id: AppId,
+        install_dir: &PathBuf,
+        current_choice: &BindingChoice,
+    ) {
+        let Some(report) = self.report.clone() else { return };
+
+        let mut picked = current_choice.clone();
+        let chosen_label = choice_label(&picked, &report);
+
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            ui.label(w::text_medium(t!("Configuration:"), 13.0, t.text));
+            egui::ComboBox::from_id_salt(("ctrl-bindings-cfg", app_id))
+                .selected_text(chosen_label)
+                .width(290.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut picked, BindingChoice::Auto, t!("Automatic (default)"));
+                    let has_templates = report.available.iter().any(|o| o.origin == BindingOrigin::Template);
+                    if has_templates {
+                        ui.separator();
+                        ui.label(w::caption_text(t, t!("TEMPLATES")));
+                        for opt in report.available.iter().filter(|o| o.origin == BindingOrigin::Template) {
                             ui.selectable_value(&mut picked, opt.choice.clone(), option_label(opt));
                         }
-                    });
-                if w::button(ui, t, Some(icons::FOLDER), t!("Browse .vdf…"), w::Kind::Secondary, w::Size::Sm).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("Steam Input VDF", &["vdf"]).pick_file() {
-                        let valid = std::fs::read_to_string(&path)
-                            .ok()
-                            .is_some_and(|txt| !client::parse_vdf_summary(&txt).1.is_empty() || txt.contains("controller_mappings"));
-                        if valid {
-                            picked = BindingChoice::LocalFile(path);
-                        } else {
-                            ctx.toast(t!("That file does not look like a Steam Input controller configuration."));
+                    }
+                    let has_others = report.available.iter().any(|o| o.origin != BindingOrigin::Template);
+                    if has_others {
+                        ui.separator();
+                        ui.label(w::caption_text(t, t!("GAME & SAVED LAYOUTS")));
+                        for opt in report.available.iter().filter(|o| o.origin != BindingOrigin::Template) {
+                            ui.selectable_value(&mut picked, opt.choice.clone(), option_label(opt));
                         }
                     }
-                }
-                if let Some(path) = report.active_path.as_ref() {
-                    if w::button(ui, t, Some(icons::EXTERNAL), t!("Open"), w::Kind::Secondary, w::Size::Sm).clicked() {
-                        let _ = open::that(path);
-                    }
-                } else if let Some(dir) = report.config_dir.as_ref() {
-                    if w::button(ui, t, Some(icons::FOLDER), t!("Open folder"), w::Kind::Secondary, w::Size::Sm).clicked() {
-                        let _ = std::fs::create_dir_all(dir);
-                        local::open_folder(dir);
+                });
+            if w::button(ui, t, Some(icons::FOLDER), t!("Browse .vdf…"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                if let Some(path) = rfd::FileDialog::new().add_filter("Steam Input VDF", &["vdf"]).pick_file() {
+                    if client::read_layout(&path).is_ok() {
+                        picked = BindingChoice::LocalFile(path);
+                    } else {
+                        ctx.toast(t!("That file does not look like a Steam Input controller configuration."));
                     }
                 }
-                if current_choice != BindingChoice::Auto
-                    && w::button(ui, t, Some(icons::RESTORE), t!("Reset"), w::Kind::Ghost, w::Size::Sm).clicked()
-                {
-                    picked = BindingChoice::Auto;
+            }
+            if w::button(ui, t, Some(icons::SLIDERS), t!("Edit Layout"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                self.load_editor_from_active(app_id, &report);
+                self.tab = BindingsTab::Editor;
+            }
+            if let Some(path) = report.active_path.as_ref() {
+                if w::button(ui, t, Some(icons::EXTERNAL), t!("Open"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                    let _ = open::that(path);
+                }
+            } else if let Some(dir) = report.config_dir.as_ref() {
+                if w::button(ui, t, Some(icons::FOLDER), t!("Open folder"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                    let _ = std::fs::create_dir_all(dir);
+                    local::open_folder(dir);
+                }
+            }
+            if *current_choice != BindingChoice::Auto
+                && w::button(ui, t, Some(icons::RESTORE), t!("Reset"), w::Kind::Ghost, w::Size::Sm).clicked()
+            {
+                picked = BindingChoice::Auto;
+            }
+        });
+
+        let binding_changed = picked != *current_choice;
+
+        ui.add_space(8.0);
+        w::panel(t).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                if self.inspector_loading {
+                    ui.spinner();
+                }
+                if report.active_source.is_empty() {
+                    ui.label(w::text(
+                        t!("No native Steam Input manifest found — choose a Template, Community Layout, or create a custom binding."),
+                        13.0,
+                        t.text_dim,
+                    ));
+                } else {
+                    ui.label(w::text_medium(t!("Active source: {source}", source = &report.active_source), 13.0, t.text));
+                }
+                if !report.active_controller_type.is_empty() {
+                    w::pill(ui, &report.active_controller_type, t.accent, t.accent.gamma_multiply(0.14));
                 }
             });
 
-            let binding_changed = picked != current_choice;
+            if let Some(doc) = &report.document {
+                let legacy = doc.legacy_map();
+                if !legacy.0.is_empty() {
+                    ui.add_space(8.0);
+                    egui::Frame::new()
+                        .fill(t.surface)
+                        .corner_radius(t.corner_small())
+                        .inner_margin(Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(w::text_semibold(t!("Controller remappings"), 13.5, t.text));
+                                w::pill(ui, t!("Legacy / Template"), t.text_dim, t.raised);
+                            });
+                            ui.add_space(4.0);
+                            for (ctrl, outs) in legacy.0.iter().take(20) {
+                                let labels: Vec<String> = outs.iter().map(Output::display_label).collect();
+                                ui.horizontal(|ui| {
+                                    ui.label(w::text(ctrl.name(), 12.0, t.text_dim).monospace());
+                                    ui.label(w::text("→", 12.0, t.text_faint));
+                                    ui.label(w::text(labels.join(", "), 12.0, t.text));
+                                });
+                            }
+                            if legacy.0.len() > 20 {
+                                ui.label(w::text(t!("and {n} more bindings", n = legacy.0.len() - 20), 11.5, t.text_faint));
+                            }
+                        });
+                }
+            }
 
+            if !report.action_sets.is_empty() {
+                ui.add_space(8.0);
+                for set in &report.action_sets {
+                    egui::Frame::new()
+                        .fill(t.surface)
+                        .corner_radius(t.corner_small())
+                        .inner_margin(Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let heading = if set.title.is_empty() || set.title.starts_with('#') {
+                                    &set.name
+                                } else {
+                                    &set.title
+                                };
+                                ui.label(w::text_semibold(heading, 13.5, t.text));
+                                let badge = if set.is_layer { t!("Action layer") } else { t!("Action set") };
+                                w::pill(ui, badge, t.text_dim, t.raised);
+                            });
+                            if set.bindings.is_empty() {
+                                ui.label(w::text(t!("No mapped game actions in this set."), 12.0, t.text_faint));
+                            } else {
+                                ui.add_space(4.0);
+                                for (source, input, acts) in set.bindings.iter().take(16) {
+                                    ui.horizontal(|ui| {
+                                        ui.label(w::text(format!("{source} · {input}"), 12.0, t.text_dim).monospace());
+                                        ui.label(w::text("→", 12.0, t.text_faint));
+                                        ui.label(w::text(acts.join(", "), 12.0, t.text));
+                                    });
+                                }
+                                if set.bindings.len() > 16 {
+                                    ui.label(w::text(t!("and {n} more bindings", n = set.bindings.len() - 16), 11.5, t.text_faint));
+                                }
+                            }
+                        });
+                    ui.add_space(6.0);
+                }
+            }
+        });
+
+        if binding_changed {
+            client::set_app_binding(app_id, picked.clone());
+            self.inspect_now(ctx, app_id, install_dir, &picked);
+        }
+    }
+
+    fn query_community(&mut self, ctx: &Ctx, app_id: AppId, reset: bool) {
+        if reset {
+            self.community_items.clear();
+            self.community_next = None;
+            self.community_error = None;
+        }
+        self.community_app = Some(app_id);
+        if ctx.state.phase != client::state::Phase::LoggedIn || ctx.state.link != client::Link::Online {
+            self.community_loading = false;
+            self.community_error = Some(t!("Sign in and go online to browse Community Layouts.").to_string());
+            return;
+        }
+        let account = (ctx.state.steam_id & 0xFFFF_FFFF) as u32;
+        let key = self.next_request(account, app_id);
+        let cursor = if reset { None } else { self.community_next.clone() };
+        self.community_req = Some(key);
+        self.community_loading = true;
+        ctx.send(Command::QueryControllerLayouts { key, cursor });
+    }
+
+    fn bindings_community_tab(
+        &mut self,
+        ui: &mut Ui,
+        t: &Theme,
+        ctx: &mut Ctx,
+        app_id: AppId,
+        current_choice: &BindingChoice,
+    ) {
+        if self.community_app != Some(app_id) {
+            self.query_community(ctx, app_id, true);
+        }
+
+        editor_workspace_frame(t).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(w::text_semibold(t!("Community Layouts"), 14.0, t.text));
+                if self.community_loading {
+                    ui.spinner();
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if editor_action_button(ui, t, Some(icons::REFRESH), t!("Refresh"), false).clicked() {
+                        self.query_community(ctx, app_id, true);
+                    }
+                });
+            });
             ui.add_space(8.0);
-            w::panel(t).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal_wrapped(|ui| {
-                    if self.inspector_loading {
-                        ui.spinner();
+
+            if let Some(err) = &self.community_error {
+                ui.add(egui::Label::new(w::text(err, 12.5, t.away)).wrap());
+                ui.add_space(6.0);
+            }
+
+            if self.community_items.is_empty() {
+                if !self.community_loading && self.community_error.is_none() {
+                    ui.label(w::text(t!("No community controller layouts found for this game yet."), 13.0, t.text_dim));
+                }
+                return;
+            }
+
+            let mut download_id: Option<u64> = None;
+            for item in &self.community_items {
+                let active = *current_choice == BindingChoice::Community(item.id);
+                let busy = self.downloading_req.is_some_and(|(_, id)| id == item.id);
+                egui::Frame::new()
+                    .fill(if active { w::active_fill(t) } else { t.surface })
+                    .stroke(Stroke::new(1.0, if active { t.accent } else { editor_button_border(t) }))
+                    .corner_radius(t.corner_small())
+                    .inner_margin(Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    let title = if item.title.is_empty() {
+                                        t!("Workshop #{id}", id = item.id)
+                                    } else {
+                                        item.title.clone()
+                                    };
+                                    ui.label(w::text_semibold(title, 13.5, t.text));
+                                    if !item.controller_type.is_empty() {
+                                        w::pill(ui, &item.controller_type, t.accent, t.accent.gamma_multiply(0.14));
+                                    }
+                                });
+                                let persona = ctx.state.persona(item.author);
+                                let author = if persona.name.is_empty() {
+                                    format!("#{}", item.author)
+                                } else {
+                                    persona.name
+                                };
+                                let stats = format!(
+                                    "{author}  ·  ▲ {}  ▼ {}  ·  {}",
+                                    item.votes_up,
+                                    item.votes_down,
+                                    t!("{n} uses", n = item.sessions),
+                                );
+                                ui.label(w::text(stats, 11.5, t.text_dim));
+                                if !item.description.is_empty() {
+                                    ui.add(egui::Label::new(w::text(&item.description, 12.0, t.text_dim)).wrap());
+                                }
+                            });
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if active {
+                                    w::pill(ui, t!("Active"), t.play, t.play.gamma_multiply(0.14));
+                                } else if busy {
+                                    ui.spinner();
+                                } else if w::button(ui, t, None, t!("Download & Apply"), w::Kind::Primary, w::Size::Sm).clicked() {
+                                    download_id = Some(item.id);
+                                }
+                            });
+                        });
+                    });
+                ui.add_space(6.0);
+            }
+
+            if self.community_next.is_some()
+                && !self.community_loading
+                && editor_action_button(ui, t, None, t!("Load more"), false).clicked()
+            {
+                self.query_community(ctx, app_id, false);
+            }
+
+            if let Some(id) = download_id {
+                let account = (ctx.state.steam_id & 0xFFFF_FFFF) as u32;
+                let key = self.next_request(account, app_id);
+                self.downloading_req = Some((key, id));
+                ctx.send(Command::DownloadControllerLayout { key, id });
+            }
+        });
+    }
+
+    fn load_editor_from_active(&mut self, app_id: AppId, report: &InputConfigReport) {
+        let doc = report.document.clone().unwrap_or_else(LayoutDocument::automatic);
+        self.editor_title = doc.title().unwrap_or("Custom Layout").to_string();
+        self.editor_doc = Some(doc);
+        self.editor_app = Some(app_id);
+        self.editor_selected.get_or_insert(Control::A);
+        self.editor_dirty = false;
+    }
+
+    fn bindings_editor_tab(
+        &mut self,
+        ui: &mut Ui,
+        t: &Theme,
+        ctx: &mut Ctx,
+        app_id: AppId,
+        install_dir: &PathBuf,
+    ) {
+        if self.editor_app != Some(app_id) || self.editor_doc.is_none() {
+            if let Some(report) = self.report.clone() {
+                self.load_editor_from_active(app_id, &report);
+            } else {
+                self.editor_doc = Some(LayoutDocument::automatic());
+                self.editor_title = "Custom Layout".into();
+                self.editor_app = Some(app_id);
+                self.editor_selected = Some(Control::A);
+                self.editor_dirty = false;
+            }
+        }
+
+        let account = (ctx.state.steam_id & 0xFFFF_FFFF) as u32;
+        editor_workspace_frame(t).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // Start-from template strip
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                ui.label(w::text_semibold(t!("Start from:"), 12.5, t.text_dim));
+                if editor_action_button(ui, t, None, t!("Automatic"), false).clicked() {
+                    self.editor_doc = Some(LayoutDocument::automatic());
+                    self.editor_title = "Custom Layout".into();
+                    self.editor_dirty = true;
+                }
+                for tmpl in BuiltInTemplate::ALL {
+                    let choice = BindingChoice::Template(TemplateChoice::BuiltIn(tmpl));
+                    let label = builtin_template_short_label(tmpl);
+                    if editor_action_button(ui, t, None, label, false).clicked() {
+                        if let Some(doc) = client::binding_document(&choice, &ctx.local.steam_root, account, app_id) {
+                            self.editor_title = format!("{} (Custom)", doc.title().unwrap_or(label));
+                            self.editor_doc = Some(doc);
+                            self.editor_dirty = true;
+                        }
                     }
-                    if report.active_source.is_empty() {
-                        ui.label(w::text(t!("No Steam Input bindings found for this game (the game uses its own controller support)."), 13.0, t.text_dim));
-                    } else {
-                        ui.label(w::text_medium(t!("Active source: {source}", source = &report.active_source), 13.0, t.text));
-                    }
-                    if !report.active_controller_type.is_empty() {
-                        w::pill(ui, &report.active_controller_type, t.accent, t.accent.gamma_multiply(0.14));
+                }
+                if let Some(report) = self.report.clone()
+                    && report.document.is_some()
+                    && editor_action_button(ui, t, Some(icons::RESTORE), t!("Active layout"), false).clicked()
+                {
+                    self.load_editor_from_active(app_id, &report);
+                }
+            });
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.label(w::text_medium(t!("Layout name:"), 13.0, t.text));
+                if ui.add(egui::TextEdit::singleline(&mut self.editor_title).desired_width(280.0)).changed() {
+                    self.editor_dirty = true;
+                }
+            });
+            ui.add_space(12.0);
+
+            let Some(mut doc) = self.editor_doc.clone() else { return };
+            let legacy = doc.legacy_map();
+            let native_actions = doc.native_actions();
+            let selected = self.editor_selected.unwrap_or(Control::A);
+
+            ui.columns(2, |cols| {
+                // Left pane: all physical controller inputs at full height (no nested scroll)
+                editor_section_card(t).show(&mut cols[0], |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(w::caption_text(t, t!("SELECT A CONTROL TO REMAP")));
+                    ui.add_space(8.0);
+                    let groups: &[(&str, &[Control])] = &[
+                        (t!("Face buttons"), &[Control::A, Control::B, Control::X, Control::Y]),
+                        (t!("Bumpers & Triggers"), &[Control::LB, Control::RB, Control::LT, Control::RT]),
+                        (
+                            t!("D-pad & Menu"),
+                            &[Control::Up, Control::Down, Control::Left, Control::Right, Control::Start, Control::Back],
+                        ),
+                        (
+                            t!("Left stick"),
+                            &[
+                                Control::LeftStick,
+                                Control::L3,
+                                Control::LeftStickUp,
+                                Control::LeftStickDown,
+                                Control::LeftStickLeft,
+                                Control::LeftStickRight,
+                            ],
+                        ),
+                        (
+                            t!("Right stick"),
+                            &[
+                                Control::RightStick,
+                                Control::R3,
+                                Control::RightStickUp,
+                                Control::RightStickDown,
+                                Control::RightStickLeft,
+                                Control::RightStickRight,
+                            ],
+                        ),
+                        (t!("Back paddles & Gyro"), &[Control::L4, Control::R4, Control::L5, Control::R5, Control::Gyro]),
+                    ];
+                    for (idx, (heading, ctrls)) in groups.iter().enumerate() {
+                        if idx > 0 {
+                            ui.add_space(8.0);
+                        }
+                        ui.label(w::text_semibold(*heading, 12.0, t.text_dim));
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                            for &c in *ctrls {
+                                let is_sel = selected == c;
+                                let mapped = legacy.0.get(&c).and_then(|v| v.first()).map(Output::display_label);
+                                if editor_control_tile(ui, t, c.name(), mapped.as_deref(), is_sel).clicked() {
+                                    self.editor_selected = Some(c);
+                                }
+                            }
+                        });
                     }
                 });
 
-                if !report.action_sets.is_empty() {
+                // Right pane: output target picker for the selected control (full height, no nested scroll)
+                editor_section_card(t).show(&mut cols[1], |ui| {
+                    ui.set_width(ui.available_width());
+                    let current_out = legacy
+                        .0
+                        .get(&selected)
+                        .and_then(|v| v.first())
+                        .cloned()
+                        .unwrap_or_else(|| default_output_for(selected));
+                    let has_override = legacy.0.contains_key(&selected);
+
+                    ui.label(w::caption_text(t, t!("REMAP TARGET")));
+                    ui.add_space(6.0);
+                    egui::Frame::new()
+                        .fill(w::active_fill(t))
+                        .stroke(Stroke::new(1.0, t.accent.gamma_multiply(0.55)))
+                        .corner_radius(t.corner_small())
+                        .inner_margin(Margin::symmetric(12, 8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(w::text_bold(
+                                t!("{control} → {target}", control = selected.name(), target = current_out.display_label()),
+                                14.5,
+                                t.text,
+                            ));
+                        });
                     ui.add_space(8.0);
-                    for set in &report.action_sets {
-                        egui::Frame::new()
-                            .fill(t.surface)
-                            .corner_radius(t.corner_small())
-                            .inner_margin(Margin::symmetric(10, 8))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    let heading = if set.title.is_empty() || set.title.starts_with('#') {
-                                        &set.name
-                                    } else {
-                                        &set.title
-                                    };
-                                    ui.label(w::text_semibold(heading, 13.5, t.text));
-                                    let badge = if set.is_layer { t!("Action layer") } else { t!("Action set") };
-                                    w::pill(ui, badge, t.text_dim, t.raised);
-                                });
-                                if set.bindings.is_empty() {
-                                    ui.label(w::text(t!("No mapped game actions in this set."), 12.0, t.text_faint));
-                                } else {
-                                    ui.add_space(4.0);
-                                    for (source, input, acts) in set.bindings.iter().take(16) {
-                                        ui.horizontal(|ui| {
-                                            ui.label(w::text(format!("{source} · {input}"), 12.0, t.text_dim).monospace());
-                                            ui.label(w::text("→", 12.0, t.text_faint));
-                                            ui.label(w::text(acts.join(", "), 12.0, t.text));
-                                        });
-                                    }
-                                    if set.bindings.len() > 16 {
-                                        ui.label(w::text(t!("and {n} more bindings", n = set.bindings.len() - 16), 11.5, t.text_faint));
+
+                    let mut chosen_out: Option<Output> = None;
+                    let mut clear_override = false;
+
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                        if editor_action_button(
+                            ui,
+                            t,
+                            None,
+                            t!("Unassigned"),
+                            current_out == Output::Unassigned && has_override,
+                        )
+                        .clicked()
+                        {
+                            chosen_out = Some(Output::Unassigned);
+                        }
+                        if editor_action_button(ui, t, Some(icons::RESTORE), t!("Default"), !has_override).clicked() {
+                            clear_override = true;
+                        }
+                    });
+                    ui.add_space(10.0);
+
+                    if selected.vector() {
+                        ui.label(w::text_semibold(t!("Analog / Pointer output"), 12.0, t.text_dim));
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                            for out in [Output::Pad(Control::LeftStick), Output::Pad(Control::RightStick), Output::MouseMove] {
+                                if editor_keycap(ui, t, &out.display_label(), current_out == out, 88.0).clicked() {
+                                    chosen_out = Some(out);
+                                }
+                            }
+                        });
+                    } else {
+                        ui.label(w::text_semibold(t!("Gamepad button / trigger"), 12.0, t.text_dim));
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                            for &c in Control::ALL.iter().filter(|c| c.pad_output() && !c.vector()) {
+                                let out = Output::Pad(c);
+                                if editor_keycap(ui, t, c.name(), current_out == out, 42.0).clicked() {
+                                    chosen_out = Some(out);
+                                }
+                            }
+                        });
+                        ui.add_space(10.0);
+
+                        ui.label(w::text_semibold(t!("Mouse"), 12.0, t.text_dim));
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                            for out in [
+                                Output::MouseButton(1),
+                                Output::MouseButton(2),
+                                Output::MouseButton(3),
+                                Output::MouseButton(4),
+                                Output::MouseButton(5),
+                                Output::Wheel(1),
+                                Output::Wheel(-1),
+                            ] {
+                                if editor_keycap(ui, t, &out.display_label(), current_out == out, 64.0).clicked() {
+                                    chosen_out = Some(out);
+                                }
+                            }
+                        });
+                        ui.add_space(10.0);
+
+                        ui.label(w::text_semibold(t!("Keyboard"), 12.0, t.text_dim));
+                        ui.add_space(4.0);
+                        for (sub, keys) in [
+                            (t!("Letters"), EDITOR_KEYS_LETTERS),
+                            (t!("Modifiers & Navigation"), EDITOR_KEYS_MODIFIERS),
+                            (t!("Numbers"), EDITOR_KEYS_NUMBERS),
+                            (t!("Function keys"), EDITOR_KEYS_FUNCTION),
+                        ] {
+                            ui.label(w::text(sub, 11.0, t.text_faint));
+                            ui.add_space(2.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = vec2(5.0, 5.0);
+                                for &vk in keys {
+                                    let out = Output::Key(vk);
+                                    if editor_keycap(ui, t, &client::controller_key_name(vk), current_out == out, 36.0)
+                                        .clicked()
+                                    {
+                                        chosen_out = Some(out);
                                     }
                                 }
                             });
-                        ui.add_space(6.0);
+                            ui.add_space(6.0);
+                        }
+
+                        if !native_actions.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(w::text_semibold(t!("Game actions"), 12.0, t.text_dim));
+                            ui.add_space(4.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                                for (set, act) in native_actions.iter().take(32) {
+                                    let out = Output::Native(set.clone(), act.clone());
+                                    if editor_keycap(ui, t, &format!("{set} · {act}"), current_out == out, 64.0).clicked() {
+                                        chosen_out = Some(out);
+                                    }
+                                }
+                            });
+                        }
                     }
-                }
+
+                    if clear_override {
+                        doc.clear_binding(selected);
+                        self.editor_dirty = true;
+                    } else if let Some(out) = chosen_out {
+                        doc.set_binding(selected, &out);
+                        self.editor_dirty = true;
+                    }
+                });
             });
 
-            if binding_changed {
-                client::set_app_binding(app_id, picked.clone());
-                self.inspect_now(ctx, app_id, &install_dir, &picked);
-            }
+            doc.set_title(&self.editor_title);
+            self.editor_doc = Some(doc.clone());
+
+            ui.add_space(12.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                if w::button(ui, t, Some(icons::CONTROLLER), t!("Save & Apply"), w::Kind::Primary, w::Size::Sm).clicked() {
+                    match client::save_custom_layout(account, app_id, &doc) {
+                        Ok(choice) => {
+                            self.editor_dirty = false;
+                            client::set_app_binding(app_id, choice.clone());
+                            self.inspect_now(ctx, app_id, install_dir, &choice);
+                            ctx.toast(t!("Custom controller layout saved and applied."));
+                        }
+                        Err(err) => {
+                            ctx.toast(t!("Could not save layout: {err}", err = err));
+                        }
+                    }
+                }
+                if editor_action_button(ui, t, Some(icons::FOLDER), t!("Export .vdf…"), false).clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_file_name(format!("aurora_{app_id}.vdf"))
+                        .add_filter("Steam Input VDF", &["vdf"])
+                        .save_file()
+                    {
+                        match std::fs::write(&path, doc.write()) {
+                            Ok(()) => ctx.toast(t!("Exported controller layout.")),
+                            Err(err) => ctx.toast(t!("Could not export layout: {err}", err = err)),
+                        }
+                    }
+                }
+                if self.editor_dirty {
+                    w::pill(ui, t!("Unsaved changes"), t.away, t.away.gamma_multiply(0.14));
+                }
+            });
         });
     }
 
@@ -518,9 +1110,12 @@ impl ControllerPage {
         self.inspected_app = Some(app_id);
         self.inspected_choice = Some(choice.clone());
         if ctx.state.phase == client::state::Phase::LoggedIn && ctx.state.link == client::Link::Online {
+            let key = self.next_request(account, app_id);
+            self.inspect_req = Some(key);
             self.inspector_loading = true;
-            ctx.send(Command::InspectInputConfig { app_id, install_dir: install_dir.clone() });
+            ctx.send(Command::InspectInputConfig { key, install_dir: install_dir.clone() });
         } else {
+            self.inspect_req = None;
             self.inspector_loading = false;
         }
     }
@@ -675,6 +1270,193 @@ fn controller_status_line(c: &DetectedController) -> String {
     parts.join("  ·  ")
 }
 
+const EDITOR_KEYS_LETTERS: &[u16] = &[
+    b'W' as u16, b'A' as u16, b'S' as u16, b'D' as u16,
+    b'E' as u16, b'R' as u16, b'F' as u16, b'Q' as u16,
+    b'C' as u16, b'V' as u16, b'G' as u16, b'X' as u16,
+    b'Z' as u16, b'T' as u16, b'I' as u16, b'M' as u16,
+];
+
+const EDITOR_KEYS_MODIFIERS: &[u16] = &[
+    0x20, 0x10, 0x11, 0x12, 0x09, 0x0D, 0x1B, 0x08,
+    0x26, 0x28, 0x25, 0x27,
+];
+
+const EDITOR_KEYS_NUMBERS: &[u16] = &[
+    b'1' as u16, b'2' as u16, b'3' as u16, b'4' as u16, b'5' as u16,
+    b'6' as u16, b'7' as u16, b'8' as u16, b'9' as u16, b'0' as u16,
+];
+
+const EDITOR_KEYS_FUNCTION: &[u16] = &[
+    0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B,
+];
+
+fn editor_button_border(t: &Theme) -> egui::Color32 {
+    w::mix(t.border, t.text_faint, 0.45)
+}
+
+fn editor_workspace_frame(t: &Theme) -> egui::Frame {
+    egui::Frame::new()
+        .fill(t.chrome)
+        .stroke(Stroke::new(1.0, t.border))
+        .corner_radius(t.corner_small())
+        .inner_margin(Margin::same(14))
+}
+
+fn editor_section_card(t: &Theme) -> egui::Frame {
+    egui::Frame::new()
+        .fill(t.surface)
+        .stroke(Stroke::new(1.0, t.border))
+        .corner_radius(t.corner_small())
+        .inner_margin(Margin::same(12))
+}
+
+fn editor_action_button(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, selected: bool) -> egui::Response {
+    let text = match icon {
+        Some(i) => format!("{i}  {label}"),
+        None => label.to_string(),
+    };
+    editor_keycap(ui, t, &text, selected, 0.0)
+}
+
+fn editor_keycap(ui: &mut Ui, t: &Theme, label: &str, selected: bool, min_width: f32) -> egui::Response {
+    let font = if selected { w::font_semibold(12.5) } else { w::font_medium(12.5) };
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font, egui::Color32::PLACEHOLDER);
+    let width = (galley.size().x + 20.0).max(min_width);
+    let height = 30.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.10);
+        let pressed = resp.is_pointer_button_down_on();
+        let base_fill = w::mix(t.raised, t.surface_hover, 0.28);
+        let mut fill = if selected {
+            w::mix(t.accent, egui::Color32::WHITE, hover * 0.08)
+        } else {
+            w::mix(base_fill, t.surface_hover, hover)
+        };
+        if pressed {
+            fill = w::mix(fill, egui::Color32::BLACK, 0.12);
+        }
+        let border = if selected {
+            t.accent
+        } else {
+            w::mix(editor_button_border(t), t.accent, hover * 0.7)
+        };
+        let fg = if selected { t.on_accent } else { t.text };
+        let radius = CornerRadius::same(6);
+        let p = ui.painter();
+        p.rect_filled(rect, radius, fill);
+        p.rect_stroke(rect, radius, Stroke::new(if selected { 1.4 } else { 1.0 }, border), StrokeKind::Inside);
+        p.galley(rect.center() - galley.size() / 2.0, galley, fg);
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn editor_control_tile(
+    ui: &mut Ui,
+    t: &Theme,
+    control_name: &str,
+    mapped: Option<&str>,
+    selected: bool,
+) -> egui::Response {
+    let name_galley = ui.painter().layout_no_wrap(
+        control_name.to_string(),
+        w::font_semibold(12.5),
+        egui::Color32::PLACEHOLDER,
+    );
+    let map_galley = mapped.map(|m| {
+        ui.painter().layout_no_wrap(format!("→ {m}"), w::font_medium(11.5), egui::Color32::PLACEHOLDER)
+    });
+    let gap = if map_galley.is_some() { 8.0 } else { 0.0 };
+    let content_w = name_galley.size().x + gap + map_galley.as_ref().map_or(0.0, |g| g.size().x + 12.0);
+    let width = (content_w + 22.0).max(56.0);
+    let height = 32.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.10);
+        let pressed = resp.is_pointer_button_down_on();
+        let has_map = map_galley.is_some();
+        let base_fill = if has_map {
+            w::mix(t.raised, t.accent, 0.10)
+        } else {
+            w::mix(t.raised, t.surface_hover, 0.28)
+        };
+        let mut fill = if selected {
+            w::mix(t.accent, egui::Color32::WHITE, hover * 0.08)
+        } else {
+            w::mix(base_fill, t.surface_hover, hover)
+        };
+        if pressed {
+            fill = w::mix(fill, egui::Color32::BLACK, 0.12);
+        }
+        let border = if selected {
+            t.accent
+        } else if has_map {
+            w::mix(t.accent.gamma_multiply(0.55), t.accent, hover * 0.6)
+        } else {
+            w::mix(editor_button_border(t), t.accent, hover * 0.7)
+        };
+        let radius = CornerRadius::same(7);
+        let p = ui.painter();
+        p.rect_filled(rect, radius, fill);
+        p.rect_stroke(rect, radius, Stroke::new(if selected { 1.5 } else { 1.0 }, border), StrokeKind::Inside);
+
+        let name_fg = if selected { t.on_accent } else { t.text };
+        if let Some(mg) = map_galley {
+            let x = rect.left() + 11.0;
+            p.galley(pos2(x, rect.center().y - name_galley.size().y / 2.0), name_galley, name_fg);
+            let badge_left = x + content_w - (mg.size().x + 12.0);
+            let badge_rect = Rect::from_min_size(
+                pos2(badge_left, rect.center().y - 10.0),
+                vec2(mg.size().x + 12.0, 20.0),
+            );
+            let badge_bg = if selected {
+                egui::Color32::from_black_alpha(55)
+            } else {
+                t.accent.gamma_multiply(0.16)
+            };
+            let badge_fg = if selected { t.on_accent } else { t.accent };
+            p.rect_filled(badge_rect, CornerRadius::same(5), badge_bg);
+            p.galley(badge_rect.center() - mg.size() / 2.0, mg, badge_fg);
+        } else {
+            p.galley(rect.center() - name_galley.size() / 2.0, name_galley, name_fg);
+        }
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn builtin_template_short_label(tmpl: BuiltInTemplate) -> &'static str {
+    match tmpl {
+        BuiltInTemplate::Gamepad => t!("Gamepad"),
+        BuiltInTemplate::Camera => t!("Gamepad + Gyro"),
+        BuiltInTemplate::Keyboard => t!("WASD & Mouse"),
+        BuiltInTemplate::Precision => t!("Precision Mouse"),
+    }
+}
+
+fn default_output_for(c: Control) -> Output {
+    if c.pad_output() {
+        Output::Pad(c)
+    } else {
+        Output::Unassigned
+    }
+}
+
+fn choice_label(choice: &BindingChoice, report: &InputConfigReport) -> String {
+    if let Some(opt) = report.available.iter().find(|o| &o.choice == choice) {
+        return option_label(opt);
+    }
+    match choice {
+        BindingChoice::Auto => t!("Automatic (default)").to_string(),
+        BindingChoice::LocalFile(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        BindingChoice::Workshop(id) => t!("Workshop #{id}", id = id),
+        BindingChoice::Template(TemplateChoice::BuiltIn(tmpl)) => builtin_template_short_label(*tmpl).to_string(),
+        BindingChoice::Template(TemplateChoice::Installed(_)) => t!("Template").to_string(),
+        BindingChoice::Community(id) => t!("Community #{id}", id = id),
+        BindingChoice::Custom(_) => t!("Custom layout").to_string(),
+    }
+}
+
 fn option_label(opt: &client::BindingOption) -> String {
     match opt.origin {
         BindingOrigin::UserFile => t!("User: {name}", name = opt.label.strip_prefix("User: ").unwrap_or(&opt.label)),
@@ -683,6 +1465,10 @@ fn option_label(opt: &client::BindingOption) -> String {
         BindingOrigin::Official(id) if opt.controller_type.is_empty() => t!("Official Workshop #{id}", id = id),
         BindingOrigin::Official(id) => format!("{} ({})", t!("Official Workshop #{id}", id = id), opt.controller_type),
         BindingOrigin::CustomFile => t!("Custom: {name}", name = opt.label.strip_prefix("Custom: ").unwrap_or(&opt.label)),
+        BindingOrigin::Template => t!("Template: {name}", name = &opt.label),
+        BindingOrigin::Community(id) if opt.label.is_empty() => t!("Community #{id}", id = id),
+        BindingOrigin::Community(_) => t!("Community: {name}", name = &opt.label),
+        BindingOrigin::Custom => t!("Custom: {name}", name = &opt.label),
     }
 }
 

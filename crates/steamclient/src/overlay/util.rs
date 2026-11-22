@@ -645,7 +645,7 @@ impl FpsCounter {
 #[cfg(test)]
 mod sec_validation_tests {
     use super::*;
-    use crate::overlay::wire::Mesh;
+    use super::super::wire::Mesh;
 
     #[test]
     fn tex_rgba_and_subrect_reject_overflow_and_short_buffers() {

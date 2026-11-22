@@ -111,6 +111,9 @@ pub enum Request {
     ServerList { filter: String, max: u32 },
     /// Steam Input bindings for an Xbox-style pad: answered with [`Reply::InputConfig`].
     InputConfig,
+    /// Read the currently selected bindings when the launch revision changes.
+    InputLayout { known_revision: Option<u64> },
+    InputLayoutApplied { revision: u64 },
     /// The game asked for Steam's overlay: `dialog` is "invite" (target: lobby
     /// id), "invite_connect" (target: connect string), one of
     /// ActivateGameOverlay's names ("friends", "players", "community"…), or
@@ -379,6 +382,7 @@ pub enum Reply {
     Servers { servers: Vec<GameServer> },
     /// A controller_mappings VDF (empty: none found) and where it came from.
     InputConfig { bindings: String, source: String },
+    InputLayout { revision: u64, bindings: String, source: String },
     /// EResult, the item's folder, size on disk and last update time.
     UgcDownloaded { eresult: i32, folder: String, size: u64, updated: u32 },
     LbFound { found: bool, id: i32, count: i32, sort: i32, display: i32, name: String },
