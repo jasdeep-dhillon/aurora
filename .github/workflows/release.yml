@@ -331,6 +331,14 @@ jobs:
               echo "> **Test build** from \`$BRANCH\` ($GITHUB_SHA). Not offered to installed copies as an update."
               echo
             fi
+            # This version's section of CHANGELOG.md (heading "## [X.Y.Z]…").
+            awk -v v="[$VERSION]" 'index($0, "## " v) == 1 { f = 1; next } f && /^## / { exit } f' repo/CHANGELOG.md > changes.md
+            if [ -s changes.md ]; then
+              cat changes.md
+              echo
+            fi
+            echo "### Downloads"
+            echo
             echo '| Platform / Build | Download | Notes |'
             echo '| --- | --- | --- |'
             if [ "$WINDOWS" = "success" ]; then
@@ -349,12 +357,6 @@ jobs:
             fi
             echo "| Generic Linux x86-64 | [.tar.gz]($asset/Aurora-Linux-x86_64.tar.gz) · [SHA-256]($asset/Aurora-Linux-x86_64.tar.gz.sha256) | Extract and launch aurora |"
             echo
-            # This version's section of CHANGELOG.md (heading "## [X.Y.Z]…").
-            awk -v v="[$VERSION]" 'index($0, "## " v) == 1 { f = 1; next } f && /^## / { exit } f' repo/CHANGELOG.md > changes.md
-            if [ -s changes.md ]; then
-              cat changes.md
-              echo
-            fi
           } > notes.md
           ls -l dist
 
