@@ -78,6 +78,9 @@ struct GlowWinitRunning<'app> {
 
     /// Any not yet applied deltas for this app.
     pending_deltas: TexturesDelta,
+
+    #[cfg(feature = "accesskit")]
+    accesskit_proxy: EventLoopProxy<UserEvent>,
 }
 
 impl Drop for GlowWinitRunning<'_> {
@@ -129,6 +132,59 @@ struct GlutinWindowContext {
     window_from_viewport: OrderedViewportIdMap<WindowId>,
 
     focused_viewport: Option<ViewportId>,
+
+    /// Only present for a native Wayland display.
+    wayland_root: Option<WaylandRoot>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RootAttachment {
+    #[default]
+    Attached,
+    Detached,
+}
+
+#[derive(Default)]
+struct WaylandRoot {
+    attachment: RootAttachment,
+    requested_visibility: Option<bool>,
+    /// The unmaximized size in winit logical pixels, before egui zoom.
+    normal_size: Option<egui::Vec2>,
+    resize_increments: Option<egui::Vec2>,
+    pbuffer: Option<glutin::surface::Surface<glutin::surface::PbufferSurface>>,
+}
+
+impl WaylandRoot {
+    fn take_visibility_commands(&mut self, commands: &mut Vec<egui::ViewportCommand>) {
+        commands.retain(|command| {
+            if let egui::ViewportCommand::Visible(visible) = command {
+                self.requested_visibility = Some(*visible);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn take_transition(&mut self) -> Option<RootAttachment> {
+        let requested = match self.requested_visibility.take()? {
+            true => RootAttachment::Attached,
+            false => RootAttachment::Detached,
+        };
+        (requested != self.attachment).then_some(requested)
+    }
+}
+
+fn matches_current_window(id: WindowId, current: Option<WindowId>) -> bool {
+    current == Some(id)
+}
+
+fn root_close_result(detached: bool, closing: bool) -> EventResult {
+    match (detached, closing) {
+        (_, false) => EventResult::Wait,
+        (false, true) => EventResult::CloseRequested,
+        (true, true) => EventResult::CloseAndExit,
+    }
 }
 
 struct Viewport {
@@ -197,12 +253,24 @@ fn create_window_for_viewport(
     gl_config: &glutin::config::Config,
     builder: &ViewportBuilder,
     event_loop: &ActiveEventLoop,
+    activation_token: Option<String>,
 ) -> Result<(Arc<Window>, ViewportInfo)> {
     let window_attributes = egui_winit::apply_monitor_to_window_attributes(
         egui_winit::create_winit_window_attributes(egui_ctx, builder.clone()),
         builder,
         event_loop,
     );
+    #[cfg(all(feature = "wayland", target_os = "linux"))]
+    let window_attributes = {
+        use winit::platform::startup_notify::WindowAttributesExtStartupNotify as _;
+        if let Some(token) = activation_token {
+            window_attributes.with_activation_token(winit::window::ActivationToken::from_raw(token))
+        } else {
+            window_attributes
+        }
+    };
+    #[cfg(not(all(feature = "wayland", target_os = "linux")))]
+    let _ = activation_token;
     if window_attributes.transparent()
         && gl_config.supports_transparency() == Some(false)
         && !cfg!(target_os = "windows")
@@ -455,12 +523,17 @@ impl<'app> GlowWinitApp<'app> {
             });
         }
 
+        #[cfg(feature = "accesskit")]
+        let accesskit_proxy = self.repaint_proxy.lock().clone();
+
         Ok(self.running.insert(GlowWinitRunning {
             integration,
             app,
             glutin,
             painter,
             pending_deltas: Default::default(),
+            #[cfg(feature = "accesskit")]
+            accesskit_proxy,
         }))
     }
 }
@@ -473,7 +546,7 @@ impl WinitApp for GlowWinitApp<'_> {
     fn window(&self, window_id: WindowId) -> Option<Arc<Window>> {
         let running = self.running.as_ref()?;
         let glutin = running.glutin.borrow();
-        let viewport_id = *glutin.viewport_from_window.get(&window_id)?;
+        let viewport_id = glutin.active_viewport_id(window_id)?;
         if let Some(viewport) = glutin.viewports.get(&viewport_id) {
             viewport.window.clone()
         } else {
@@ -489,6 +562,26 @@ impl WinitApp for GlowWinitApp<'_> {
             .window_from_viewport
             .get(&id)
             .copied()
+    }
+
+    fn is_detached(&self, id: ViewportId) -> bool {
+        id == ViewportId::ROOT
+            && self
+                .running
+                .as_ref()
+                .is_some_and(|running| running.glutin.borrow().root_detached())
+    }
+
+    fn run_detached(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        id: ViewportId,
+    ) -> Result<EventResult> {
+        if !self.is_detached(id) {
+            return Ok(EventResult::Wait);
+        }
+        let running = self.running.as_mut().unwrap();
+        running.run_viewport(event_loop, id, PassMode::Full)
     }
 
     fn save(&mut self) {
@@ -509,13 +602,22 @@ impl WinitApp for GlowWinitApp<'_> {
         if let Some(mut running) = self.running.take() {
             profiling::function_scope!();
 
+            let (window, context_bound) = {
+                let mut glutin = running.glutin.borrow_mut();
+                let context_bound = !glutin.root_detached() || glutin.bind_detached_context();
+                (glutin.window_opt(ViewportId::ROOT), context_bound)
+            };
             running.integration.egui_ctx.on_exit();
-            running.integration.save(
-                running.app.as_mut(),
-                Some(&running.glutin.borrow().window(ViewportId::ROOT)),
-            );
-            running.app.on_exit(Some(running.painter.borrow().gl()));
-            running.painter.borrow_mut().destroy();
+            running
+                .integration
+                .save(running.app.as_mut(), window.as_deref());
+            if context_bound {
+                running.app.on_exit(Some(running.painter.borrow().gl()));
+                running.painter.borrow_mut().destroy();
+            } else {
+                log::error!("Unable to bind the detached Wayland GL context for shutdown");
+                running.app.on_exit(None);
+            }
         }
     }
 
@@ -546,8 +648,12 @@ impl WinitApp for GlowWinitApp<'_> {
             // First resume event. Create our root window etc.
             self.init_run_state(event_loop)?
         };
-        let window_id = running.glutin.borrow().window_from_viewport[&ViewportId::ROOT];
-        Ok(EventResult::RepaintNow(window_id))
+        let glutin = running.glutin.borrow();
+        Ok(if glutin.root_detached() {
+            EventResult::RepaintDetachedRoot(Instant::now())
+        } else {
+            EventResult::RepaintNow(glutin.window_from_viewport[&ViewportId::ROOT])
+        })
     }
 
     fn suspended(&mut self, _: &ActiveEventLoop) -> crate::Result<EventResult> {
@@ -608,7 +714,7 @@ impl WinitApp for GlowWinitApp<'_> {
 
         if let Some(running) = &self.running {
             let mut glutin = running.glutin.borrow_mut();
-            if let Some(viewport_id) = glutin.viewport_from_window.get(&event.window_id).copied()
+            if let Some(viewport_id) = glutin.active_viewport_id(event.window_id)
                 && let Some(viewport) = glutin.viewports.get_mut(&viewport_id)
                 && let Some(egui_winit) = &mut viewport.egui_winit
             {
@@ -633,16 +739,19 @@ impl GlowWinitRunning<'_> {
     ) -> Result<EventResult> {
         profiling::function_scope!();
 
-        let Some(viewport_id) = self
-            .glutin
-            .borrow()
-            .viewport_from_window
-            .get(&window_id)
-            .copied()
-        else {
+        let Some(viewport_id) = self.glutin.borrow().active_viewport_id(window_id) else {
             return Ok(EventResult::Wait);
         };
 
+        self.run_viewport(event_loop, viewport_id, mode)
+    }
+
+    fn run_viewport(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        viewport_id: ViewportId,
+        mode: PassMode,
+    ) -> Result<EventResult> {
         profiling::finish_frame!();
 
         let mut frame_timer = crate::stopwatch::Stopwatch::new();
@@ -660,13 +769,35 @@ impl GlowWinitRunning<'_> {
                 {
                     return Ok(EventResult::RepaintNext(window.id()));
                 }
+                if viewport.ids.parent == ViewportId::ROOT && glutin.root_detached() {
+                    return Ok(EventResult::RepaintDetachedRoot(Instant::now()));
+                }
                 return Ok(EventResult::Wait);
             }
         }
 
-        let (raw_input, viewport_ui_cb, is_visible, show_ui) = {
+        let detached = viewport_id == ViewportId::ROOT && self.glutin.borrow().root_detached();
+        let (raw_input, viewport_ui_cb, is_visible, show_ui) = if detached {
+            let mut glutin = self.glutin.borrow_mut();
+            if !glutin.bind_detached_context() {
+                // Keep servicing the tray so the user can attempt a remap.
+                log::warn!("Unable to make the detached Wayland GL context current");
+            }
+            let info = &glutin.viewports[&ViewportId::ROOT].info;
+            let raw_input = egui::RawInput {
+                screen_rect: info
+                    .inner_rect
+                    .map(|rect| egui::Rect::from_min_size(egui::Pos2::ZERO, rect.size())),
+                focused: false,
+                ..Default::default()
+            };
+            (raw_input, None, false, true)
+        } else {
             let mut glutin = self.glutin.borrow_mut();
             let egui_ctx = glutin.egui_ctx.clone();
+            if viewport_id == ViewportId::ROOT {
+                glutin.remember_normal_root_size();
+            }
             let Some(viewport) = glutin.viewports.get_mut(&viewport_id) else {
                 return Ok(EventResult::Wait);
             };
@@ -687,7 +818,7 @@ impl GlowWinitRunning<'_> {
             let Some(egui_winit) = viewport.egui_winit.as_mut() else {
                 return Ok(EventResult::Wait);
             };
-            let mut raw_input = egui_winit.take_egui_input(window);
+            let raw_input = egui_winit.take_egui_input(window);
             let viewport_ui_cb = viewport.viewport_ui_cb.clone();
 
             // If the root viewport isn't visible (or its Wayland frame callback was withheld
@@ -702,17 +833,17 @@ impl GlowWinitRunning<'_> {
             });
             let show_ui = is_visible || has_visible_descendant;
 
-            self.integration.pre_update();
-
-            raw_input.time = Some(self.integration.beginning.elapsed().as_secs_f64());
-            raw_input.viewports = glutin
-                .viewports
-                .iter()
-                .map(|(id, viewport)| (*id, viewport.info.clone()))
-                .collect();
-
             (raw_input, viewport_ui_cb, is_visible, show_ui)
         };
+        let mut raw_input = raw_input;
+        self.integration.pre_update();
+        raw_input.viewports = self
+            .glutin
+            .borrow()
+            .viewports
+            .iter()
+            .map(|(id, viewport)| (*id, viewport.info.clone()))
+            .collect();
 
         if !show_ui {
             // Nothing will be shown, so we run no egui pass at all.
@@ -742,9 +873,7 @@ impl GlowWinitRunning<'_> {
                     }
                 }
                 for (id, commands) in viewport_commands {
-                    if let Some(viewport) = glutin.viewports.get_mut(&id) {
-                        viewport.process_commands(&self.integration.egui_ctx, commands);
-                    }
+                    glutin.process_commands(id, &self.integration.egui_ctx, commands);
                 }
             }
 
@@ -756,11 +885,7 @@ impl GlowWinitRunning<'_> {
                     .and_then(|viewport| viewport.window.as_deref()),
             );
 
-            return Ok(if self.integration.should_close() {
-                EventResult::CloseRequested
-            } else {
-                EventResult::Wait
-            });
+            return Ok(self.finish_root_transition(event_loop));
         }
 
         // HACK: In order to get the right clear_color, the system theme needs to be set, which
@@ -769,9 +894,12 @@ impl GlowWinitRunning<'_> {
         self.integration
             .egui_ctx
             .options_mut(|opt| opt.begin_pass(&raw_input));
-        let clear_color = self
-            .app
-            .clear_color(&self.integration.egui_ctx.global_style().visuals);
+        let clear_color = if is_visible {
+            self.app
+                .clear_color(&self.integration.egui_ctx.global_style().visuals)
+        } else {
+            [0.0; 4]
+        };
 
         let has_many_viewports = self.glutin.borrow().viewports.len() > 1;
         let clear_before_update = !has_many_viewports; // HACK: for some reason, an early clear doesn't "take" on Mac with multiple viewports.
@@ -860,13 +988,15 @@ impl GlowWinitRunning<'_> {
         };
 
         viewport.info.events.clear(); // they should have been processed
-        let window = viewport.window.clone().unwrap();
-        let gl_surface = viewport.gl_surface.as_ref().unwrap();
-        let egui_winit = viewport.egui_winit.as_mut().unwrap();
-
-        egui_winit.handle_platform_output_with_event_loop(&window, event_loop, platform_output);
+        let window = viewport.window.clone();
+        if let (Some(window), Some(egui_winit)) = (&window, &mut viewport.egui_winit) {
+            egui_winit.handle_platform_output_with_event_loop(window, event_loop, platform_output);
+        }
 
         if is_visible {
+            let window = window.as_ref().unwrap();
+            let gl_surface = viewport.gl_surface.as_ref().unwrap();
+            let egui_winit = viewport.egui_winit.as_mut().unwrap();
             let clipped_primitives = integration.egui_ctx.tessellate(shapes, pixels_per_point);
 
             {
@@ -937,7 +1067,9 @@ impl GlowWinitRunning<'_> {
                     }
                 }
 
-                integration.post_rendering(&window);
+                if viewport_id == ViewportId::ROOT {
+                    integration.post_rendering(window);
+                }
             }
 
             {
@@ -968,21 +1100,108 @@ impl GlowWinitRunning<'_> {
             }
         }
 
+        if detached && !pending_deltas.is_empty() && glutin.bind_detached_context() {
+            apply_texture_deltas(&mut painter, pending_deltas);
+        }
+
         glutin.handle_viewport_output(event_loop, &integration.egui_ctx, &viewport_output);
+        let textures_applied = pending_deltas.is_empty();
 
         integration.report_frame_time(frame_timer.total_time_sec()); // don't count auto-save time as part of regular frame time
 
         integration.maybe_autosave(
             app.as_mut(),
-            (viewport_id == ViewportId::ROOT).then_some(&window),
+            window
+                .as_deref()
+                .filter(|_| viewport_id == ViewportId::ROOT),
         );
 
-        sleep_if_invisible_or_minimized(Some(&window));
+        if let Some(window) = &window {
+            sleep_if_invisible_or_minimized(Some(window));
+        }
+        drop(window);
+        drop(painter);
+        drop(glutin);
 
-        if integration.should_close() {
-            Ok(EventResult::CloseRequested)
-        } else {
-            Ok(EventResult::Wait)
+        let result = self.finish_root_transition(event_loop);
+        if textures_applied {
+            self.app
+                .post_frame(&self.integration.egui_ctx, &mut self.integration.frame);
+        }
+        Ok(result)
+    }
+
+    fn finish_root_transition(&mut self, event_loop: &ActiveEventLoop) -> EventResult {
+        let mut glutin = self.glutin.borrow_mut();
+        let detached = glutin.root_detached();
+        if self.integration.should_close() {
+            return root_close_result(detached, true);
+        }
+
+        let token = self.integration.frame.window_activation_token.take();
+        let Some(transition) = glutin
+            .wayland_root
+            .as_mut()
+            .and_then(WaylandRoot::take_transition)
+        else {
+            return EventResult::Wait;
+        };
+
+        match transition {
+            RootAttachment::Detached => {
+                if !glutin.bind_offscreen_context() {
+                    log::warn!(
+                        "No offscreen Wayland EGL binding is available. Minimizing the root window."
+                    );
+                    glutin.process_commands(
+                        ViewportId::ROOT,
+                        &self.integration.egui_ctx,
+                        vec![egui::ViewportCommand::Minimized(true)],
+                    );
+                    return EventResult::Wait;
+                }
+
+                let window = glutin.window(ViewportId::ROOT);
+                glutin.remember_normal_root_size();
+                drop(glutin);
+                self.integration.save(self.app.as_mut(), Some(&window));
+                let id = window.id();
+                drop(window);
+
+                self.integration.set_root_window(None);
+                self.glutin.borrow_mut().detach_root(id);
+                EventResult::RootDetached(id)
+            }
+            RootAttachment::Attached => match glutin.reattach_root(event_loop, token) {
+                Ok((window, state)) => {
+                    #[cfg(feature = "accesskit")]
+                    let state = {
+                        let mut state = state;
+                        state.init_accesskit(event_loop, &window, self.accesskit_proxy.clone());
+                        state
+                    };
+                    let id = window.id();
+                    glutin
+                        .viewports
+                        .get_mut(&ViewportId::ROOT)
+                        .unwrap()
+                        .egui_winit = Some(state);
+                    self.integration.set_root_window(Some(window));
+                    glutin.process_commands(
+                        ViewportId::ROOT,
+                        &self.integration.egui_ctx,
+                        Vec::new(),
+                    );
+                    self.integration
+                        .egui_ctx
+                        .request_repaint_of(ViewportId::ROOT);
+                    EventResult::RepaintNext(id)
+                }
+                Err(err) => {
+                    log::warn!("Unable to restore the Wayland root window: {err}");
+                    EventResult::Wait
+                }
+            },
         }
     }
 
@@ -992,7 +1211,10 @@ impl GlowWinitRunning<'_> {
         event: &winit::event::WindowEvent,
     ) -> EventResult {
         let mut glutin = self.glutin.borrow_mut();
-        let viewport_id = glutin.viewport_from_window.get(&window_id).copied();
+        let Some(viewport_id) = glutin.active_viewport_id(window_id) else {
+            return EventResult::Wait;
+        };
+        let viewport_id = Some(viewport_id);
 
         // On Windows, if a window is resized by the user, it should repaint synchronously, inside the
         // event handler.
@@ -1129,6 +1351,19 @@ impl GlowWinitRunning<'_> {
     }
 }
 
+fn apply_texture_deltas(painter: &mut egui_glow::Painter, deltas: &mut TexturesDelta) {
+    #[expect(clippy::iter_over_hash_type)]
+    for (id, images) in deltas.set.drain() {
+        for image in images {
+            painter.set_texture(id, &image);
+        }
+    }
+    #[expect(clippy::iter_over_hash_type)]
+    for id in deltas.free.drain() {
+        painter.free_texture(id);
+    }
+}
+
 fn change_gl_context(
     current_gl_context: &mut Option<glutin::context::PossiblyCurrentContext>,
     not_current_gl_context: &mut Option<glutin::context::NotCurrentContext>,
@@ -1253,9 +1488,28 @@ impl GlutinWindowContext {
                     event_loop,
                     config_template_builder.clone(),
                     |mut config_iterator| {
-                        let config = config_iterator.next().expect(
+                        let first = config_iterator.next().expect(
                             "failed to find a matching configuration for creating glutin config",
                         );
+                        let config = if is_wayland
+                            && !first
+                                .config_surface_types()
+                                .contains(glutin::config::ConfigSurfaceTypes::PBUFFER)
+                        {
+                            // Prefer a config with an offscreen fallback without requiring it
+                            // from drivers that only support surfaceless Wayland rendering.
+                            config_iterator
+                                .find(|config| {
+                                    config
+                                        .config_surface_types()
+                                        .contains(glutin::config::ConfigSurfaceTypes::PBUFFER)
+                                        && config.supports_transparency()
+                                            == first.supports_transparency()
+                                })
+                                .unwrap_or(first)
+                        } else {
+                            first
+                        };
                         log::debug!(
                             "using the first config from config picker closure. config: {config:?}"
                         );
@@ -1339,6 +1593,10 @@ impl GlutinWindowContext {
         // help us start from scratch again if we fail context creation and go back to preferEgl or try with different config etc..
         // https://github.com/emilk/egui/pull/2541#issuecomment-1370767582
 
+        let normal_size = viewports[&ViewportId::ROOT]
+            .builder
+            .inner_size
+            .map(|size| size * egui_ctx.zoom_factor());
         let mut slf = Self {
             egui_ctx: egui_ctx.clone(),
             swap_interval,
@@ -1352,11 +1610,259 @@ impl GlutinWindowContext {
             clipboard_shortcuts: native_options.clipboard_shortcuts,
             window_from_viewport,
             focused_viewport: Some(ViewportId::ROOT),
+            wayland_root: (cfg!(all(feature = "wayland", target_os = "linux")) && is_wayland).then(
+                || WaylandRoot {
+                    normal_size: normal_size,
+                    ..Default::default()
+                },
+            ),
         };
 
         slf.initialize_window(ViewportId::ROOT, event_loop)?;
 
         Ok(slf)
+    }
+
+    fn root_detached(&self) -> bool {
+        self.wayland_root
+            .as_ref()
+            .is_some_and(|root| root.attachment == RootAttachment::Detached)
+    }
+
+    fn active_viewport_id(&self, window_id: WindowId) -> Option<ViewportId> {
+        let id = *self.viewport_from_window.get(&window_id)?;
+        let current = self
+            .viewports
+            .get(&id)?
+            .window
+            .as_ref()
+            .map(|window| window.id());
+        matches_current_window(window_id, current).then_some(id)
+    }
+
+    fn remember_normal_root_size(&mut self) {
+        let Some(root) = &mut self.wayland_root else {
+            return;
+        };
+        let Some(window) = &self.viewports[&ViewportId::ROOT].window else {
+            return;
+        };
+        if !window.is_maximized() && window.fullscreen().is_none() {
+            let size = window.inner_size();
+            if size.width > 0 && size.height > 0 {
+                let size = size.to_logical::<f32>(window.scale_factor());
+                root.normal_size = Some(egui::vec2(size.width, size.height));
+            }
+        }
+    }
+
+    /// Prove that the context can stay alive even if the last child closes.
+    #[expect(unsafe_code)]
+    fn bind_offscreen_context(&mut self) -> bool {
+        let Some(context) = &self.current_gl_context else {
+            return false;
+        };
+        let Some(root) = &mut self.wayland_root else {
+            return false;
+        };
+        if let Some(pbuffer) = &root.pbuffer {
+            return match context.make_current(pbuffer) {
+                Ok(()) => {
+                    self.current_viewport = None;
+                    true
+                }
+                Err(err) => {
+                    log::debug!("Could not bind the Wayland EGL pbuffer: {err}");
+                    false
+                }
+            };
+        }
+
+        #[cfg(all(feature = "wayland", target_os = "linux"))]
+        if let glutin::context::PossiblyCurrentContext::Egl(egl) = context
+            && egl.make_current_surfaceless().is_ok()
+        {
+            self.current_viewport = None;
+            return true;
+        }
+
+        use glutin::surface::{PbufferSurface, SurfaceAttributesBuilder};
+        if !self
+            .gl_config
+            .config_surface_types()
+            .contains(glutin::config::ConfigSurfaceTypes::PBUFFER)
+        {
+            return false;
+        }
+        let attributes = SurfaceAttributesBuilder::<PbufferSurface>::new()
+            .build(NonZeroU32::MIN, NonZeroU32::MIN);
+        // SAFETY: the config belongs to this display and supports pbuffers.
+        let pbuffer = unsafe {
+            self.gl_config
+                .display()
+                .create_pbuffer_surface(&self.gl_config, &attributes)
+        };
+        match pbuffer.and_then(|surface| {
+            context.make_current(&surface)?;
+            Ok(surface)
+        }) {
+            Ok(surface) => {
+                root.pbuffer = Some(surface);
+                self.current_viewport = None;
+                true
+            }
+            Err(err) => {
+                log::debug!("Could not create or bind an offscreen Wayland EGL surface: {err}");
+                false
+            }
+        }
+    }
+
+    fn bind_detached_context(&mut self) -> bool {
+        if let Some(context) = &self.current_gl_context {
+            for (id, viewport) in &self.viewports {
+                if let Some(surface) = &viewport.gl_surface
+                    && context.make_current(surface).is_ok()
+                {
+                    self.current_viewport = Some(*id);
+                    return true;
+                }
+            }
+        }
+        self.bind_offscreen_context()
+    }
+
+    fn detach_root(&mut self, window_id: WindowId) {
+        let root = self.wayland_root.as_mut().unwrap();
+        let viewport = self.viewports.get_mut(&ViewportId::ROOT).unwrap();
+        let window = viewport.window.as_ref().unwrap();
+        viewport.builder.maximized = Some(window.is_maximized());
+        viewport.builder.resizable = Some(window.is_resizable());
+        viewport.builder.visible = Some(true);
+
+        self.viewport_from_window.remove(&window_id);
+        self.window_from_viewport.remove(&ViewportId::ROOT);
+        if self.focused_viewport == Some(ViewportId::ROOT) {
+            self.focused_viewport = None;
+        }
+        viewport.info.focused = Some(false);
+        viewport.info.minimized = Some(true);
+        viewport.info.occluded = Some(true);
+        viewport.info.events.clear();
+        viewport.actions_requested.clear();
+        viewport.egui_winit = None;
+        viewport.gl_surface = None;
+        viewport.window = None;
+        root.attachment = RootAttachment::Detached;
+    }
+
+    fn reattach_root(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        activation_token: Option<String>,
+    ) -> Result<(Arc<Window>, egui_winit::State)> {
+        let viewport = &self.viewports[&ViewportId::ROOT];
+        let root = self.wayland_root.as_mut().unwrap();
+        let mut builder = viewport.builder.clone();
+        builder.inner_size = root
+            .normal_size
+            .map(|size| size / self.egui_ctx.zoom_factor());
+        let (window, mut info) = create_window_for_viewport(
+            &self.egui_ctx,
+            &self.gl_config,
+            &builder,
+            event_loop,
+            activation_token,
+        )?;
+        let surface = create_window_surface(&self.gl_config, &window)?;
+        let context = self.current_gl_context.as_ref().unwrap();
+        // A failed bind leaves ownership of the context and the previous EGL binding intact.
+        context.make_current(&surface)?;
+        self.current_viewport = Some(ViewportId::ROOT);
+        if let Err(err) = surface.set_swap_interval(context, self.swap_interval) {
+            log::warn!("Failed to set swap interval due to error: {err}");
+        }
+
+        if let Some(size) = root.resize_increments {
+            let ppp = egui_winit::pixels_per_point(&self.egui_ctx, &window);
+            window.set_resize_increments(Some(winit::dpi::PhysicalSize::new(
+                size.x * ppp,
+                size.y * ppp,
+            )));
+        }
+        let state = create_winit_state(
+            &self.egui_ctx,
+            event_loop,
+            ViewportId::ROOT,
+            &window,
+            self.max_texture_side,
+            self.clipboard_shortcuts,
+        );
+
+        let viewport = self.viewports.get_mut(&ViewportId::ROOT).unwrap();
+        info.events = core::mem::take(&mut viewport.info.events);
+        viewport.info = info;
+        viewport.gl_surface = Some(surface);
+        viewport.window = Some(Arc::clone(&window));
+        self.viewport_from_window
+            .insert(window.id(), ViewportId::ROOT);
+        self.window_from_viewport
+            .insert(ViewportId::ROOT, window.id());
+        root.attachment = RootAttachment::Attached;
+        Ok((window, state))
+    }
+
+    fn process_commands(
+        &mut self,
+        id: ViewportId,
+        egui_ctx: &egui::Context,
+        mut commands: Vec<egui::ViewportCommand>,
+    ) {
+        let Some(viewport) = self.viewports.get_mut(&id) else {
+            return;
+        };
+        if id != ViewportId::ROOT || self.wayland_root.is_none() {
+            viewport.process_commands(egui_ctx, commands);
+            return;
+        }
+        let root = self.wayland_root.as_mut().unwrap();
+        let mut all_commands = core::mem::take(&mut viewport.deferred_commands);
+        all_commands.append(&mut commands);
+        root.take_visibility_commands(&mut all_commands);
+
+        use egui::ViewportCommand as Cmd;
+        all_commands.retain(|command| {
+            match command {
+                Cmd::MinInnerSize(size) => {
+                    viewport.builder.min_inner_size =
+                        (size.is_finite() && *size != egui::Vec2::ZERO).then_some(*size)
+                }
+                Cmd::MaxInnerSize(size) => {
+                    viewport.builder.max_inner_size = size.is_finite().then_some(*size)
+                }
+                Cmd::Resizable(value) => viewport.builder.resizable = Some(*value),
+                Cmd::InnerSize(size) if viewport.info.maximized != Some(true) => {
+                    root.normal_size = Some(*size * egui_ctx.zoom_factor())
+                }
+                Cmd::ResizeIncrements(size) => root.resize_increments = *size,
+                Cmd::Title(title) => viewport.builder.title = Some(title.clone()),
+                Cmd::Decorations(value) => viewport.builder.decorations = Some(*value),
+                Cmd::Transparent(value) => viewport.builder.transparent = Some(*value),
+                Cmd::Close if root.attachment == RootAttachment::Detached => {
+                    viewport.info.events.push(egui::ViewportEvent::Close);
+                    egui_ctx.request_repaint_of(ViewportId::ROOT);
+                    return false;
+                }
+                Cmd::CancelClose | Cmd::RequestPaintWhileHidden
+                    if root.attachment == RootAttachment::Detached =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+            true
+        });
+        viewport.process_commands(egui_ctx, all_commands);
     }
 
     /// Create a surface, window, and winit integration for all viewports lacking any of that.
@@ -1375,13 +1881,16 @@ impl GlutinWindowContext {
     }
 
     /// Create a surface, window, and winit integration for the viewport, if missing.
-    #[expect(unsafe_code)]
     pub(crate) fn initialize_window(
         &mut self,
         viewport_id: ViewportId,
         event_loop: &ActiveEventLoop,
     ) -> Result {
         profiling::function_scope!();
+
+        if viewport_id == ViewportId::ROOT && self.root_detached() {
+            return Ok(());
+        }
 
         let viewport = self
             .viewports
@@ -1397,71 +1906,51 @@ impl GlutinWindowContext {
                 &self.gl_config,
                 &viewport.builder,
                 event_loop,
+                None,
             )?;
             viewport.info = viewport_info;
             viewport.window.insert(window)
         };
 
         viewport.egui_winit.get_or_insert_with(|| {
-            log::debug!("Initializing egui_winit for viewport {viewport_id:?}");
-            let mut egui_winit = egui_winit::State::new(
-                self.egui_ctx.clone(),
-                viewport_id,
+            create_winit_state(
+                &self.egui_ctx,
                 event_loop,
-                Some(window.scale_factor() as f32),
-                event_loop.system_theme(),
+                viewport_id,
+                window,
                 self.max_texture_side,
-            );
-            egui_winit.set_clipboard_shortcuts(self.clipboard_shortcuts);
-            egui_winit
+                self.clipboard_shortcuts,
+            )
         });
 
         if viewport.gl_surface.is_none() {
             log::debug!("Creating a gl_surface for viewport {viewport_id:?}");
+            let gl_surface = create_window_surface(&self.gl_config, window)?;
 
-            // surface attributes
-            let (width_px, height_px): (u32, u32) = window.inner_size().into();
-            let width_px = NonZeroU32::new(width_px).unwrap_or(NonZeroU32::MIN);
-            let height_px = NonZeroU32::new(height_px).unwrap_or(NonZeroU32::MIN);
-            let surface_attributes = {
-                glutin::surface::SurfaceAttributesBuilder::<glutin::surface::WindowSurface>::new()
-                    .build(
-                        window
-                            .window_handle()
-                            .expect("Failed to get display handle")
-                            .as_raw(),
-                        width_px,
-                        height_px,
-                    )
-            };
-
-            log::trace!("creating surface with attributes: {surface_attributes:?}");
-            let gl_surface = unsafe {
-                self.gl_config
-                    .display()
-                    .create_window_surface(&self.gl_config, &surface_attributes)?
-            };
-
-            log::trace!("surface created successfully: {gl_surface:?}. making context current");
-
-            let not_current_gl_context =
-                if let Some(not_current_context) = self.not_current_gl_context.take() {
-                    not_current_context
-                } else {
-                    self.current_viewport = None;
-                    self.current_gl_context
-                        .take()
-                        .unwrap()
-                        .make_not_current()
-                        .unwrap()
-                };
-            let current_gl_context = not_current_gl_context.make_current(&gl_surface)?;
-            self.current_viewport = Some(viewport_id);
-
-            // try setting swap interval. but its not absolutely necessary, so don't panic on failure.
-            log::trace!("made context current. setting swap interval for surface");
-            if let Err(err) = gl_surface.set_swap_interval(&current_gl_context, self.swap_interval)
+            if self.wayland_root.is_some()
+                && let Some(context) = &self.current_gl_context
             {
+                // A failed child bind must not consume the context needed to restore the root.
+                context.make_current(&gl_surface)?;
+            } else {
+                let not_current_context =
+                    if let Some(not_current_context) = self.not_current_gl_context.take() {
+                        not_current_context
+                    } else {
+                        self.current_viewport = None;
+                        self.current_gl_context
+                            .take()
+                            .unwrap()
+                            .make_not_current()
+                            .unwrap()
+                    };
+                self.current_gl_context = Some(not_current_context.make_current(&gl_surface)?);
+            }
+            self.current_viewport = Some(viewport_id);
+            if let Err(err) = gl_surface.set_swap_interval(
+                self.current_gl_context.as_ref().unwrap(),
+                self.swap_interval,
+            ) {
                 log::warn!("Failed to set swap interval due to error: {err}");
             }
 
@@ -1469,12 +1958,14 @@ impl GlutinWindowContext {
             // create window/surface/make context current once and just use them forever.
 
             viewport.gl_surface = Some(gl_surface);
-
-            self.current_gl_context = Some(current_gl_context);
         }
 
+        if let Some(old) = self.window_from_viewport.insert(viewport_id, window.id())
+            && old != window.id()
+        {
+            self.viewport_from_window.remove(&old);
+        }
         self.viewport_from_window.insert(window.id(), viewport_id);
-        self.window_from_viewport.insert(viewport_id, window.id());
 
         Ok(())
     }
@@ -1592,7 +2083,8 @@ impl GlutinWindowContext {
 
             let old_inner_size = viewport.window.as_ref().map(|window| window.inner_size());
 
-            viewport.process_commands(egui_ctx, commands);
+            self.process_commands(viewport_id, egui_ctx, commands);
+            let viewport = &self.viewports[&viewport_id];
 
             // For Wayland : https://github.com/emilk/egui/issues/4196
             if cfg!(target_os = "linux")
@@ -1611,6 +2103,49 @@ impl GlutinWindowContext {
 
         self.remove_viewports_not_in(viewport_output);
     }
+}
+
+fn create_winit_state(
+    egui_ctx: &egui::Context,
+    event_loop: &ActiveEventLoop,
+    viewport_id: ViewportId,
+    window: &Window,
+    max_texture_side: Option<usize>,
+    clipboard_shortcuts: bool,
+) -> egui_winit::State {
+    let mut state = egui_winit::State::new(
+        egui_ctx.clone(),
+        viewport_id,
+        event_loop,
+        Some(window.scale_factor() as f32),
+        event_loop.system_theme(),
+        max_texture_side,
+    );
+    state.set_clipboard_shortcuts(clipboard_shortcuts);
+    state
+}
+
+#[expect(unsafe_code)]
+fn create_window_surface(
+    config: &glutin::config::Config,
+    window: &Window,
+) -> Result<glutin::surface::Surface<glutin::surface::WindowSurface>> {
+    let size = window.inner_size();
+    let attributes =
+        glutin::surface::SurfaceAttributesBuilder::<glutin::surface::WindowSurface>::new().build(
+            window
+                .window_handle()
+                .expect("Failed to get window handle")
+                .as_raw(),
+            NonZeroU32::new(size.width).unwrap_or(NonZeroU32::MIN),
+            NonZeroU32::new(size.height).unwrap_or(NonZeroU32::MIN),
+        );
+    // SAFETY: the window lives alongside the surface, and config belongs to this display.
+    Ok(unsafe {
+        config
+            .display()
+            .create_window_surface(config, &attributes)?
+    })
 }
 
 fn initialize_or_update_viewport<'a>(
@@ -1996,5 +2531,48 @@ mod tests {
         });
         assert_eq!(result, Ok("compat"));
         assert_eq!(tried, ["core", "es", "compat"]);
+    }
+}
+
+#[cfg(test)]
+mod wayland_root_tests {
+    use super::*;
+
+    #[test]
+    fn last_visibility_command_wins() {
+        use egui::ViewportCommand::Visible;
+
+        let mut root = WaylandRoot::default();
+        let mut commands = vec![Visible(false), Visible(true)];
+        root.take_visibility_commands(&mut commands);
+        assert_eq!(root.take_transition(), None);
+        assert!(commands.is_empty());
+
+        commands.extend([Visible(true), Visible(false)]);
+        root.take_visibility_commands(&mut commands);
+        assert_eq!(root.take_transition(), Some(RootAttachment::Detached));
+        assert_eq!(root.attachment, RootAttachment::Attached);
+
+        root.attachment = RootAttachment::Detached;
+        commands.push(Visible(true));
+        root.take_visibility_commands(&mut commands);
+        assert_eq!(root.take_transition(), Some(RootAttachment::Attached));
+        assert_eq!(root.attachment, RootAttachment::Detached);
+    }
+
+    #[test]
+    fn rejects_stale_native_ids() {
+        let old = WindowId::from(1);
+        let new = WindowId::from(2);
+        assert!(!matches_current_window(old, None));
+        assert!(!matches_current_window(old, Some(new)));
+        assert!(matches_current_window(new, Some(new)));
+    }
+
+    #[test]
+    fn detached_close_exits_without_destroyed_event() {
+        assert_eq!(root_close_result(false, true), EventResult::CloseRequested);
+        assert_eq!(root_close_result(true, false), EventResult::Wait);
+        assert_eq!(root_close_result(true, true), EventResult::CloseAndExit);
     }
 }

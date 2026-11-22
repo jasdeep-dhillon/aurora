@@ -908,6 +908,10 @@ impl WgpuWinitRunning<'_> {
         integration.maybe_autosave(app.as_mut(), window_for_autosave);
 
         sleep_if_invisible_or_minimized(window.map(|window| window.as_ref()));
+        drop(shared_mut);
+        if pending_deltas.is_empty() {
+            app.post_frame(&integration.egui_ctx, &mut integration.frame);
+        }
 
         if integration.should_close() {
             Ok(EventResult::CloseRequested)
