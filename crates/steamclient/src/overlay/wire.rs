@@ -420,7 +420,11 @@ impl ToGame {
                     let size = [r.u32()?, r.u32()?];
                     let linear = r.u8()? != 0;
                     let rgba = r.bytes()?.to_vec();
-                    if rgba.len() as u64 != size[0] as u64 * size[1] as u64 * 4 {
+                    let expected = (size[0] as u64)
+                        .checked_mul(size[1] as u64)
+                        .and_then(|px| px.checked_mul(4))
+                        .ok_or_else(bad)?;
+                    if rgba.len() as u64 != expected {
                         return Err(bad());
                     }
                     set.push(TexSet { id, pos, size, linear, rgba });

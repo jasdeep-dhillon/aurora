@@ -521,6 +521,21 @@ impl reqwest::dns::Resolve for PublicDnsResolver {
     }
 }
 
+fn is_trusted_steam_cdn_host(host: &str) -> bool {
+    let h = host.trim_end_matches('.').to_ascii_lowercase();
+    matches!(
+        h.as_str(),
+        "steamusercontent-a.akamaihd.net"
+            | "steamuserimages-a.akamaihd.net"
+            | "steamcdn-a.akamaihd.net"
+            | "media.steampowered.com"
+            | "avatars.akamai.steamstatic.com"
+            | "avatars.fastly.steamstatic.com"
+            | "avatars.steamstatic.com"
+    ) || h.ends_with(".steamusercontent.com")
+        || h.ends_with(".steamstatic.com")
+}
+
 fn build_http_client() -> reqwest::Client {
     let redirect = reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= 5 {
@@ -528,6 +543,16 @@ fn build_http_client() -> reqwest::Client {
         }
         if let Err(err) = validate_parsed_image_url(attempt.url()) {
             return attempt.error(err);
+        }
+        if let Some(origin) = attempt.previous().first() {
+            if origin.scheme() == "https" && attempt.url().scheme() != "https" {
+                return attempt.error("refusing HTTPS-to-HTTP image redirect");
+            }
+            if origin.host_str().is_some_and(is_trusted_steam_cdn_host)
+                && !attempt.url().host_str().is_some_and(is_trusted_steam_cdn_host)
+            {
+                return attempt.error("refusing redirect off Steam CDN");
+            }
         }
         attempt.follow()
     });

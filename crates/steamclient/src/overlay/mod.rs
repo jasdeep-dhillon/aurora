@@ -35,7 +35,7 @@ mod d3d12;
 #[cfg(windows)]
 mod d3d9;
 #[cfg(windows)]
-mod hook;
+pub(crate) mod hook;
 #[cfg(windows)]
 mod input;
 #[cfg(windows)]
@@ -44,6 +44,18 @@ mod opengl;
 mod pad;
 #[cfg(windows)]
 pub(crate) use input::patch_module;
+
+/// True while the in-game overlay is open and capturing input.
+pub(crate) fn is_open() -> bool {
+    #[cfg(windows)]
+    {
+        shared::is_open()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use wire::{Mesh, TexSet};

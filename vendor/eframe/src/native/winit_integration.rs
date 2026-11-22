@@ -106,6 +106,19 @@ pub trait WinitApp {
 
     fn window_id_from_viewport_id(&self, id: ViewportId) -> Option<WindowId>;
 
+    /// Whether this viewport can run a frame without a native window.
+    fn is_detached(&self, _id: ViewportId) -> bool {
+        false
+    }
+
+    fn run_detached(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _id: ViewportId,
+    ) -> crate::Result<EventResult> {
+        Ok(EventResult::Wait)
+    }
+
     fn save(&mut self);
 
     fn save_and_destroy(&mut self);
@@ -157,6 +170,15 @@ pub enum EventResult {
     RepaintNext(WindowId),
 
     RepaintAt(WindowId, Instant),
+
+    /// Repaint the detached root independently of winit redraw events.
+    RepaintDetachedRoot(Instant),
+
+    /// The root window has been dropped. Retire its native redraw deadlines.
+    RootDetached(WindowId),
+
+    /// Clean up and exit immediately when there is no root window to destroy.
+    CloseAndExit,
 
     /// Causes a save of the client state when the persistence feature is enabled.
     Save,

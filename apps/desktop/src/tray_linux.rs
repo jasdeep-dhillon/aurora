@@ -2,13 +2,9 @@
 //! the AppIndicator extension, Cinnamon, XFCE, waybar…) with the desktop's own
 //! menu. No GTK loop needed, unlike tray-icon.
 //!
-//! Clicks run on ksni's thread. "Show" items raise the window from there too
-//! (on Wayland with the click's activation token), because a minimized
-//! Wayland window doesn't paint, so the app wouldn't see the click until it's
-//! back on screen.
+//! Capture activation tokens during ksni callbacks and send them to the UI thread.
 
-use crate::tray::TrayCmd;
-use crate::wayland_activate::Activator;
+use crate::tray::{TrayCmd, TrayEvent};
 use i18n::t;
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::{RadioGroup, RadioItem, StandardItem, SubMenu};
@@ -35,11 +31,11 @@ pub struct LinuxTray {
 }
 
 struct Sni {
-    tx: mpsc::Sender<TrayCmd>,
+    tx: mpsc::Sender<TrayEvent>,
     ctx: egui::Context,
     info: MenuInfo,
     icons: Vec<ksni::Icon>,
-    activator: Option<Activator>,
+    wayland: bool,
     online: Arc<AtomicBool>,
 }
 
@@ -48,10 +44,10 @@ const STATES: [PersonaState; 4] = [PersonaState::Online, PersonaState::Away, Per
 impl LinuxTray {
     /// `None` when no tray host is running (e.g. GNOME without the
     /// AppIndicator extension): closing then quits as before.
-    pub fn spawn(tx: mpsc::Sender<TrayCmd>, ctx: egui::Context, activator: Option<Activator>) -> Option<Self> {
+    pub fn spawn(tx: mpsc::Sender<TrayEvent>, ctx: egui::Context, wayland: bool) -> Option<Self> {
         let online = Arc::new(AtomicBool::new(true));
         let icons = [22, 32, 48, 64].into_iter().map(icon).collect();
-        let sni = Sni { tx, ctx, info: MenuInfo::default(), icons, activator, online: online.clone() };
+        let sni = Sni { tx, ctx, info: MenuInfo::default(), icons, wayland, online: online.clone() };
         match sni.spawn() {
             Ok(handle) => Some(Self { handle, online, shown: MenuInfo::default() }),
             Err(e) => {
@@ -75,29 +71,23 @@ impl LinuxTray {
 }
 
 impl Sni {
-    fn pick(&mut self, cmd: TrayCmd, raise: bool) {
-        if raise {
-            self.raise();
-        }
-        let _ = self.tx.send(cmd);
-        self.ctx.request_repaint();
+    fn pick(&mut self, command: TrayCmd, raise: bool) {
+        let activation_token = if raise && self.wayland { click_activation_token() } else { None };
+        let _ = self.tx.send(TrayEvent { command, activation_token });
+        self.ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
+}
 
-    /// Raise the window with the click's activation token (Wayland). GNOME
-    /// sends the token before the click; KDE may send it a moment after.
-    fn raise(&self) {
-        let Some(activator) = &self.activator else {
-            return;
-        };
-        for _ in 0..5 {
-            if let Some(token) = ksni::current_xdg_activation_token() {
-                activator.activate(&token);
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+/// GNOME sends the token before the click. KDE may deliver it shortly after.
+fn click_activation_token() -> Option<String> {
+    for _ in 0..5 {
+        if let Some(token) = ksni::current_xdg_activation_token() {
+            return Some(token);
         }
-        tracing::debug!("tray click came without an activation token");
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
+    tracing::debug!("tray click came without an activation token");
+    None
 }
 
 /// Labels treat `_` as an access-key marker.
@@ -139,13 +129,13 @@ impl ksni::Tray for Sni {
 
     fn watcher_online(&self) {
         self.online.store(true, Ordering::Relaxed);
-        self.ctx.request_repaint();
+        self.ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
 
     fn watcher_offline(&self, _reason: OfflineReason) -> bool {
         // Keep waiting: the shell may restart (or the extension get enabled).
         self.online.store(false, Ordering::Relaxed);
-        self.ctx.request_repaint();
+        self.ctx.request_repaint_of(egui::ViewportId::ROOT);
         true
     }
 

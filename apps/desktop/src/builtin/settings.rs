@@ -1007,11 +1007,12 @@ fn appearance(
                             }
                         }
                         OptionKind::Slider => {
-                            let min = opt.min.unwrap_or(0.0);
-                            let max = opt.max.unwrap_or(100.0);
-                            let mut val = current.as_f32().unwrap_or(min).clamp(min, max);
+                            let min = opt.min.filter(|v| v.is_finite()).unwrap_or(0.0);
+                            let max = opt.max.filter(|v| v.is_finite()).unwrap_or(100.0).max(min);
+                            let raw_val = current.as_f32().filter(|v| v.is_finite()).unwrap_or(min);
+                            let mut val = raw_val.clamp(min, max);
                             let mut slider = egui::Slider::new(&mut val, min..=max);
-                            if let Some(step) = opt.step {
+                            if let Some(step) = opt.step.filter(|s| s.is_finite() && *s > 0.0) {
                                 slider = slider.step_by(step as f64);
                             }
                             if ui.add(slider).changed() {

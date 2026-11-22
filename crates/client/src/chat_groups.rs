@@ -34,10 +34,34 @@ fn remove_active(active: &ActiveGroups, id: GroupChatId) {
 
 const PERSONA_FLAGS: u32 = 1 | 2 | 4 | 8 | 16 | 64 | 128 | 256 | 512 | 4096;
 
-/// Avatar URL for a group chat: UGC upload, chaticon SHA, or associated app header.
+fn is_trusted_steam_avatar_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains('\\') || trimmed.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(trimmed).ok()?;
+    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    let host = parsed.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    let trusted = matches!(
+        host.as_str(),
+        "steamusercontent-a.akamaihd.net"
+            | "steamuserimages-a.akamaihd.net"
+            | "steamcdn-a.akamaihd.net"
+            | "media.steampowered.com"
+            | "avatars.akamai.steamstatic.com"
+            | "avatars.fastly.steamstatic.com"
+            | "avatars.steamstatic.com"
+    ) || host.ends_with(".steamusercontent.com")
+        || host.ends_with(".steamstatic.com");
+    trusted.then(|| parsed.into())
+}
+
+/// Avatar URL for a group chat: validated Steam UGC upload, chaticon SHA, or associated app header.
 pub fn avatar_url(avatar_sha: &[u8], ugc_url: &str, app_id: AppId) -> Option<String> {
-    if !ugc_url.trim().is_empty() {
-        return Some(ugc_url.to_string());
+    if let Some(url) = is_trusted_steam_avatar_url(ugc_url) {
+        return Some(url);
     }
     if let Some(url) = model::art::group_chat_avatar(avatar_sha) {
         return Some(url);
@@ -1064,4 +1088,22 @@ pub fn handle_notification(conn: &Connection, me: SteamId, active: &ActiveGroups
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avatar_url_restricts_ugc_urls_to_trusted_steam_https_hosts() {
+        let trusted = "https://steamusercontent-a.akamaihd.net/ugc/12345/abc/";
+        assert_eq!(avatar_url(&[], trusted, 0).as_deref(), Some(trusted));
+        // Arbitrary third-party URLs or HTTP URLs must be rejected and fall back.
+        assert_eq!(avatar_url(&[], "https://tracker.evil.example/pixel.png", 0), None);
+        assert_eq!(avatar_url(&[], "http://steamusercontent-a.akamaihd.net/ugc/1/", 0), None);
+        assert_eq!(
+            avatar_url(&[], "https://tracker.evil.example/pixel.png", 440),
+            Some(model::art::header(440))
+        );
+    }
 }

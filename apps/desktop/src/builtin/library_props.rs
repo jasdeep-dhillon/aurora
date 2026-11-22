@@ -992,25 +992,27 @@ impl Library {
                         ui.horizontal(|ui| {
                             if w::button(ui, t, Some(icons::IMAGE), t!("Change"), w::Kind::Secondary, w::Size::Sm).clicked() {
                                 if let Some(src) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "webp"]).pick_file() {
-                                    let dir = client::store::config_dir().join("custom-art").join(app.to_string());
-                                    let _ = std::fs::create_dir_all(&dir);
-                                    for ext in ["png", "jpg", "jpeg", "webp"] {
-                                        let _ = std::fs::remove_file(dir.join(format!("{kind}.{ext}")));
-                                    }
-                                    let ext = src.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_else(|| "png".into());
-                                    let _ = std::fs::copy(&src, dir.join(format!("{kind}.{ext}")));
-                                    invalidate_custom_art(app, kind);
-                                    ui.ctx().forget_all_images();
+                                    let ctx_clone = ui.ctx().clone();
+                                    let kind = kind.to_string();
+                                    std::thread::spawn(move || {
+                                        if install_custom_art(&src, app, &kind).is_ok() {
+                                            invalidate_custom_art(app, &kind);
+                                            ctx_clone.forget_all_images();
+                                            ctx_clone.request_repaint();
+                                        }
+                                    });
                                 }
                             }
                             let has_custom = custom_art(app, kind).is_some();
                             if ui.add_enabled_ui(has_custom, |ui| w::button(ui, t, None, t!("Reset"), w::Kind::Ghost, w::Size::Sm)).inner.clicked() {
-                                let dir = client::store::config_dir().join("custom-art").join(app.to_string());
-                                for ext in ["png", "jpg", "jpeg", "webp"] {
-                                    let _ = std::fs::remove_file(dir.join(format!("{kind}.{ext}")));
-                                }
-                                invalidate_custom_art(app, kind);
-                                ui.ctx().forget_all_images();
+                                let ctx_clone = ui.ctx().clone();
+                                let kind = kind.to_string();
+                                std::thread::spawn(move || {
+                                    reset_custom_art(app, &kind);
+                                    invalidate_custom_art(app, &kind);
+                                    ctx_clone.forget_all_images();
+                                    ctx_clone.request_repaint();
+                                });
                             }
                         });
                     });
@@ -1031,4 +1033,154 @@ fn section(ui: &mut Ui, t: &Theme, title: &str, body: &str, add: impl FnOnce(&mu
         add(ui);
     });
     ui.add_space(8.0);
+}
+
+const MAX_CUSTOM_ART_BYTES: u64 = 16 * 1024 * 1024;
+static CUSTOM_ART_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
+
+fn allowed_art_ext_from_magic(header: &[u8]) -> Option<&'static str> {
+    if header.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if header.starts_with(b"\xff\xd8\xff") {
+        Some("jpg")
+    } else if header.len() >= 12 && &header[0..4] == b"RIFF" && &header[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+fn ensure_real_custom_art_dir(app: AppId) -> Result<std::path::PathBuf, String> {
+    let base = client::store::config_dir().join("custom-art");
+    std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let base_meta = std::fs::symlink_metadata(&base).map_err(|e| e.to_string())?;
+    if base_meta.file_type().is_symlink() || !base_meta.is_dir() {
+        return Err("custom-art directory is not a real directory".into());
+    }
+    let dir = base.join(app.to_string());
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dir_meta = std::fs::symlink_metadata(&dir).map_err(|e| e.to_string())?;
+    if dir_meta.file_type().is_symlink() || !dir_meta.is_dir() {
+        return Err("custom-art app directory is not a real directory".into());
+    }
+    Ok(dir)
+}
+
+fn reset_custom_art(app: AppId, kind: &str) {
+    if !matches!(kind, "capsule" | "hero" | "logo") {
+        return;
+    }
+    let _guard = CUSTOM_ART_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = client::store::config_dir().join("custom-art").join(app.to_string());
+    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir()) {
+        return;
+    }
+    for ext in ["png", "jpg", "jpeg", "webp"] {
+        let p = dir.join(format!("{kind}.{ext}"));
+        if std::fs::symlink_metadata(&p).is_ok_and(|m| !m.file_type().is_symlink() && m.is_file()) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// Validate and copy a user-selected custom art image into Aurora's config
+/// directory: allowlists image extension & magic bytes, refuses symlinks and
+/// files larger than 16 MiB, stages via exclusive unique temp files, serializes
+/// against concurrent Change/Reset, and preserves old art until rename succeeds.
+fn install_custom_art(src: &std::path::Path, app: AppId, kind: &str) -> Result<(), String> {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    if !matches!(kind, "capsule" | "hero" | "logo") {
+        return Err("invalid custom art kind".into());
+    }
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .filter(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp"))
+        .ok_or_else(|| "unsupported custom art extension".to_string())?;
+    let pre = std::fs::symlink_metadata(src).map_err(|e| e.to_string())?;
+    if pre.file_type().is_symlink() || !pre.is_file() {
+        return Err("custom art source must be a regular file".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if (pre.file_attributes() & 0x0400) != 0 {
+            return Err("custom art source must not be a reparse point".into());
+        }
+    }
+    if pre.len() > MAX_CUSTOM_ART_BYTES {
+        return Err("custom art exceeds 16 MiB limit".into());
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(0x0020_0000);
+    }
+    let file = opts.open(src).map_err(|e| e.to_string())?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() || meta.len() > MAX_CUSTOM_ART_BYTES {
+        return Err("custom art must be a regular file <= 16 MiB".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_CUSTOM_ART_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_CUSTOM_ART_BYTES {
+        return Err("custom art exceeds 16 MiB limit".into());
+    }
+    let magic_ext = allowed_art_ext_from_magic(&bytes).ok_or_else(|| "custom art must be a valid PNG, JPEG, or WebP image".to_string())?;
+    let canonical_ext = if ext == "jpeg" && magic_ext == "jpg" { "jpg" } else { magic_ext };
+
+    let _guard = CUSTOM_ART_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = ensure_real_custom_art_dir(app)?;
+    let pid = std::process::id();
+    let (tmp, mut out) = loop {
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let candidate = dir.join(format!(".{kind}.{pid}.{seq}.tmp"));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(f) => break (candidate, f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    if let Err(e) = out.write_all(&bytes) {
+        drop(out);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    drop(out);
+
+    let final_path = dir.join(format!("{kind}.{canonical_ext}"));
+    if let Ok(m) = std::fs::symlink_metadata(&final_path) {
+        if m.file_type().is_symlink() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err("refusing to overwrite symlinked custom art file".into());
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp, &final_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    // Only remove previous alternate extensions after the new file is safely in place.
+    for old_ext in ["png", "jpg", "jpeg", "webp"] {
+        if old_ext == canonical_ext {
+            continue;
+        }
+        let p = dir.join(format!("{kind}.{old_ext}"));
+        if std::fs::symlink_metadata(&p).is_ok_and(|m| !m.file_type().is_symlink() && m.is_file()) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    Ok(())
 }

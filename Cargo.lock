@@ -5434,6 +5434,7 @@ version = "1.0.0-rc2"
 dependencies = [
  "egui",
  "flate2",
+ "libc",
  "libloading 0.8.9",
  "rhai",
  "serde",

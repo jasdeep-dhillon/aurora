@@ -133,7 +133,9 @@ impl BackgroundOverrides {
             target.fit = v;
         }
         if let Some(v) = self.opacity {
-            target.opacity = v.clamp(0.0, 1.0);
+            if v.is_finite() {
+                target.opacity = v.clamp(0.0, 1.0);
+            }
         }
         if let Some(v) = self.tint {
             target.tint = Some(v);
@@ -241,7 +243,9 @@ impl ThemeOverrides {
             theme.weight_preset = v;
         }
         if let Some(v) = self.font_scale {
-            theme.font_scale = v.clamp(0.75, 1.5);
+            if v.is_finite() {
+                theme.font_scale = v.clamp(0.75, 1.5);
+            }
         }
         if let Some(v) = self.widget_style {
             theme.widget_style = v;
@@ -360,9 +364,11 @@ impl OptionValue {
             OptionKind::Slider => {
                 raw.trim()
                     .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite())
                     .map(Self::Number)
-                    .map_err(|_| Error::InvalidOptionValue {
-                        expected: "number",
+                    .ok_or_else(|| Error::InvalidOptionValue {
+                        expected: "finite number",
                         value: raw.to_string(),
                     })
             }
@@ -496,10 +502,13 @@ impl ThemeOption {
             }
             OptionKind::Slider => {
                 if let (Some(target), Some(mut v)) = (self.target.as_deref(), effective.as_f32()) {
-                    if let Some(min) = self.min {
+                    if !v.is_finite() {
+                        return;
+                    }
+                    if let Some(min) = self.min.filter(|m| m.is_finite()) {
                         v = v.max(min);
                     }
-                    if let Some(max) = self.max {
+                    if let Some(max) = self.max.filter(|m| m.is_finite()) {
                         v = v.min(max);
                     }
                     apply_slider_target(target, v, theme, background);
@@ -546,6 +555,9 @@ pub fn apply_slider_target(
     theme: &mut ui::Theme,
     background: &mut BackgroundConfig,
 ) {
+    if !value.is_finite() {
+        return;
+    }
     let key = target.strip_prefix("theme.").unwrap_or(target);
     match key {
         "radius" => theme.radius = value.round().clamp(0.0, 255.0) as u8,
@@ -589,12 +601,81 @@ pub struct ResolvedManifestParts {
     pub layout_file: Option<String>,
 }
 
+fn validate_override_bundle(b: &OverrideBundle, label: &str) -> Result<(), Error> {
+    if let Some(t) = &b.theme {
+        if let Some(fs) = t.font_scale {
+            if !fs.is_finite() {
+                return Err(Error::InvalidManifest(format!("{label}.theme.font_scale must be finite")));
+            }
+        }
+    }
+    if let Some(bg) = &b.background {
+        if let Some(op) = bg.opacity {
+            if !op.is_finite() {
+                return Err(Error::InvalidManifest(format!("{label}.background.opacity must be finite")));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl ThemeManifest {
     pub fn parse(src: &str) -> Result<Self, Error> {
-        let manifest: Self = toml::from_str(src)?;
+        if src.len() > crate::tree::MAX_LAYOUT_TOML_BYTES {
+            return Err(Error::PackageLimit(format!(
+                "theme.toml exceeds maximum size of {} bytes",
+                crate::tree::MAX_LAYOUT_TOML_BYTES
+            )));
+        }
+        let mut manifest: Self = toml::from_str(src)?;
         validate_id(&manifest.meta.id)?;
         if manifest.meta.name.trim().is_empty() {
             return Err(Error::InvalidManifest("meta.name must not be empty".into()));
+        }
+        if !manifest.background.opacity.is_finite() {
+            return Err(Error::InvalidManifest("background.opacity must be finite".into()));
+        }
+        if let Some(fs) = manifest.theme.font_scale {
+            if !fs.is_finite() {
+                return Err(Error::InvalidManifest("theme.font_scale must be finite".into()));
+            }
+        }
+        for (key, opt) in &manifest.options {
+            if let OptionValue::Number(n) = opt.default {
+                if !n.is_finite() {
+                    return Err(Error::InvalidManifest(format!("option '{key}' default must be finite")));
+                }
+            }
+            if let Some(b) = &opt.on_overrides {
+                validate_override_bundle(b, key)?;
+            }
+            if let Some(b) = &opt.off_overrides {
+                validate_override_bundle(b, key)?;
+            }
+            for choice in &opt.choices {
+                if let Some(b) = &choice.overrides {
+                    validate_override_bundle(b, key)?;
+                }
+            }
+            if opt.kind == OptionKind::Slider {
+                let min = opt.min.unwrap_or(0.0);
+                let max = opt.max.unwrap_or(100.0);
+                if !min.is_finite() || !max.is_finite() || min > max {
+                    return Err(Error::InvalidManifest(format!(
+                        "slider option '{key}' has invalid bounds ({min}..={max})"
+                    )));
+                }
+                if let Some(step) = opt.step {
+                    if !step.is_finite() || step <= 0.0 {
+                        return Err(Error::InvalidManifest(format!(
+                            "slider option '{key}' step must be finite and positive"
+                        )));
+                    }
+                }
+            }
+        }
+        if let Some(layout) = manifest.layout.as_mut() {
+            layout.validate().map_err(Error::InvalidLayout)?;
         }
         Ok(manifest)
     }

@@ -207,12 +207,14 @@ pub struct SteamApp {
     taskbar: crate::taskbar::Taskbar,
     flags: crate::builtin::settings::SharedFlags,
     pub friends_window: crate::friends_window::FriendsWindow,
-    links: std::sync::mpsc::Receiver<String>,
+    links: std::sync::mpsc::Receiver<crate::links::LinkRequest>,
     pub launch_popup: Option<crate::launch_popup::LaunchPopup>,
     /// Links waiting for sign-in to finish.
     pending_links: Vec<String>,
     /// Main window is hidden in the tray.
     hidden: bool,
+    tray_restore_retry_at: Option<std::time::Instant>,
+    pending_memory_trim: u8,
     applied_theme: Option<Theme>,
     applied_zoom: f32,
     pub themes: SharedThemeManager,
@@ -390,6 +392,8 @@ impl SteamApp {
             launch_popup: None,
             pending_links: link.into_iter().collect(),
             hidden: false,
+            tray_restore_retry_at: None,
+            pending_memory_trim: 0,
             applied_theme: None,
             applied_zoom: 0.0,
             themes,
@@ -833,21 +837,19 @@ impl SteamApp {
         sync_texture(ctx, &mut self.logo_tex, logo_path.as_deref(), egui::TextureWrapMode::ClampToEdge, "theme-logo");
     }
 
-    fn show_window(&mut self, ctx: &egui::Context) {
+    fn show_window(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame, token: Option<String>) {
+        self.tray.activate_window(frame, token);
         self.hidden = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
-    /// Hide the main window in the tray. A Wayland window can't be hidden
-    /// (winit has no way to unmap it), so there it is minimized and the tray
-    /// raises it again with an activation token. Without a tray icon nothing
-    /// could bring a hidden window back, so it only minimizes too.
+    /// Hide the main window while a tray host can bring it back.
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         ctx.forget_all_images();
-        crate::release_memory();
-        if self.tray.available() && !self.tray.wayland() {
+        self.pending_memory_trim = 1;
+        if self.tray.available() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.hidden = true;
         } else {
@@ -855,15 +857,12 @@ impl SteamApp {
         }
     }
 
-    fn handle_links(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+    fn handle_links(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame, actions: &mut Vec<Action>) {
         use crate::links::Link;
-        while let Ok(l) = self.links.try_recv() {
-            let trimmed = l.trim();
-            if trimmed == "show" || crate::links::parse(trimmed).is_some() {
-                self.show_window(ctx);
-                if trimmed != "show" {
-                    self.pending_links.push(trimmed.to_string());
-                }
+        while let Ok(request) = self.links.try_recv() {
+            self.show_window(ctx, frame, request.activation_token);
+            if request.arg != "show" {
+                self.pending_links.push(request.arg);
             }
         }
         if self.state.phase != Phase::LoggedIn {
@@ -890,20 +889,22 @@ impl SteamApp {
         }
     }
 
-    fn handle_tray(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+    fn handle_tray(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame, actions: &mut Vec<Action>) {
         use crate::tray::TrayCmd;
-        for cmd in self.tray.poll(ctx) {
-            match cmd {
-                TrayCmd::Show => self.show_window(ctx),
+        for event in self.tray.poll(ctx) {
+            match event.command {
+                TrayCmd::Show => self.show_window(ctx, frame, event.activation_token),
                 TrayCmd::Menu(..) => {}
                 TrayCmd::Page(page) => {
-                    self.show_window(ctx);
+                    self.show_window(ctx, frame, event.activation_token);
                     actions.push(Action::Navigate { page: page.into(), arg: None });
                 }
                 TrayCmd::Friends => self.friends_window.open = true,
                 TrayCmd::Status(s) => self.client.send(Command::SetPersonaState(s)),
                 TrayCmd::Exit => {
-                    self.show_window(ctx);
+                    if frame.is_window_attached() || self.downloading() {
+                        self.show_window(ctx, frame, event.activation_token);
+                    }
                     self.request_exit(ctx);
                 }
             }
@@ -971,17 +972,51 @@ impl SteamApp {
     }
 }
 
+fn finish_memory_trim(ctx: &egui::Context, pending: &mut u8) -> bool {
+    if crate::chrome::take_memory_trim_request(ctx) {
+        *pending = 1;
+    }
+    if *pending == 0 {
+        return false;
+    }
+    *pending -= 1;
+    *pending == 0
+}
+
 impl eframe::App for SteamApp {
     /// Runs before every frame, and also while the window gets no frames
     /// (minimized or behind a fullscreen game on Wayland): the overlay drawn
     /// inside the game runs here so it stays quick then.
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let mut actions = Vec::new();
         self.drain_events(ctx, &mut actions);
-        self.handle_tray(ctx, &mut actions);
-        self.handle_links(ctx, &mut actions);
+        self.handle_tray(ctx, frame, &mut actions);
+        self.handle_links(ctx, frame, &mut actions);
+        if frame.is_window_attached() || self.tray.available() {
+            self.tray_restore_retry_at = None;
+        } else {
+            let now = std::time::Instant::now();
+            if self.tray_restore_retry_at.is_none_or(|retry_at| now >= retry_at) {
+                self.show_window(ctx, frame, None);
+                self.tray_restore_retry_at = Some(now + std::time::Duration::from_secs(1));
+            }
+            // If EGL failed to remap, retry without depending on the lost tray host.
+            if let Some(retry_at) = self.tray_restore_retry_at {
+                ctx.request_repaint_after_for(retry_at.saturating_duration_since(now), egui::ViewportId::ROOT);
+            }
+        }
         self.apply_actions(ctx, actions);
         crate::overlay::logic(self, ctx);
+    }
+
+    fn post_frame(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.tray.wayland() && frame.is_window_attached() {
+            // The EGL backend may have fallen back to minimizing.
+            self.hidden = false;
+        }
+        if finish_memory_trim(ctx, &mut self.pending_memory_trim) {
+            crate::release_memory();
+        }
     }
 
     /// Scroll faster than egui's default (Settings → Accessibility → Scroll
@@ -1006,7 +1041,7 @@ impl eframe::App for SteamApp {
         [0.0, 0.0, 0.0, 0.0]
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.sync_theme_state(&ctx);
         if self.applied_zoom != self.prefs.zoom {
@@ -1046,8 +1081,8 @@ impl eframe::App for SteamApp {
         self.sync_client_preferences(false);
         self.drain_events(&ctx, &mut actions);
         self.taskbar.update(&self.state.downloads);
-        self.handle_tray(&ctx, &mut actions);
-        self.handle_links(&ctx, &mut actions);
+        self.handle_tray(&ctx, frame, &mut actions);
+        self.handle_links(&ctx, frame, &mut actions);
 
         // Closing the window hides it in the tray (like Steam) unless "Exit" was chosen.
         // With no tray icon (e.g. GNOME without the AppIndicator extension), closing quits.
@@ -1061,9 +1096,11 @@ impl eframe::App for SteamApp {
             self.confirm_exit = true;
         }
         self.exit_dialog(&ctx);
-        if self.hidden {
+        if self.hidden || !frame.is_window_attached() {
             // Keep the friends window, overlay and notifications alive while hidden.
-            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
+            if !self.tray.wayland() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
+            }
             crate::friends_window::show(self, &ctx, &mut actions);
             crate::overlay::show(self, &ctx, &mut actions);
             crate::launch_popup::show(self, &ctx);
@@ -1391,5 +1428,30 @@ mod tests {
         let restored: Prefs = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.controller, prefs.controller);
         assert_eq!(restored.controller_bindings, prefs.controller_bindings);
+    }
+}
+
+#[cfg(test)]
+mod memory_trim_tests {
+    use super::finish_memory_trim;
+
+    #[test]
+    fn trim_is_due_only_after_a_completed_frame() {
+        let ctx = egui::Context::default();
+        let mut pending_memory_trim = 0;
+        assert!(!finish_memory_trim(&ctx, &mut pending_memory_trim));
+
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            crate::chrome::minimize(ui.ctx());
+            assert_eq!(pending_memory_trim, 0);
+        });
+        output.drop_without_applying_deltas();
+        assert!(finish_memory_trim(&ctx, &mut pending_memory_trim));
+        assert!(!finish_memory_trim(&ctx, &mut pending_memory_trim));
+
+        // Hide-to-tray queues the countdown directly on the app.
+        pending_memory_trim = 1;
+        assert!(finish_memory_trim(&ctx, &mut pending_memory_trim));
+        assert!(!finish_memory_trim(&ctx, &mut pending_memory_trim));
     }
 }
