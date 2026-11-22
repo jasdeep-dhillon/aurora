@@ -1003,6 +1003,11 @@ impl OverlayRenderer {
         let retire_gen = self.submit_gen.wrapping_add(1);
         for op in tex_ops {
             match op {
+                TexOp::ClearAll => {
+                    for (_, t) in self.textures.drain() {
+                        new_retired.push(t);
+                    }
+                }
                 TexOp::Free(id) => {
                     if let Some(t) = self.textures.remove(&id) {
                         self.retired_tex.push((retire_gen, t));
@@ -1413,7 +1418,24 @@ impl OverlayRenderer {
 
     pub fn destroy(&mut self) {
         unsafe {
-            let _ = (self.dd.device_wait_idle)(self.device);
+            // Wait only on this swapchain's own pending fences rather than calling
+            // `vkDeviceWaitIdle`, which requires host synchronization across every
+            // queue on the device and would race with concurrent swapchain presents.
+            let pending_fences: Vec<VkFence> = self
+                .slots
+                .iter()
+                .filter(|s| s.fence_pending)
+                .map(|s| s.fence)
+                .collect();
+            if !pending_fences.is_empty() {
+                let _ = (self.dd.wait_for_fences)(
+                    self.device,
+                    pending_fences.len() as u32,
+                    pending_fences.as_ptr(),
+                    VK_TRUE,
+                    u64::MAX,
+                );
+            }
             let slots = std::mem::take(&mut self.slots);
             for slot in slots {
                 for b in slot.staging {

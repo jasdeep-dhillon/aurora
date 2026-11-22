@@ -20,8 +20,127 @@ mod util;
 mod overlay_vulkan;
 
 use model::AppId;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 use wire::{FromGame, ToGame};
+
+const MAX_RELIABLE_QUEUE: usize = 64;
+const MAX_OUTBOUND_BYTES: usize = 64 * 1024 * 1024;
+
+struct OutboundState {
+    reliable: VecDeque<Vec<u8>>,
+    reliable_bytes: usize,
+    latest_frame: Option<Vec<u8>>,
+    closed: bool,
+}
+
+struct Outbound {
+    state: Mutex<OutboundState>,
+    notify: tokio::sync::Notify,
+    closed_notify: tokio::sync::Notify,
+}
+
+impl Outbound {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(OutboundState {
+                reliable: VecDeque::new(),
+                reliable_bytes: 0,
+                latest_frame: None,
+                closed: false,
+            }),
+            notify: tokio::sync::Notify::new(),
+            closed_notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn push_frame_only(&self, body: Vec<u8>) -> bool {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.closed {
+            return false;
+        }
+        s.latest_frame = Some(body);
+        drop(s);
+        self.notify.notify_one();
+        true
+    }
+
+    fn push_reliable(&self, body: Vec<u8>, supersedes_frame: bool) -> bool {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.closed {
+            return false;
+        }
+        let next_bytes = s.reliable_bytes.saturating_add(body.len());
+        // Allow a single wire-valid message on an empty queue even if large;
+        // enforce queue depth and cumulative byte cap when backlog builds up.
+        if s.reliable.len() >= MAX_RELIABLE_QUEUE || (!s.reliable.is_empty() && next_bytes > MAX_OUTBOUND_BYTES) {
+            // Game stalled and stopped draining the overlay pipe: close both
+            // directions cleanly so the game sees EOF and can reconnect instead
+            // of growing memory unboundedly or dropping texture deltas.
+            s.closed = true;
+            s.reliable.clear();
+            s.reliable_bytes = 0;
+            s.latest_frame = None;
+            drop(s);
+            self.notify.notify_waiters();
+            self.closed_notify.notify_waiters();
+            return false;
+        }
+        if supersedes_frame {
+            s.latest_frame = None;
+        }
+        s.reliable_bytes = next_bytes;
+        s.reliable.push_back(body);
+        drop(s);
+        self.notify.notify_one();
+        true
+    }
+
+    fn close(&self) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.closed = true;
+        s.reliable.clear();
+        s.reliable_bytes = 0;
+        s.latest_frame = None;
+        drop(s);
+        self.notify.notify_waiters();
+        self.closed_notify.notify_waiters();
+    }
+
+    fn is_closed(&self) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).closed
+    }
+
+    async fn wait_closed(&self) {
+        loop {
+            let notified = self.closed_notify.notified();
+            if self.is_closed() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn recv(&self) -> Option<Vec<u8>> {
+        loop {
+            let notified = self.notify.notified();
+            {
+                let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(body) = s.reliable.pop_front() {
+                    s.reliable_bytes = s.reliable_bytes.saturating_sub(body.len());
+                    return Some(body);
+                }
+                if let Some(body) = s.latest_frame.take() {
+                    return Some(body);
+                }
+                if s.closed {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+}
 
 /// One game process drawing the overlay itself.
 pub struct Conn {
@@ -30,18 +149,29 @@ pub struct Conn {
     /// Back buffer size from the game's hello.
     pub size: (u32, u32),
     pub from_game: std::sync::mpsc::Receiver<FromGame>,
-    to_game: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    to_game: Arc<Outbound>,
 }
 
 impl Conn {
     /// Queue a message; false once the game is gone.
+    /// Mesh-only frames coalesce into a single latest-frame slot so a stalled
+    /// game never causes unbounded memory growth.
     pub fn send(&self, m: &ToGame) -> bool {
-        self.to_game.send(m.encode()).is_ok()
+        let body = m.encode();
+        match m {
+            ToGame::Frame { set, free, .. } if set.is_empty() && free.is_empty() => {
+                self.to_game.push_frame_only(body)
+            }
+            // Texture-bearing frames and closing the overlay supersede any older
+            // queued mesh-only frame so a stale frame never renders after close.
+            ToGame::Frame { .. } | ToGame::SetOpen(false) => self.to_game.push_reliable(body, true),
+            _ => self.to_game.push_reliable(body, false),
+        }
     }
 
     /// Queue an already encoded message.
     pub fn send_encoded(&self, body: Vec<u8>) -> bool {
-        self.to_game.send(body).is_ok()
+        self.to_game.push_reliable(body, false)
     }
 
     pub fn is_closed(&self) -> bool {
@@ -146,11 +276,12 @@ where
     };
     tracing::info!("in-game overlay: app {app_id} (pid {pid}) draws it, {width}x{height}");
     let (in_tx, in_rx) = std::sync::mpsc::channel();
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    NEW.lock().unwrap().push(Conn { app_id, pid, size: (width, height), from_game: in_rx, to_game: out_tx });
+    let outbound = Outbound::new();
+    NEW.lock().unwrap().push(Conn { app_id, pid, size: (width, height), from_game: in_rx, to_game: outbound.clone() });
     wake();
+    let writer_out = outbound.clone();
     let writer = tokio::spawn(async move {
-        while let Some(body) = out_rx.recv().await {
+        while let Some(body) = writer_out.recv().await {
             let mut buf = Vec::with_capacity(body.len() + 4);
             buf.extend_from_slice(&(body.len() as u32).to_le_bytes());
             buf.extend_from_slice(&body);
@@ -158,8 +289,17 @@ where
                 break;
             }
         }
+        writer_out.close();
     });
-    while let Ok(body) = read_message(&mut r, MAX_FROM_GAME_BYTES).await {
+    loop {
+        let body = tokio::select! {
+            biased;
+            _ = outbound.wait_closed() => break,
+            res = read_message(&mut r, MAX_FROM_GAME_BYTES) => match res {
+                Ok(b) => b,
+                Err(_) => break,
+            },
+        };
         match FromGame::decode(&body) {
             Ok(m) => {
                 if in_tx.send(m).is_err() {
@@ -170,8 +310,10 @@ where
             Err(_) => break,
         }
     }
+    outbound.close();
     writer.abort();
-    // Dropping `in_tx` tells the UI the game is gone.
+    let _ = writer.await;
+    // Dropping `r`, `w`, and `in_tx` closes both transport halves and tells the UI the game is gone.
     drop(in_tx);
     wake();
 }
@@ -360,5 +502,31 @@ mod tests {
         delete_screenshot(&saved).unwrap();
         assert!(list_screenshots(&root, 12345, 553850).is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn outbound_coalesces_mesh_frames_and_preserves_reliable_order() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let out = Outbound::new();
+            assert!(out.push_reliable(b"ctrl-1".to_vec(), false));
+            assert!(out.push_frame_only(b"frame-old".to_vec()));
+            assert!(out.push_frame_only(b"frame-new".to_vec()));
+            assert_eq!(out.recv().await.as_deref(), Some(b"ctrl-1".as_slice()));
+            assert_eq!(out.recv().await.as_deref(), Some(b"frame-new".as_slice()));
+
+            // A texture-bearing frame supersedes any older pending mesh-only frame.
+            assert!(out.push_frame_only(b"frame-stale".to_vec()));
+            assert!(out.push_reliable(b"tex-frame".to_vec(), true));
+            assert_eq!(out.recv().await.as_deref(), Some(b"tex-frame".as_slice()));
+
+            // Overflowing reliable queue closes cleanly instead of growing unboundedly.
+            for _ in 0..MAX_RELIABLE_QUEUE {
+                assert!(out.push_reliable(vec![1; 16], false));
+            }
+            assert!(!out.push_reliable(vec![1; 16], false));
+            assert!(out.is_closed());
+            assert!(out.recv().await.is_none());
+        });
     }
 }
