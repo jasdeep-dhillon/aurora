@@ -202,7 +202,7 @@ pub fn anti_cheat(app: &OwnedApp, install_dir: &Path) -> Option<String> {
     if app.categories.contains(&CATEGORY_VAC) {
         return Some("Valve Anti-Cheat".into());
     }
-    for opt in app.launch.iter().filter(|o| o.runs_on_this_os()) {
+    for opt in app.launch.iter().filter(|o| o.runs_on_this_os() || (cfg!(target_os = "linux") && o.os_list.split(',').any(|os| os.trim() == "windows"))) {
         let text = format!("{} {}", opt.executable, opt.arguments).to_lowercase();
         if let Some((_, name)) = ANTI_CHEAT_MARKERS.iter().find(|(m, _)| text.contains(m)) {
             return Some(name.to_string());
@@ -1144,6 +1144,7 @@ static GAMEPLAY_DOWNLOADS: std::sync::atomic::AtomicBool = std::sync::atomic::At
 
 pub fn set_gameplay_downloads(on: bool) {
     GAMEPLAY_DOWNLOADS.store(on, std::sync::atomic::Ordering::Relaxed);
+    crate::preferences_changed();
 }
 
 pub fn gameplay_downloads() -> bool {
@@ -1947,6 +1948,7 @@ pub fn set_anti_cheat_headless(on: bool) {
         // Cached modes would keep the old choice for up to a minute.
         *MODE_CACHE.lock().unwrap() = None;
     }
+    crate::preferences_changed();
 }
 
 pub fn anti_cheat_headless() -> bool {
@@ -1960,6 +1962,7 @@ static PROTON_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
 /// Force a specific Proton for every Proton launch; `None`/empty = automatic.
 pub fn set_proton_override(name: Option<String>) {
     *PROTON_OVERRIDE.lock().unwrap() = name.filter(|s| !s.is_empty());
+    crate::preferences_changed();
 }
 
 /// The forced Proton's internal name, if the player chose one.
@@ -2000,6 +2003,7 @@ pub fn set_app_proton(app: AppId, name: Option<String>) {
         // A forced Proton can turn a native game into a Proton one.
         *MODE_CACHE.lock().unwrap() = None;
     }
+    crate::preferences_changed();
 }
 
 /// The Proton forced for this game, if any.
@@ -2015,6 +2019,7 @@ pub fn app_protons() -> std::collections::BTreeMap<AppId, String> {
 pub fn set_app_protons(map: std::collections::BTreeMap<AppId, String>) {
     *PROTON_PER_APP.lock().unwrap() = map;
     *MODE_CACHE.lock().unwrap() = None;
+    crate::preferences_changed();
 }
 
 /// What a game runs with when nothing is forced for it here: the global
@@ -3024,9 +3029,31 @@ mod tests {
 
     #[test]
     fn reads_pe_bitness() {
-        let exe = std::env::current_exe().unwrap();
-        assert_eq!(pe_is_64bit(&exe), Some(cfg!(target_pointer_width = "64")));
+        let dir = std::env::temp_dir().join(format!("sir-pe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let make_pe = |machine: u16, magic: u16| {
+            let mut buf = vec![0u8; 0x100];
+            buf[0..2].copy_from_slice(b"MZ");
+            buf[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+            buf[0x80..0x84].copy_from_slice(b"PE\0\0");
+            buf[0x80 + 4..0x80 + 6].copy_from_slice(&machine.to_le_bytes());
+            buf[0x80 + 24..0x80 + 26].copy_from_slice(&magic.to_le_bytes());
+            buf
+        };
+        let pe64 = dir.join("game64.exe");
+        let pe32 = dir.join("game32.exe");
+        std::fs::write(&pe64, make_pe(0x8664, 0x20b)).unwrap();
+        std::fs::write(&pe32, make_pe(0x014c, 0x10b)).unwrap();
+        assert_eq!(pe_is_64bit(&pe64), Some(true));
+        assert_eq!(pe_is_64bit(&pe32), Some(false));
+        #[cfg(windows)]
+        {
+            let exe = std::env::current_exe().unwrap();
+            assert_eq!(pe_is_64bit(&exe), Some(cfg!(target_pointer_width = "64")));
+        }
         assert_eq!(pe_is_64bit(Path::new("Cargo.toml")), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

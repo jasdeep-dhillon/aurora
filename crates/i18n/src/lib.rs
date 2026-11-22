@@ -93,7 +93,15 @@ fn load(src: &str) -> HashMap<String, &'static str> {
     let parsed: toml::Table = toml::from_str(src).expect("valid locale file");
     parsed
         .into_iter()
-        .filter_map(|(k, v)| Some((k, &*Box::leak(v.as_str()?.to_string().into_boxed_str()))))
+        .filter_map(|(k, v)| {
+            let s = v.as_str()?;
+            let owned = if s.contains("SteamInRust") {
+                s.replace("SteamInRust", BRAND)
+            } else {
+                s.to_string()
+            };
+            Some((k, &*Box::leak(owned.into_boxed_str())))
+        })
         .collect()
 }
 
@@ -118,22 +126,47 @@ fn strip_context(s: &str) -> &str {
 /// Translate a fixed English string. A trailing `|context` lets homographs
 /// keep distinct translation keys and is stripped when falling back to English.
 pub fn tr(english: &'static str) -> &'static str {
-    let raw = table(language()).and_then(|t| t.get(english).copied()).unwrap_or_else(|| strip_context(english));
-    rebrand(raw)
+    if let Some(hit) = table(language()).and_then(|t| t.get(english).copied()) {
+        // Locale entries are already rebranded at load time.
+        return hit;
+    }
+    rebrand(strip_context(english))
 }
 
 /// Translate a string only known at runtime (e.g. an error from the engine).
 pub fn tr_dyn(english: &str) -> String {
-    let s = table(language()).and_then(|t| t.get(english).map(|s| s.to_string())).unwrap_or_else(|| strip_context(english).to_string());
-    s.replace("SteamInRust", BRAND)
+    if let Some(hit) = table(language()).and_then(|t| t.get(english).copied()) {
+        return hit.to_string();
+    }
+    let raw = strip_context(english);
+    if raw.contains("SteamInRust") {
+        raw.replace("SteamInRust", BRAND)
+    } else {
+        raw.to_string()
+    }
 }
 
-/// Translate and fill `{name}` placeholders.
+/// Translate and fill `{name}` placeholders in a single scan without temporary format strings.
 pub fn trf(english: &'static str, args: &[(&str, String)]) -> String {
-    let mut out = tr(english).to_string();
-    for (k, v) in args {
-        out = out.replace(&format!("{{{k}}}"), v);
+    let tmpl = tr(english);
+    let extra: usize = args.iter().map(|(_, v)| v.len()).sum();
+    let mut out = String::with_capacity(tmpl.len() + extra);
+    let mut rest = tmpl;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        if let Some(close) = after.find('}') {
+            let name = &after[..close];
+            if let Some((_, val)) = args.iter().find(|(k, _)| *k == name) {
+                out.push_str(val);
+                rest = &after[close + 1..];
+                continue;
+            }
+        }
+        out.push('{');
+        rest = after;
     }
+    out.push_str(rest);
     out
 }
 

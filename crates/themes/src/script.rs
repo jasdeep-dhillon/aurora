@@ -172,6 +172,7 @@ pub struct ThemeScript {
     has_chrome: bool,
     has_card_overlay: bool,
     error: Option<String>,
+    theme_map: Option<(ui::Theme, Map)>,
 }
 
 impl std::fmt::Debug for ThemeScript {
@@ -210,6 +211,7 @@ impl ThemeScript {
             has_chrome,
             has_card_overlay,
             error: None,
+            theme_map: None,
         })
     }
 
@@ -224,6 +226,15 @@ impl ThemeScript {
         }
         let src = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
         Self::compile(&src)
+    }
+
+    fn theme_argument(&mut self, theme: &ui::Theme) -> Map {
+        if self.theme_map.as_ref().is_none_or(|(cached, _)| cached != theme) {
+            self.theme_map = Some((theme.clone(), theme_to_rhai_map(theme)));
+        }
+        // Rhai takes an owned map. Each call gets its own values because the
+        // script can modify them without changing the theme for the next call.
+        self.theme_map.as_ref().unwrap().1.clone()
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -256,7 +267,7 @@ impl ThemeScript {
         if !self.has_background() {
             return Vec::new();
         }
-        let theme_map = theme_to_rhai_map(theme);
+        let theme_map = self.theme_argument(theme);
         let mut scope = Scope::new();
         match self.engine.call_fn::<Dynamic>(
             &mut scope,
@@ -276,7 +287,7 @@ impl ThemeScript {
         if !self.has_chrome() {
             return Vec::new();
         }
-        let theme_map = theme_to_rhai_map(theme);
+        let theme_map = self.theme_argument(theme);
         let mut scope = Scope::new();
         match self.engine.call_fn::<Dynamic>(
             &mut scope,
@@ -303,7 +314,7 @@ impl ThemeScript {
         if !self.has_card_overlay() {
             return Vec::new();
         }
-        let theme_map = theme_to_rhai_map(theme);
+        let theme_map = self.theme_argument(theme);
         let mut scope = Scope::new();
         match self.engine.call_fn::<Dynamic>(
             &mut scope,
@@ -364,7 +375,7 @@ fn parse_draw_cmd(item: Dynamic) -> Option<DrawCmd> {
     let kind = map
         .get("type")
         .or_else(|| map.get("kind"))
-        .and_then(|v| v.clone().into_string().ok())?;
+        .and_then(|v| v.read_lock::<rhai::ImmutableString>())?;
 
     match kind.as_str() {
         "rect" => Some(DrawCmd::Rect {
@@ -410,7 +421,7 @@ fn parse_draw_cmd(item: Dynamic) -> Option<DrawCmd> {
         "text" => Some(DrawCmd::Text {
             x: get_f32(&map, "x", 0.0),
             y: get_f32(&map, "y", 0.0),
-            text: map.get("text")?.clone().into_string().ok()?,
+            text: map.get("text")?.read_lock::<rhai::ImmutableString>()?.to_string(),
             size: get_f32(&map, "size", 14.0),
             color: get_color(&map, "color")?,
         }),
@@ -438,10 +449,10 @@ fn get_bool(map: &Map, key: &str, default: bool) -> bool {
 
 fn get_color(map: &Map, key: &str) -> Option<Color32> {
     let v = map.get(key)?;
-    if let Ok(s) = v.clone().into_string() {
+    if let Some(s) = v.read_lock::<rhai::ImmutableString>() {
         return parse_hex_color(&s).ok();
     }
-    if let Ok(arr) = v.clone().into_array() {
+    if let Some(arr) = v.read_lock::<rhai::Array>() {
         return parse_rgba_array(&arr);
     }
     None

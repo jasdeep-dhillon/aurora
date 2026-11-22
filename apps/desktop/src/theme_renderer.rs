@@ -260,7 +260,7 @@ fn dispatch_shell_action(app: &mut SteamApp, ui: &Ui, actions: &mut Vec<Action>,
             "logout" => app.client.send(Command::LogOut),
             "exit" => app.request_exit(ui.ctx()),
             "window:close" => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
-            "window:minimize" => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
+            "window:minimize" => crate::chrome::minimize(ui.ctx()),
             "window:maximize" => crate::chrome::toggle_maximized(ui.ctx()),
             _ => {}
         }
@@ -276,48 +276,41 @@ fn interpolate_shell_text(app: &SteamApp, template: &str) -> String {
     } else {
         app.state.persona_name.as_str()
     };
-    let wallet = app
-        .state
-        .wallet
-        .map(|(b, c)| model::format_money(b, c))
-        .unwrap_or_default();
-    let installed_count = app.local.games.len().to_string();
-    let total_games = app
-        .state
-        .apps
-        .as_ref()
-        .map(|a| a.values().filter(|o| !o.is_dlc()).count())
-        .unwrap_or(app.local.games.len())
-        .to_string();
-    let online_friends = app
-        .state
-        .friend_list()
-        .iter()
-        .filter(|p| p.state != PersonaState::Offline)
-        .count()
-        .to_string();
-    let playing_game = app
-        .state
-        .playing
-        .and_then(|id| app.state.app_name(id))
-        .unwrap_or("")
-        .to_string();
-    let downloads_label = app
-        .state
-        .downloads
-        .values()
-        .find(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed))
-        .and_then(|d| app.state.app_name(d.app_id).map(String::from))
-        .unwrap_or_else(|| t!("Downloads").to_string());
-
-    template
-        .replace("{username}", username)
-        .replace("{wallet}", &wallet)
-        .replace("{installed_count}", &installed_count)
-        .replace("{total_games}", &total_games)
-        .replace("{online_friends}", &online_friends)
-        .replace("{playing_game}", &playing_game)
-        .replace("{downloads_label}", &downloads_label)
+    let mut text = template.replace("{username}", username);
+    if text.contains("{wallet}") {
+        let wallet = app.state.wallet.map(|(b, c)| model::format_money(b, c)).unwrap_or_default();
+        text = text.replace("{wallet}", &wallet);
+    }
+    if text.contains("{installed_count}") {
+        text = text.replace("{installed_count}", &app.local.games.len().to_string());
+    }
+    if text.contains("{total_games}") {
+        let total = app
+            .state
+            .apps
+            .as_ref()
+            .map(|a| a.values().filter(|o| !o.is_dlc()).count())
+            .unwrap_or(app.local.games.len());
+        text = text.replace("{total_games}", &total.to_string());
+    }
+    if text.contains("{online_friends}") {
+        text = text.replace("{online_friends}", &app.state.online_friend_count().to_string());
+    }
+    if text.contains("{playing_game}") {
+        let game = app.state.playing.and_then(|id| app.state.app_name(id)).unwrap_or("");
+        text = text.replace("{playing_game}", game);
+    }
+    if text.contains("{downloads_label}") {
+        let label = app
+            .state
+            .downloads
+            .values()
+            .find(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed))
+            .and_then(|d| app.state.app_name(d.app_id))
+            .unwrap_or_else(|| t!("Downloads"));
+        text = text.replace("{downloads_label}", label);
+    }
+    text
 }
 
 fn render_shell_node(rctx: &mut ShellRenderCtx<'_, '_, '_>, ui: &mut Ui, node: &Node) {
@@ -596,8 +589,7 @@ fn render_shell_node(rctx: &mut ShellRenderCtx<'_, '_, '_>, ui: &mut Ui, node: &
         }
 
         Node::Notifications { size, highlight_unread_bg, style } => {
-            let Some(mut data) = rctx.app.state.notifications.clone() else { return };
-            data.items.sort_by_key(|n| std::cmp::Reverse(n.time));
+            let Some(data) = &rctx.app.state.notifications else { return };
             let waiting = data.pending_gifts + data.pending_friends + data.confirmations;
             let badge = (data.unread + waiting) as usize;
             let sz = (*size).max(20.0);
@@ -623,7 +615,7 @@ fn render_shell_node(rctx: &mut ShellRenderCtx<'_, '_, '_>, ui: &mut Ui, node: &
             ui.painter().rect_filled(rect, radius, bg);
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, icons::BELL, w::font((sz * 0.56).clamp(11.0, 16.0)), fg);
             let r = resp.on_hover_text(t!("Notifications")).on_hover_cursor(egui::CursorIcon::PointingHand);
-            crate::shell::notifications_popup(rctx.app, &r, &t, &data, rctx.actions);
+            crate::shell::notifications_popup(rctx.app, &r, &t, data, rctx.actions);
         }
 
         Node::FriendsButton { icon, size, style } => {

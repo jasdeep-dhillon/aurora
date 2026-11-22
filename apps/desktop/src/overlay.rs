@@ -63,6 +63,7 @@ pub struct Overlay {
     enabled: bool,
     /// When the foreground window was last checked.
     checked: Option<Instant>,
+    foreground_check: Option<tokio::sync::oneshot::Receiver<bool>>,
     /// The game's window was in front at the last check.
     game_front: bool,
     pressed: Arc<AtomicBool>,
@@ -136,6 +137,7 @@ impl Overlay {
             registered: false,
             enabled: false,
             checked: None,
+            foreground_check: None,
             game_front: false,
             pressed,
             game: None,
@@ -174,6 +176,8 @@ impl Overlay {
         self.asked = false;
         self.enabled = enabled;
         self.checked = None;
+        self.foreground_check = None;
+        self.game_front = false;
         self.fps = None;
         self.screenshots.clear();
         self.screenshots_dirty = true;
@@ -185,15 +189,44 @@ impl Overlay {
 
     /// Register Shift+Tab only while the game is the focused window (or the
     /// overlay is open, so Shift+Tab can close it).
-    fn sync_hotkey(&mut self, game_dir: Option<&std::path::Path>) {
-        if self.checked.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400)) {
-            return;
+    fn sync_hotkey(&mut self, game_dir: Option<&std::path::Path>, ctx: &egui::Context, rt: &tokio::runtime::Runtime) {
+        let fallback = self.ingame.is_none() && self.game.is_some() && (self.enabled || self.any_pinned());
+        if fallback {
+            if let Some(rx) = self.foreground_check.as_mut() {
+                match rx.try_recv() {
+                    Ok(front) => {
+                        self.game_front = front;
+                        self.foreground_check = None;
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => self.foreground_check = None,
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                }
+            }
+            if self.foreground_check.is_none() && self.checked.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(400)) {
+                self.checked = Some(Instant::now());
+                if let Some(dir) = game_dir {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    self.foreground_check = Some(rx);
+                    let dir = dir.to_path_buf();
+                    let ctx = ctx.clone();
+                    rt.spawn_blocking(move || {
+                        if tx.send(foreground_is_in(&dir)).is_ok() {
+                            ctx.request_repaint();
+                        }
+                    });
+                } else {
+                    self.game_front = false;
+                }
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(400));
+        } else {
+            self.checked = None;
+            self.foreground_check = None;
+            self.game_front = false;
         }
-        self.checked = Some(Instant::now());
-        self.game_front = self.game.is_some() && game_dir.is_some_and(foreground_is_in);
-        // A game drawing the overlay itself handles Shift+Tab; grabbing it
-        // here would keep it from the game.
-        let want = self.enabled && self.game.is_some() && self.ingame.is_none() && (self.open || self.game_front);
+
+        // The in-process overlay receives its own hotkey.
+        let want = fallback && self.enabled && (self.open || self.game_front);
         let Some(m) = &self.manager else { return };
         if want && !self.registered {
             self.registered = m.register(self.hotkey).map_err(|e| tracing::warn!("Shift+Tab: {e}")).is_ok();
@@ -206,6 +239,7 @@ impl Overlay {
     pub fn game_stopped(&mut self) {
         self.flush_notes();
         self.game = None;
+        self.foreground_check = None;
         self.ingame = None;
         self.open = false;
         self.fps = None;
@@ -638,9 +672,8 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
     actions.append(&mut app.overlay.pending);
     // Shift+Tab belongs to the game only while the game is in front.
     if let Some((id, _)) = app.overlay.game {
-        let dir = app.local.games.iter().find(|g| g.app_id == id).map(|g| g.install_dir.clone());
-        app.overlay.sync_hotkey(dir.as_deref());
-        ctx.request_repaint_after(std::time::Duration::from_millis(400));
+        let dir = app.local.games.iter().find(|g| g.app_id == id).map(|g| g.install_dir.as_path());
+        app.overlay.sync_hotkey(dir, ctx, &app._rt);
     }
     if app.overlay.pressed.swap(false, Ordering::Relaxed) {
         app.overlay.toggle();
@@ -1186,10 +1219,23 @@ fn friends_window(app: &mut SteamApp, ctx: &egui::Context, t: &Theme, actions: &
         }
         ui.add_space(6.0);
         let q = app.overlay.search.trim().to_lowercase();
-        let all: Vec<Persona> = app.state.friend_list().into_iter().filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q)).collect();
-        let in_game: Vec<_> = all.iter().filter(|p| p.in_game()).cloned().collect();
-        let online: Vec<_> = all.iter().filter(|p| !p.in_game() && p.state != PersonaState::Offline).cloned().collect();
-        let offline: Vec<_> = all.iter().filter(|p| !p.in_game() && p.state == PersonaState::Offline).cloned().collect();
+        let mut in_game = Vec::new();
+        let mut online = Vec::new();
+        let mut offline = Vec::new();
+        for (id, persona) in app.state.friend_refs() {
+            let name = persona.map_or("", |p| p.name.as_str());
+            if !model::contains_ignore_case(name, &q) {
+                continue;
+            }
+            let list = if persona.is_some_and(Persona::in_game) {
+                &mut in_game
+            } else if persona.is_some_and(|p| p.state != PersonaState::Offline) {
+                &mut online
+            } else {
+                &mut offline
+            };
+            list.push(id);
+        }
         egui::ScrollArea::vertical().id_salt("ov-friends-list").auto_shrink([false, false]).show(ui, |ui| {
             for (title, list, collapsible) in [(t!("In game"), &in_game, false), (t!("Online"), &online, false), (t!("Offline"), &offline, true)] {
                 if list.is_empty() {
@@ -1203,21 +1249,26 @@ fn friends_window(app: &mut SteamApp, ctx: &egui::Context, t: &Theme, actions: &
                 }
                 ui.add_space(4.0);
                 if open_section {
-                    for p in list {
-                        friend_row(app, ui, t, p, actions);
+                    for &id in list {
+                        friend_row(app, ui, t, id, actions);
                     }
                 }
                 ui.add_space(8.0);
             }
-            if all.is_empty() {
+            if in_game.is_empty() && online.is_empty() && offline.is_empty() {
                 ui.label(w::text(t!("No friends match."), 13.0, t.text_faint));
             }
         });
     });
 }
 
-fn friend_row(app: &mut SteamApp, ui: &mut Ui, t: &Theme, p: &Persona, actions: &mut Vec<Action>) {
+fn friend_row(app: &mut SteamApp, ui: &mut Ui, t: &Theme, id: model::SteamId, actions: &mut Vec<Action>) {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
+    if !ui.is_rect_visible(rect) && !resp.context_menu_opened() {
+        return;
+    }
+    let persona = app.state.persona(id);
+    let p = &persona;
     // The pointer anywhere on the row, its quick buttons included: those take
     // the hover from the row, and checking the row alone made them flicker.
     let over = ui.rect_contains_pointer(rect);

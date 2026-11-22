@@ -177,33 +177,35 @@ fn card(ui: &mut Ui, t: &Theme, io: &mut Io, kind: FileKind, e: &FileEntry, widt
         ui.set_width(width);
         ui.spacing_mut().item_spacing.y = 4.0;
         let (img, resp) = ui.allocate_exact_size(vec2(width, width * 9.0 / 16.0), Sense::click());
-        let radius = CornerRadius { nw: t.corner_small().nw, ne: t.corner_small().ne, sw: 0, se: 0 };
-        let url = e
-            .preview
-            .as_deref()
-            .and_then(|u| crate::links::validate_http_url(u).map(|_| u.to_string()))
-            .or_else(|| e.image.as_deref().and_then(|u| crate::links::validate_http_url(u).map(|_| u.to_string())))
-            .or_else(|| e.youtube.as_deref().and_then(crate::links::valid_youtube_id).map(|y| format!("https://img.youtube.com/vi/{y}/hqdefault.jpg")));
-        match &url {
-            Some(u) => w::image_or_skeleton(ui, t, img, u, radius),
-            None => w::placeholder(ui, t, img, &e.title, radius),
-        }
-        if e.spoiler {
-            ui.painter().rect_filled(img, radius, Color32::from_black_alpha(230));
-            ui.painter().text(img.center(), Align2::CENTER_CENTER, t!("Spoiler"), w::font_semibold(15.0), t.text_dim);
-        }
-        if kind == FileKind::Videos {
-            ui.painter().circle_filled(img.center(), 22.0, Color32::from_black_alpha(170));
-            ui.painter().text(img.center(), Align2::CENTER_CENTER, icons::PLAY, w::font(18.0), Color32::WHITE);
-        }
-        // What it is, top left.
-        let label = kind_label(kind);
-        let g = ui.painter().layout_no_wrap(label.to_uppercase(), w::font_bold(10.0), Color32::WHITE);
-        let chip = Rect::from_min_size(img.min + vec2(8.0, 8.0), g.size() + vec2(12.0, 6.0));
-        ui.painter().rect_filled(chip, CornerRadius::same(3), Color32::from_black_alpha(170));
-        ui.painter().galley(chip.min + vec2(6.0, 3.0), g, Color32::WHITE);
-        if resp.hovered() {
-            ui.painter().rect_stroke(img, radius, Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
+        if ui.is_rect_visible(img) {
+            let radius = CornerRadius { nw: t.corner_small().nw, ne: t.corner_small().ne, sw: 0, se: 0 };
+            let url = e
+                .preview
+                .as_deref()
+                .and_then(|u| crate::links::validate_http_url(u).map(|_| u.to_string()))
+                .or_else(|| e.image.as_deref().and_then(|u| crate::links::validate_http_url(u).map(|_| u.to_string())))
+                .or_else(|| e.youtube.as_deref().and_then(crate::links::valid_youtube_id).map(|y| format!("https://img.youtube.com/vi/{y}/hqdefault.jpg")));
+            match &url {
+                Some(u) => w::image_or_skeleton(ui, t, img, u, radius),
+                None => w::placeholder(ui, t, img, &e.title, radius),
+            }
+            if e.spoiler {
+                ui.painter().rect_filled(img, radius, Color32::from_black_alpha(230));
+                ui.painter().text(img.center(), Align2::CENTER_CENTER, t!("Spoiler"), w::font_semibold(15.0), t.text_dim);
+            }
+            if kind == FileKind::Videos {
+                ui.painter().circle_filled(img.center(), 22.0, Color32::from_black_alpha(170));
+                ui.painter().text(img.center(), Align2::CENTER_CENTER, icons::PLAY, w::font(18.0), Color32::WHITE);
+            }
+            // What it is, top left.
+            let label = kind_label(kind);
+            let g = ui.painter().layout_no_wrap(label.to_uppercase(), w::font_bold(10.0), Color32::WHITE);
+            let chip = Rect::from_min_size(img.min + vec2(8.0, 8.0), g.size() + vec2(12.0, 6.0));
+            ui.painter().rect_filled(chip, CornerRadius::same(3), Color32::from_black_alpha(170));
+            ui.painter().galley(chip.min + vec2(6.0, 3.0), g, Color32::WHITE);
+            if resp.hovered() {
+                ui.painter().rect_stroke(img, radius, Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
+            }
         }
         open |= resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
         egui::Frame::new().inner_margin(egui::Margin { left: 10, right: 10, top: 4, bottom: 10 }).show(ui, |ui| {
@@ -468,10 +470,12 @@ fn guide_tile(ui: &mut Ui, t: &Theme, io: &mut Io, g: &FileEntry, width: f32) ->
         ui.set_width(width);
         ui.set_min_height(width * 0.56 + 128.0);
         let (img, resp) = ui.allocate_exact_size(vec2(width, width * 0.56), Sense::click());
-        let radius = CornerRadius { nw: t.corner_small().nw, ne: t.corner_small().ne, sw: 0, se: 0 };
-        match &g.preview {
-            Some(u) => w::image_or_skeleton(ui, t, img, u, radius),
-            None => w::placeholder(ui, t, img, &g.title, radius),
+        if ui.is_rect_visible(img) {
+            let radius = CornerRadius { nw: t.corner_small().nw, ne: t.corner_small().ne, sw: 0, se: 0 };
+            match &g.preview {
+                Some(u) => w::image_or_skeleton(ui, t, img, u, radius),
+                None => w::placeholder(ui, t, img, &g.title, radius),
+            }
         }
         open |= resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
         egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {

@@ -154,8 +154,10 @@ fn step(px: f32) -> Option<u32> {
 /// decoded at that size instead of in full: `<url>#sir-fit=<cover|contain>,<w>x<h>`.
 /// Animations, unknown formats and very large draws keep the plain URL.
 pub fn sized_url(url: &str, px: Vec2, cover: bool) -> String {
-    let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
-    let still = [".jpg", ".jpeg", ".png"].iter().any(|e| path.ends_with(e));
+    let path = url.split(['?', '#']).next().unwrap_or(url).as_bytes();
+    let still = [b".jpg".as_slice(), b".jpeg", b".png", b".webp"].iter().any(|extension| {
+        path.len() >= extension.len() && path[path.len() - extension.len()..].eq_ignore_ascii_case(extension)
+    });
     match (still, step(px.x), step(px.y)) {
         (true, Some(w), Some(h)) if url.starts_with("http") && !url.contains('#') => format!("{url}{SIZED}{},{w}x{h}", if cover { "cover" } else { "contain" }),
         _ => url.to_string(),
@@ -163,6 +165,8 @@ pub fn sized_url(url: &str, px: Vec2, cover: bool) -> String {
 }
 
 /// The parts of a [`sized_url`]: (plain URL, cover, width, height).
+pub const USE_ORIGINAL_IMAGE: &str = "load the original image for animation";
+
 pub fn parse_sized(uri: &str) -> Option<(&str, bool, u32, u32)> {
     let (url, spec) = uri.split_once(SIZED)?;
     let (mode, size) = spec.split_once(',')?;
@@ -177,6 +181,9 @@ fn note_state(url: &str, state: ImageState) {
     let mut guard = SEEN.lock().unwrap();
     let map = guard.get_or_insert_with(Default::default);
     if map.get(url) != Some(&state) {
+        if map.len() >= IMAGE_HISTORY_LIMIT && !map.contains_key(url) {
+            map.clear();
+        }
         map.insert(url.to_string(), state);
     }
 }
@@ -184,6 +191,7 @@ fn note_state(url: &str, state: ImageState) {
 /// Failed loads: url -> (attempts, when the last one failed).
 static FAILED: std::sync::Mutex<Option<std::collections::HashMap<String, (u32, f64)>>> = std::sync::Mutex::new(None);
 const RETRIES: u32 = 3;
+const IMAGE_HISTORY_LIMIT: usize = 4096;
 
 /// Load an image, retrying failed downloads a few times with a pause.
 /// Steam's image servers sometimes drop a connection when many images load
@@ -201,8 +209,19 @@ fn load_sized(ui: &Ui, url: &str, size: Vec2, cover: bool) -> (ImageState, Optio
         return (ImageState::Missing, None);
     }
     let uri = sized_url(url, size * ui.ctx().pixels_per_point(), cover);
-    let img = egui::Image::new(uri.clone());
-    match img.load_for_size(ui.ctx(), size) {
+    let result = if uri == url {
+        egui::Image::new(url).load_for_size(ui.ctx(), size)
+    } else {
+        // The sized decoder must see its URI intact, including for WebP.
+        ui.ctx().try_load_texture(&uri, egui::TextureOptions::LINEAR, egui::load::SizeHint::default())
+    };
+    let result = match result {
+        Err(egui::load::LoadError::Loading(reason)) if reason == USE_ORIGINAL_IMAGE => {
+            egui::Image::new(url).load_for_size(ui.ctx(), size)
+        }
+        other => other,
+    };
+    match result {
         Ok(TexturePoll::Ready { texture }) => (ImageState::Ready, Some(texture)),
         Ok(TexturePoll::Pending { .. }) => (ImageState::Loading, None),
         // The picture doesn't exist (404 and friends): no point retrying,
@@ -212,6 +231,9 @@ fn load_sized(ui: &Ui, url: &str, size: Vec2, cover: bool) -> (ImageState, Optio
             let now = ui.input(|i| i.time);
             let mut guard = FAILED.lock().unwrap();
             let map = guard.get_or_insert_with(Default::default);
+            if map.len() >= IMAGE_HISTORY_LIMIT && !map.contains_key(url) {
+                map.clear();
+            }
             let entry = map.entry(url.to_string()).or_insert((0, now));
             if entry.0 >= RETRIES {
                 return (ImageState::Missing, None);
@@ -242,9 +264,18 @@ pub fn image_state(ui: &Ui, url: &str) -> ImageState {
 
 /// Draw a remote image covering `rect` (center-cropped). False while loading.
 pub fn paint_cover(ui: &Ui, rect: Rect, url: &str, radius: CornerRadius) -> bool {
-    let (_, Some(texture)) = load(ui, url, rect.size(), true) else {
-        return false;
-    };
+    paint_cover_state(ui, rect, url, radius) == ImageState::Ready
+}
+
+fn paint_cover_state(ui: &Ui, rect: Rect, url: &str, radius: CornerRadius) -> ImageState {
+    let (state, texture) = load(ui, url, rect.size(), true);
+    if let Some(texture) = texture {
+        paint_cover_texture(ui, rect, texture, radius);
+    }
+    state
+}
+
+fn paint_cover_texture(ui: &Ui, rect: Rect, texture: egui::load::SizedTexture, radius: CornerRadius) {
     let tex = texture.size;
     let (ta, ra) = (tex.x / tex.y, rect.width() / rect.height());
     let uv = if ta > ra {
@@ -255,7 +286,6 @@ pub fn paint_cover(ui: &Ui, rect: Rect, url: &str, radius: CornerRadius) -> bool
         Rect::from_min_max(pos2(0.0, (1.0 - h) / 2.0), pos2(1.0, (1.0 + h) / 2.0))
     };
     egui::Image::from_texture(texture).uv(uv).corner_radius(radius).paint_at(ui, rect);
-    true
 }
 
 /// Draw the first of `urls` that exists, covering `rect`. A later URL is only
@@ -264,7 +294,10 @@ pub fn paint_cover(ui: &Ui, rect: Rect, url: &str, radius: CornerRadius) -> bool
 pub fn paint_cover_first(ui: &Ui, rect: Rect, urls: &[&str], radius: CornerRadius) -> bool {
     for url in urls {
         match load(ui, url, rect.size(), true) {
-            (_, Some(_)) => return paint_cover(ui, rect, url, radius),
+            (_, Some(texture)) => {
+                paint_cover_texture(ui, rect, texture, radius);
+                return true;
+            }
             (ImageState::Missing, _) => continue,
             _ => return false,
         }
@@ -313,23 +346,15 @@ pub fn placeholder(ui: &Ui, t: &Theme, rect: Rect, title: &str, radius: CornerRa
 
 /// Image if loaded, shimmer while loading, a plain tile if it's missing.
 pub fn image_or_skeleton(ui: &Ui, t: &Theme, rect: Rect, url: &str, radius: CornerRadius) {
-    if !paint_cover(ui, rect, url, radius) {
-        if image_state(ui, url) == ImageState::Missing {
-            placeholder(ui, t, rect, "", radius);
-        } else {
-            skeleton(ui, t, rect, radius);
-        }
-    }
+    image_or_title(ui, t, rect, url, "", radius);
 }
 
 /// Image if loaded; otherwise a titled placeholder once it's known missing.
 pub fn image_or_title(ui: &Ui, t: &Theme, rect: Rect, url: &str, title: &str, radius: CornerRadius) {
-    if !paint_cover(ui, rect, url, radius) {
-        if image_state(ui, url) == ImageState::Missing {
-            placeholder(ui, t, rect, title, radius);
-        } else {
-            skeleton(ui, t, rect, radius);
-        }
+    match paint_cover_state(ui, rect, url, radius) {
+        ImageState::Ready => {}
+        ImageState::Loading => skeleton(ui, t, rect, radius),
+        ImageState::Missing => placeholder(ui, t, rect, title, radius),
     }
 }
 
@@ -1236,5 +1261,18 @@ impl EditMenu for Response {
             }
         });
         self
+    }
+}
+
+/// Reserve space for a fixed-height row outside the viewport and its
+/// one-screen prefetch margin.
+pub fn skip_offscreen_row(ui: &mut Ui, height: f32) -> bool {
+    let clip = ui.clip_rect();
+    let y = ui.next_widget_position().y;
+    if y > clip.bottom() + clip.height() || y + height < clip.top() - clip.height() {
+        ui.allocate_space(egui::vec2(ui.available_width(), height));
+        true
+    } else {
+        false
     }
 }

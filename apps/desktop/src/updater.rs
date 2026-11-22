@@ -432,7 +432,10 @@ fn block_on<T>(f: impl std::future::Future<Output = T>) -> T {
 }
 
 fn http() -> reqwest::Client {
-    reqwest::Client::builder().user_agent(concat!("Aurora/", env!("CARGO_PKG_VERSION"), " (updater)")).timeout(Duration::from_secs(60)).build().unwrap_or_default()
+    static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder().user_agent(concat!("Aurora/", env!("CARGO_PKG_VERSION"), " (updater)")).timeout(Duration::from_secs(60)).build().unwrap_or_default()
+    });
+    HTTP.clone()
 }
 
 #[derive(Deserialize)]
@@ -651,6 +654,10 @@ fn notes(ui: &mut Ui, t: &Theme, text: &str) {
     }
     for line in text.lines() {
         let l = line.trim();
+        // The release download table is for visitors to GitHub.
+        if l.starts_with('|') && l.ends_with('|') {
+            continue;
+        }
         if let Some(h) = l.strip_prefix('#') {
             let h = h.trim_start_matches('#').trim();
             // The version heading ("[0.4.0](compare link) (date)"): the title already says it.

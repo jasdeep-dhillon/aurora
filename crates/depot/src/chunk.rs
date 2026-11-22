@@ -2,36 +2,21 @@
 
 use crate::{Error, Result, crypto};
 use sha1::{Digest, Sha1};
-use std::io::{Read, Write};
+use std::io::Read;
 
 const MAX_CHUNK_SIZE: usize = 32 * 1024 * 1024;
 const MAX_PREALLOC: usize = 1024 * 1024;
-
-struct BoundedWriter {
-    out: Vec<u8>,
-    limit: usize,
-}
-
-impl Write for BoundedWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if self.out.len().saturating_add(buf.len()) > self.limit {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "decompressed chunk exceeds 32 MiB limit",
-            ));
-        }
-        self.out.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
+/// Upper bound on LZMA dictionary + probability model memory (KiB).
+const MAX_LZMA_MEM_KB: u32 = 64 * 1024;
 
 pub fn decode(raw: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     let plain = crypto::symmetric_decrypt(raw, key)?;
     decompress(&plain)
+}
+
+pub fn decode_with_key(raw: &[u8], key: &crypto::DepotKey, scratch: &mut Vec<u8>) -> Result<Vec<u8>> {
+    key.decrypt_into(raw, scratch)?;
+    decompress(scratch)
 }
 
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
@@ -57,24 +42,37 @@ fn vzip(data: &[u8]) -> Result<Vec<u8>> {
     if size > MAX_CHUNK_SIZE as u64 {
         return Err(Error::Format("vzip chunk exceeds 32 MiB limit".into()));
     }
-    let props = &data[7..12];
+    let props_byte = data[7];
+    let dict_size = u32::from_le_bytes(data[8..12].try_into().unwrap());
+    let mem_kb = lzma_rust2::lzma_get_memory_usage_by_props(dict_size, props_byte)
+        .map_err(|e| Error::Format(format!("lzma props: {e}")))?;
+    if mem_kb > MAX_LZMA_MEM_KB {
+        return Err(Error::Format("vzip dictionary exceeds memory limit".into()));
+    }
     let body = &data[12..data.len() - 10];
-    // Rebuild a classic .lzma header: properties + 64-bit size.
-    let mut stream = Vec::with_capacity(13 + body.len());
-    stream.extend_from_slice(props);
-    stream.extend_from_slice(&size.to_le_bytes());
-    stream.extend_from_slice(body);
-    let mut writer = BoundedWriter { out: Vec::with_capacity((size as usize).min(MAX_PREALLOC)), limit: MAX_CHUNK_SIZE };
-    lzma_rs::lzma_decompress(&mut std::io::Cursor::new(stream), &mut writer).map_err(|e| Error::Format(format!("lzma: {e}")))?;
-    writer.out.truncate(size as usize);
-    Ok(writer.out)
+    let reader = lzma_rust2::LzmaReader::new_with_props(body, size, props_byte, dict_size, None)
+        .map_err(|e| Error::Format(format!("lzma: {e}")))?;
+    let mut out = Vec::with_capacity((size as usize).min(MAX_PREALLOC));
+    reader
+        .take(MAX_CHUNK_SIZE as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| Error::Format(format!("lzma: {e}")))?;
+    if out.len() > MAX_CHUNK_SIZE {
+        return Err(Error::Format("vzip chunk exceeds 32 MiB limit".into()));
+    }
+    out.truncate(size as usize);
+    Ok(out)
 }
 
 /// Valve's zstd wrapper: "VSZa" + u32 crc, then a zstd frame, then a footer.
 fn vzstd(data: &[u8]) -> Result<Vec<u8>> {
     let payload = data.get(8..).ok_or_else(|| Error::Format("bad VZstd chunk".into()))?;
     let dec = ruzstd::decoding::StreamingDecoder::new(payload).map_err(|e| Error::Format(format!("zstd: {e}")))?;
-    let mut out = Vec::new();
+    let cap = match dec.decoder.content_size() {
+        0 => payload.len().saturating_mul(2).min(MAX_PREALLOC),
+        size => size.min(MAX_PREALLOC as u64) as usize,
+    };
+    let mut out = Vec::with_capacity(cap);
     dec.take(MAX_CHUNK_SIZE as u64 + 1).read_to_end(&mut out).map_err(|e| Error::Format(format!("zstd: {e}")))?;
     if out.len() > MAX_CHUNK_SIZE {
         return Err(Error::Format("vzstd chunk exceeds 32 MiB limit".into()));
@@ -102,7 +100,14 @@ pub fn verify(data: &[u8], sha: &[u8]) -> bool {
 }
 
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    const LUT: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(LUT[(b >> 4) as usize]);
+        out.push(LUT[(b & 0x0f) as usize]);
+    }
+    // SAFETY: all bytes pushed are ASCII hex digits.
+    unsafe { String::from_utf8_unchecked(out) }
 }
 
 #[cfg(test)]
@@ -140,6 +145,17 @@ mod decompression_bounds_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_depot_lzma_and_zstd_frames() {
+        // Python lzma FORMAT_ALONE wrapped as VZip, and zstd stdin
+        // output (no frame content size) wrapped as VZstd.
+        let vzip = b"VZa\xb6\x06\x90\xa1\x5d\x00\x00\x80\x00\x00\x20\x9d\x4a\x47\x11\x8d\x8d\xeb\x99\xb4\x9d\x16\xc5\x83\x47\xa9\xc1\xbf\xf3\xf3\x3c\x21\xd1\xff\xff\xf1\x0c\x00\x00\xb6\x06\x90\xa1\x13\x00\x00\x00zv";
+        let vzstd = b"VSZa\xb6\x06\x90\xa1\x28\xb5\x2f\xfd\x04\x58\x99\x00\x00Aurora depot chunk\n\x42\xc9\x32\xed";
+        for raw in [vzip.as_slice(), vzstd.as_slice()] {
+            assert_eq!(decompress(raw).unwrap(), b"Aurora depot chunk\n");
+        }
+    }
 
     #[test]
     fn decodes_a_zip_chunk() {

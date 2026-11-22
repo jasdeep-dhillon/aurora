@@ -34,8 +34,8 @@ prost-build = "0.14"
 protox = "0.10"
 tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-flate2 = "1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs", "runtime_detection"] }
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
 rsa = "0.9"
 rand = "0.8"
 base64 = "0.22"

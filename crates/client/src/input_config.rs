@@ -87,6 +87,7 @@ pub fn set_app_bindings(map: BTreeMap<AppId, BindingChoice>) {
         .into_iter()
         .filter(|(_, c)| !matches!(c, BindingChoice::Auto))
         .collect();
+    crate::preferences_changed();
 }
 
 pub fn set_app_binding(app_id: AppId, choice: BindingChoice) {
@@ -96,6 +97,7 @@ pub fn set_app_binding(app_id: AppId, choice: BindingChoice) {
     } else {
         guard.insert(app_id, choice);
     }
+    crate::preferences_changed();
 }
 
 pub fn app_binding(app_id: AppId) -> BindingChoice {

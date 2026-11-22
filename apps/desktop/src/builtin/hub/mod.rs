@@ -317,7 +317,7 @@ impl Default for ListState {
 pub struct HubView {
     /// Open views; the last one shows.
     pub stack: Vec<View>,
-    asked: HashSet<String>,
+    asked: HashMap<String, std::time::Instant>,
     lists: HashMap<(AppId, HubTab), ListState>,
     /// Page shown per forum / thread.
     pages: HashMap<String, u32>,
@@ -353,9 +353,23 @@ impl HubView {
 
     /// Send a request once (until `retry`).
     fn ask(&mut self, io: &mut Io, key: String, have: bool, req: impl FnOnce() -> Request) {
-        if !have && self.asked.insert(key) {
+        if self.should_request(key, have) {
             io.send(Command::Hub(req()));
         }
+    }
+
+    fn should_request(&mut self, key: String, have: bool) -> bool {
+        let retry = std::time::Duration::from_secs(15);
+        if have {
+            self.asked.remove(&key);
+            return false;
+        }
+        if self.asked.get(&key).is_some_and(|sent| sent.elapsed() < retry) {
+            return false;
+        }
+        self.asked.retain(|_, at| at.elapsed() < retry);
+        self.asked.insert(key, std::time::Instant::now());
+        true
     }
 
     fn retry(&mut self, io: &mut Io, req: Request) {

@@ -152,7 +152,7 @@ pub struct CommunityHome {
     days: usize,
     dev_filter: DevFilter,
     /// Requests already sent (until "Try again").
-    asked: HashSet<String>,
+    asked: std::collections::HashMap<String, std::time::Instant>,
     search: String,
     bar_search: String,
     /// Scroll back to the top on the next frame.
@@ -174,6 +174,7 @@ enum BroadcastState {
 
 struct BroadcastStream {
     hls_url: String,
+    auth_params: String,
     title: String,
     viewers: u64,
 }
@@ -198,13 +199,15 @@ fn broadcast_steam_id(url: &str) -> Option<u64> {
 }
 
 async fn fetch_broadcast_stream(steam_id: u64) -> Result<BroadcastStream, String> {
+    static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(12))
+            .user_agent("Mozilla/5.0 Aurora")
+            .build()
+            .unwrap_or_default()
+    });
     let url = format!("https://steamcommunity.com/broadcast/getbroadcastmpd/?steamid={steam_id}&broadcastid=0&viewertoken=0&sessionid=");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .user_agent("Mozilla/5.0 Aurora")
-        .build()
-        .map_err(|e| e.to_string())?;
-    let v: serde_json::Value = client
+    let v: serde_json::Value = HTTP
         .get(&url)
         .send()
         .await
@@ -223,13 +226,18 @@ async fn fetch_broadcast_stream(steam_id: u64) -> Result<BroadcastStream, String
             format!("Broadcast stream unavailable ({status})")
         })?;
     let hls = video::live::validate_live_hls_url(hls)?;
+    let auth_params = v
+        .get("cdn_auth_url_parameters")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
     let title = v.get("title").and_then(|s| s.as_str()).unwrap_or("").to_string();
     let viewers = v
         .get("num_viewers")
         .or_else(|| v.get("num_view"))
         .and_then(|n| n.as_u64().or_else(|| n.as_str().and_then(|s| s.parse().ok())))
         .unwrap_or(0);
-    Ok(BroadcastStream { hls_url: hls, title, viewers })
+    Ok(BroadcastStream { hls_url: hls, auth_params, title, viewers })
 }
 
 /// The "post a status" box at the top of your friends' activity, like
@@ -274,7 +282,10 @@ impl CommunityHome {
     }
 
     fn send(&mut self, ctx: &mut Ctx, key: String, cmd: impl FnOnce() -> Command) {
-        if self.asked.insert(key) {
+        let retry = std::time::Duration::from_secs(15);
+        if self.asked.get(&key).is_none_or(|sent| sent.elapsed() >= retry) {
+            self.asked.retain(|_, sent| sent.elapsed() < retry);
+            self.asked.insert(key, std::time::Instant::now());
             ctx.send(cmd());
         }
     }
@@ -395,7 +406,11 @@ impl CommunityHome {
             if let Some(res) = ready {
                 match res {
                     Ok(stream) => {
-                        let player = video::live::LivePlayer::start(ui.ctx(), stream.hls_url.clone());
+                        let player = video::live::LivePlayer::start_with_auth(
+                            ui.ctx(),
+                            stream.hls_url.clone(),
+                            stream.auth_params.clone(),
+                        );
                         modal.state = BroadcastState::Playing { stream, player };
                     }
                     Err(e) => {
@@ -622,7 +637,7 @@ fn page_bar(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, current: BarTab, search: &mut
     out
 }
 
-fn search_menu(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, search: &mut String, width: f32, matches: &[(AppId, String)]) {
+fn search_menu(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, search: &mut String, width: f32, matches: &[(AppId, &str)]) {
     egui::Frame::new()
         .fill(t.chrome)
         .stroke(Stroke::new(1.0, t.border))
@@ -646,42 +661,39 @@ fn search_menu(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, search: &mut String, width
 
 /// Games whose name has `query`: yours first (most played), then the rest
 /// of your library.
-fn game_matches(state: &State, query: &str, max: usize) -> Vec<(AppId, String)> {
+fn game_matches<'a>(state: &'a State, query: &str, max: usize) -> Vec<(AppId, &'a str)> {
     let q = query.trim().to_lowercase();
-    if q.is_empty() {
+    if q.is_empty() || max == 0 {
         return Vec::new();
     }
-    let mut out: Vec<(AppId, String)> = Vec::new();
-    for (app, name) in my_games(state) {
-        if name.to_lowercase().contains(&q) && !out.iter().any(|(a, _)| *a == app) {
-            out.push((app, name));
-        }
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<_> = my_games(state).into_iter()
+        .filter(|(app, name)| model::contains_ignore_case(name, &q) && seen.insert(*app))
+        .take(max)
+        .collect();
+    if out.len() < max && let Some(apps) = &state.apps {
+        let mut rest: Vec<_> = apps.values()
+            .filter(|a| !a.is_dlc() && model::contains_ignore_case(&a.name, &q))
+            .map(|a| (a.app_id, a.name.as_str()))
+            .collect();
+        rest.sort_by_key(|(_, name)| *name);
+        let remaining = max - out.len();
+        out.extend(rest.into_iter().filter(|(app, _)| seen.insert(*app)).take(remaining));
     }
-    if let Some(apps) = &state.apps {
-        let mut rest: Vec<_> = apps.values().filter(|a| !a.is_dlc() && a.name.to_lowercase().contains(&q)).map(|a| (a.app_id, a.name.clone())).collect();
-        rest.sort_by(|a, b| a.1.cmp(&b.1));
-        for g in rest {
-            if !out.iter().any(|(a, _)| *a == g.0) {
-                out.push(g);
-            }
-        }
-    }
-    out.truncate(max);
     out
 }
 
 /// Your games, most played recently first: Steam's list when it came,
 /// else your library.
-fn my_games(state: &State) -> Vec<(AppId, String)> {
-    if let Some(Ok(list)) = state.player_games.get(&state.steam_id) {
-        if !list.is_empty() {
-            let mut list = list.clone();
-            list.sort_by_key(|g| (std::cmp::Reverse(g.playtime_2weeks), std::cmp::Reverse(g.last_played.unwrap_or(0)), std::cmp::Reverse(g.playtime_minutes)));
-            return list.into_iter().map(|g| (g.app_id, g.name)).collect();
-        }
+fn my_games(state: &State) -> Vec<(AppId, &str)> {
+    if let Some(Ok(list)) = state.player_games.get(&state.steam_id) && !list.is_empty() {
+        let mut list: Vec<_> = list.iter().collect();
+        list.sort_by_key(|g| (std::cmp::Reverse(g.playtime_2weeks), std::cmp::Reverse(g.last_played.unwrap_or(0)), std::cmp::Reverse(g.playtime_minutes)));
+        return list.into_iter().map(|g| (g.app_id, g.name.as_str())).collect();
     }
-    let mut apps: Vec<(AppId, String)> = state.apps.as_ref().map(|a| a.values().filter(|a| !a.is_dlc() && a.kind == "game").map(|a| (a.app_id, a.name.clone())).collect()).unwrap_or_default();
-    apps.sort_by(|a, b| a.1.cmp(&b.1));
+    let mut apps: Vec<_> = state.apps.as_ref().map(|a| a.values().filter(|a| !a.is_dlc() && a.kind == "game")
+        .map(|a| (a.app_id, a.name.as_str())).collect()).unwrap_or_default();
+    apps.sort_by_key(|(_, name)| *name);
     apps
 }
 
@@ -831,7 +843,7 @@ impl CommunityHome {
         if posts.is_empty() {
             if let Some(e) = failed {
                 if error(ui, t, &e) {
-                    self.asked.retain(|k| !k.starts_with("activity:"));
+                    self.asked.retain(|k, _| !k.starts_with("activity:"));
                 }
             } else if loading {
                 skeletons(ui, t);
@@ -847,7 +859,7 @@ impl CommunityHome {
             w::loading(ui, t, t!("Loading…"));
         } else if let Some(e) = failed {
             if error(ui, t, &e) {
-                self.asked.retain(|k| !k.starts_with("activity:"));
+                self.asked.retain(|k, _| !k.starts_with("activity:"));
             }
         } else if more {
             ui.vertical_centered(|ui| {
@@ -944,7 +956,7 @@ impl CommunityHome {
             egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                 for (app, name) in my_games(state).into_iter().filter(|(_, n)| q.is_empty() || n.to_lowercase().contains(&q)).take(40) {
                     if w::menu_item(ui, t, icons::CONTROLLER, &name).clicked() {
-                        self.status.game = Some((app, name));
+                        self.status.game = Some((app, name.to_owned()));
                         ui.close();
                     }
                 }
@@ -1005,7 +1017,7 @@ impl CommunityHome {
                 self.status.error = None;
                 // Steam's feed has it now: read it again.
                 self.status.refreshing = true;
-                self.asked.retain(|k| !k.starts_with("activity:"));
+                self.asked.retain(|k, _| !k.starts_with("activity:"));
                 true
             }
             Err(e) => {
@@ -1068,7 +1080,7 @@ impl CommunityHome {
         if posts.is_empty() {
             if let Some(e) = failed {
                 if error(ui, t, &e) {
-                    self.asked.retain(|k| !k.starts_with("explore:"));
+                    self.asked.retain(|k, _| !k.starts_with("explore:"));
                 }
             } else if loading {
                 skeletons(ui, t);
@@ -1337,12 +1349,12 @@ mod tests {
         assert_eq!(home.status.text, "gg");
         assert!(home.status.error.is_some());
         // Then it goes through: on top of the feed, the feed read again.
-        home.asked.insert("activity:0".into());
+        home.asked.insert("activity:0".into(), std::time::Instant::now());
         assert!(home.submit(&signed_in(), false).is_some());
         assert!(home.status_answered(&Ok(())));
         assert_eq!(home.status.posted.len(), 1);
         assert!(home.status.text.is_empty() && home.status.refreshing);
-        assert!(!home.asked.contains("activity:0"));
+        assert!(!home.asked.contains_key("activity:0"));
     }
 
     #[test]

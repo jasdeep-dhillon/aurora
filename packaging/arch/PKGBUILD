@@ -4,7 +4,7 @@
 pkgname=aurora-bin
 pkgver=0.9.1
 pkgrel=1
-# The release tag; a "0.7.1-1" release is pkgver 0.7.1, pkgrel 2.
+# The release tag can differ from pkgver, e.g. v1.0.0-rc2 uses 1.0.0rc2.
 _tag=v$pkgver
 pkgdesc="Aurora: an unofficial Steam client written in Rust"
 arch=('x86_64')

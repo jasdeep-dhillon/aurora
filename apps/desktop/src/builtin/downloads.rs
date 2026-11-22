@@ -161,7 +161,7 @@ impl Extension for Downloads {
                 // Games already downloading or queued are listed above, not here.
                 let busy = |id: model::AppId| running(ctx.state).any(|d| d.app_id == id) || ctx.state.download_queue.contains(&id);
                 let mut queue: Vec<_> = ctx.local.games.iter().filter(|g| matches!(g.state, InstallState::UpdateRequired | InstallState::Downloading) && !busy(g.app_id)).collect();
-                queue.sort_by_key(|g| g.name.to_lowercase());
+                queue.sort_by(|a, b| model::cmp_ignore_case(&a.name, &b.name));
                 w::section(ui, &t, &t!("Up next ({n})", n = queue.len()), None);
                 if queue.is_empty() {
                     w::card(&t).show(ui, |ui| {

@@ -19,6 +19,6 @@ aes = "0.8"
 cbc = "0.1"
 ecb = "0.1"
 sha1 = "0.10"
-lzma-rs = "0.3"
-ruzstd = "0.8"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "optimization"] }
+ruzstd = { version = "0.9", default-features = false, features = ["std"] }
+zip.workspace = true

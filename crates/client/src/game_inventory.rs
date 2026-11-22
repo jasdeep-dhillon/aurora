@@ -268,9 +268,9 @@ async fn digest(conn: &Connection, app_id: AppId, me: u64, refresh_token: &str) 
         if let Ok(tok) = conn.call::<_, CAuthenticationAccessTokenGenerateForAppResponse>("Authentication.GenerateAccessTokenForApp#1", &token_req).await
             && !tok.access_token().is_empty()
         {
-            let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().ok()?;
-            if let Ok(resp) = client
+            if let Ok(resp) = crate::http()
                 .get("https://api.steampowered.com/IInventoryService/GetItemDefMeta/v1/")
+                .timeout(Duration::from_secs(15))
                 .query(&[("access_token", tok.access_token()), ("appid", &app_id.to_string())])
                 .send()
                 .await
@@ -338,10 +338,7 @@ pub async fn item_defs(conn: &Connection, app_id: AppId, me: u64, refresh_token:
         return Reply::ItemDefs { defs: defs(&c.body) };
     }
     let url = format!("https://api.steampowered.com/IGameInventory/GetItemDefArchive/v0001?appid={app_id}&digest={digest}");
-    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(15)).build() else {
-        return cached.map(|c| Reply::ItemDefs { defs: defs(&c.body) }).unwrap_or(empty);
-    };
-    match client.get(&url).send().await {
+    match crate::http().get(&url).timeout(Duration::from_secs(15)).send().await {
         Ok(r) if r.status().is_success() => match read_bounded(r, MAX_ARCHIVE_BYTES).await {
             Some(body) => {
                 let parsed = defs(&body);

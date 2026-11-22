@@ -4094,12 +4094,9 @@ async fn fetch_points_balance(conn: &net::Connection, refresh_token: &str, me: S
     if access.is_empty() {
         return Err("No access token".into());
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let v: serde_json::Value = client
+    let v: serde_json::Value = crate::http()
         .get("https://api.steampowered.com/ILoyaltyRewardsService/GetSummary/v1/")
+        .timeout(std::time::Duration::from_secs(12))
         .query(&[("access_token", access), ("steamid", &me.to_string())])
         .send()
         .await

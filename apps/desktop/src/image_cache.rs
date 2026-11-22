@@ -29,6 +29,7 @@ const MAX_BYTES: u64 = 512 * 1024 * 1024;
 /// Downloads at once (Steam's CDN drops connections when flooded).
 const PARALLEL: usize = 8;
 /// Textures not drawn (or prefetched) for this long are unloaded.
+const MAX_TEXTURE_BYTES: usize = 96 * 1024 * 1024;
 const UNUSED_FOR: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
@@ -73,10 +74,14 @@ impl ImageCache {
     pub fn install(ctx: &egui::Context, rt: tokio::runtime::Handle) {
         let dir = dir();
         let _ = std::fs::create_dir_all(&dir);
-        let http = build_http_client();
-        // Keep the folder under its limit (in the background, at start).
-        let trim_dir = dir.clone();
-        rt.spawn_blocking(move || trim(&trim_dir));
+        static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(build_http_client);
+        static TRIMMED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        let http = HTTP.clone();
+        // A second egui context shares the disk cache and the connection pool.
+        TRIMMED.get_or_init(|| {
+            let trim_dir = dir.clone();
+            rt.spawn_blocking(move || trim(&trim_dir));
+        });
         ctx.add_bytes_loader(Arc::new(Self { dir, rt, http, slots: Arc::new(tokio::sync::Semaphore::new(PARALLEL)), entries: Default::default() }));
         // Once a picture is a texture, drop its downloaded and decoded copies
         // (the disk cache has it), and unload textures that are off screen.
@@ -87,7 +92,15 @@ impl ImageCache {
     }
 
     fn key(uri: &str) -> String {
-        Sha256::digest(uri.as_bytes()).iter().take(16).map(|b| format!("{b:02x}")).collect()
+        const LUT: &[u8; 16] = b"0123456789abcdef";
+        let digest = Sha256::digest(uri.as_bytes());
+        let mut hex = [0u8; 32];
+        for (i, &b) in digest[..16].iter().enumerate() {
+            hex[i * 2] = LUT[(b >> 4) as usize];
+            hex[i * 2 + 1] = LUT[(b & 0x0f) as usize];
+        }
+        // SAFETY: LUT contains only ASCII hex bytes.
+        unsafe { String::from_utf8_unchecked(hex.to_vec()) }
     }
 }
 
@@ -108,17 +121,20 @@ impl BytesLoader for ImageCache {
         if !(uri.starts_with("https://") || uri.starts_with("http://")) {
             return Err(LoadError::NotSupported);
         }
-        if let Err(err) = validate_image_url(uri) {
-            return Err(LoadError::Loading(err));
+        {
+            let mut map = self.entries.lock().unwrap();
+            if let Some(e) = map.get(uri) {
+                return match e {
+                    Entry::Pending => Ok(BytesPoll::Pending { size: None }),
+                    Entry::Ready(bytes, mime) => Ok(BytesPoll::Ready { size: None, bytes: bytes.clone(), mime: mime.clone() }),
+                    Entry::Failed(err) => Err(LoadError::Loading(err.clone())),
+                };
+            }
+            if let Err(err) = validate_image_url(uri) {
+                return Err(LoadError::Loading(err));
+            }
+            map.insert(uri.to_string(), Entry::Pending);
         }
-        if let Some(e) = self.entries.lock().unwrap().get(uri).cloned() {
-            return match e {
-                Entry::Pending => Ok(BytesPoll::Pending { size: None }),
-                Entry::Ready(bytes, mime) => Ok(BytesPoll::Ready { size: None, bytes, mime }),
-                Entry::Failed(err) => Err(LoadError::Loading(err)),
-            };
-        }
-        self.entries.lock().unwrap().insert(uri.to_string(), Entry::Pending);
         let (uri, ctx) = (uri.to_string(), ctx.clone());
         let path = self.dir.join(Self::key(&uri));
         let (http, slots, entries) = (self.http.clone(), self.slots.clone(), self.entries.clone());
@@ -127,27 +143,56 @@ impl BytesLoader for ImageCache {
                 entries.lock().unwrap().insert(uri.clone(), e);
                 ctx.request_repaint();
             };
-            // 1. A saved copy shows right away (even if it's old, or offline).
-            let saved = std::fs::read(&path).ok();
-            // Known not to exist: fail at once, so the fallback art shows.
-            let missing = path.with_extension("missing");
-            if saved.is_none() && age(&missing).is_some_and(|a| a < FRESH_FOR) {
-                let status = std::fs::read_to_string(&missing).unwrap_or_default();
-                done(Entry::Failed(format!("HTTP {}", status.trim())));
-                return;
+            // 1. Check disk cache off the async worker threads so bursts of cached
+            // pictures never stall network / Steam CM tasks.
+            let probe_path = path.clone();
+            enum DiskHit {
+                Fresh(Vec<u8>, Option<String>),
+                Stale(Vec<u8>, Meta),
+                KnownMissing(String),
+                Miss,
             }
-            let meta = read_meta(&path);
-            if let Some(bytes) = &saved {
-                done(Entry::Ready(Bytes::from(bytes.clone()), meta.mime.clone()));
-                if age(&path).is_some_and(|a| a < FRESH_FOR) {
-                    // Touch-free: fresh enough, nothing else to do.
+            let disk = tokio::task::spawn_blocking(move || {
+                if let Ok(bytes) = std::fs::read(&probe_path) {
+                    let meta = read_meta(&probe_path);
+                    if age(&probe_path).is_some_and(|a| a < FRESH_FOR) {
+                        DiskHit::Fresh(bytes, meta.mime)
+                    } else {
+                        DiskHit::Stale(bytes, meta)
+                    }
+                } else {
+                    let missing = probe_path.with_extension("missing");
+                    if age(&missing).is_some_and(|a| a < FRESH_FOR) {
+                        let status = std::fs::read_to_string(&missing).unwrap_or_default();
+                        DiskHit::KnownMissing(status)
+                    } else {
+                        DiskHit::Miss
+                    }
+                }
+            })
+            .await
+            .unwrap_or(DiskHit::Miss);
+
+            let (has_saved, meta) = match disk {
+                DiskHit::Fresh(bytes, mime) => {
+                    done(Entry::Ready(Bytes::from(bytes), mime));
                     return;
                 }
-            }
+                DiskHit::KnownMissing(status) => {
+                    done(Entry::Failed(format!("HTTP {}", status.trim())));
+                    return;
+                }
+                DiskHit::Stale(bytes, meta) => {
+                    let mime = meta.mime.clone();
+                    done(Entry::Ready(Bytes::from(bytes), mime));
+                    (true, meta)
+                }
+                DiskHit::Miss => (false, Meta::default()),
+            };
             // 2. Download, or revalidate an old copy.
             let _slot = slots.acquire().await;
             let mut req = http.get(&uri);
-            if saved.is_some() {
+            if has_saved {
                 if let Some(etag) = &meta.etag {
                     req = req.header(reqwest::header::IF_NONE_MATCH, etag);
                 }
@@ -157,41 +202,56 @@ impl BytesLoader for ImageCache {
             }
             match req.send().await {
                 Ok(resp) if resp.remote_addr().is_some_and(|a| !is_public_ip(a.ip())) => {
-                    if saved.is_none() {
+                    if !has_saved {
                         done(Entry::Failed("blocked non-public image host".into()));
                     }
                 }
                 Ok(resp) if resp.status() == reqwest::StatusCode::NOT_MODIFIED => {
                     // Still current: mark it fresh again.
-                    if let Ok(f) = std::fs::File::options().append(true).open(&path) {
-                        let _ = f.set_modified(SystemTime::now());
-                    }
+                    let touch_path = path.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(f) = std::fs::File::options().append(true).open(&touch_path) {
+                            let _ = f.set_modified(SystemTime::now());
+                        }
+                    })
+                    .await;
                 }
                 Ok(resp) if resp.status().is_success() => {
                     let header = |name| resp.headers().get(name).and_then(|v: &reqwest::header::HeaderValue| v.to_str().ok()).map(String::from);
                     let meta = Meta { mime: header(reqwest::header::CONTENT_TYPE), etag: header(reqwest::header::ETAG), last_modified: header(reqwest::header::LAST_MODIFIED) };
                     match read_image_bytes(resp).await {
                         Ok(bytes) => {
-                            let tmp = path.with_extension("part");
-                            if std::fs::write(&tmp, &bytes).is_ok() {
-                                let _ = std::fs::rename(&tmp, &path);
-                                let _ = std::fs::write(path.with_extension("json"), serde_json::to_string(&meta).unwrap_or_default());
-                            }
-                            done(Entry::Ready(Bytes::from(bytes), meta.mime));
+                            let shared = Bytes::from(bytes);
+                            let mime = meta.mime.clone();
+                            done(Entry::Ready(shared.clone(), mime));
+                            let write_path = path.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let tmp = write_path.with_extension("part");
+                                if std::fs::write(&tmp, &shared[..]).is_ok() {
+                                    let _ = std::fs::rename(&tmp, &write_path);
+                                    let _ = std::fs::write(write_path.with_extension("json"), serde_json::to_string(&meta).unwrap_or_default());
+                                }
+                            })
+                            .await;
                         }
-                        Err(e) if saved.is_none() => done(Entry::Failed(e)),
+                        Err(e) if !has_saved => done(Entry::Failed(e)),
                         Err(_) => {}
                     }
                 }
-                Ok(resp) if saved.is_none() => {
+                Ok(resp) if !has_saved => {
                     let status = resp.status();
                     // Remember pictures that don't exist (not server hiccups).
                     if matches!(status.as_u16(), 403 | 404 | 410) {
-                        let _ = std::fs::write(&missing, status.to_string());
+                        let missing = path.with_extension("missing");
+                        let text = status.to_string();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let _ = std::fs::write(&missing, text);
+                        })
+                        .await;
                     }
                     done(Entry::Failed(format!("HTTP {status}")));
                 }
-                Err(e) if saved.is_none() => done(Entry::Failed(e.to_string())),
+                Err(e) if !has_saved => done(Entry::Failed(e.to_string())),
                 // Offline or the server hiccuped: keep showing the saved copy.
                 _ => {}
             }
@@ -272,6 +332,22 @@ impl egui::load::TextureLoader for UnloadUnused {
         };
         for uri in stale {
             self.inner.forget(&uri);
+        }
+        if self.inner.byte_size() > MAX_TEXTURE_BYTES {
+            let mut used = self.used.lock().unwrap();
+            // Keep textures used in the current pass. Evict older ones first.
+            let mut candidates: Vec<_> = used.iter()
+                .filter(|(_, t)| now.duration_since(**t) > Duration::from_millis(200))
+                .map(|(uri, t)| (*t, uri.clone()))
+                .collect();
+            candidates.sort_unstable_by_key(|(t, _)| *t);
+            for (_, uri) in candidates {
+                if self.inner.byte_size() <= MAX_TEXTURE_BYTES {
+                    break;
+                }
+                used.remove(&uri);
+                self.inner.forget(&uri);
+            }
         }
     }
 

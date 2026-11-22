@@ -68,15 +68,18 @@ impl Cdn {
     /// (Steam just takes the directory's order). Download speed takes over
     /// once chunks arrive (see [`Cdn::record`]).
     pub async fn rank(&self) {
-        let list: Vec<Server> = self.servers.lock().unwrap().iter().map(|s| s.0.clone()).collect();
-        let mut timed = Vec::new();
-        for s in list.into_iter().take(8) {
-            let url = format!("https://{}/", s.host);
-            let start = Instant::now();
-            let ok = tokio::time::timeout(Duration::from_secs(3), self.http.head(&url).send()).await.is_ok();
-            let ms = if ok { start.elapsed().as_secs_f64() * 1000.0 } else { 10_000.0 };
-            timed.push((s, ms));
-        }
+        let list: Vec<Server> = self.servers.lock().unwrap().iter().take(8).map(|s| s.0.clone()).collect();
+        let mut timed: Vec<(Server, f64)> = futures_util::future::join_all(list.into_iter().map(|s| {
+            let http = self.http.clone();
+            async move {
+                let url = format!("https://{}/", s.host);
+                let start = Instant::now();
+                let ok = tokio::time::timeout(Duration::from_secs(3), http.head(&url).send()).await.is_ok();
+                let ms = if ok { start.elapsed().as_secs_f64() * 1000.0 } else { 10_000.0 };
+                (s, ms)
+            }
+        }))
+        .await;
         if !timed.is_empty() {
             timed.sort_by(|a, b| a.1.total_cmp(&b.1));
             tracing::info!("fastest content server: {} ({:.0} ms)", timed[0].0.host, timed[0].1);
@@ -142,7 +145,7 @@ impl Cdn {
                 Ok(r) => match r.bytes().await {
                     Ok(b) => {
                         self.record(&s.host, b.len(), start.elapsed());
-                        return Ok(b.to_vec());
+                        return Ok(Vec::from(b));
                     }
                     Err(e) => last = Some(e),
                 },

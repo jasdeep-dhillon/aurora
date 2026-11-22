@@ -2390,3 +2390,24 @@ mod trade_url_tests {
         assert_eq!(fallback.join_args().as_deref(), Some("+connect_lobby 42"));
     }
 }
+
+/// Compare names as lowercase text, with no allocation for ASCII names.
+pub fn cmp_ignore_case(a: &str, b: &str) -> std::cmp::Ordering {
+    if a.is_ascii() && b.is_ascii() {
+        a.bytes().map(|c| c.to_ascii_lowercase())
+            .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+    } else {
+        a.to_lowercase().cmp(&b.to_lowercase())
+    }
+}
+
+/// Search for an already-lowercased filter, preserving Unicode lowercasing.
+pub fn contains_ignore_case(text: &str, lowercase_query: &str) -> bool {
+    if lowercase_query.is_empty() {
+        true
+    } else if text.is_ascii() {
+        text.as_bytes().windows(lowercase_query.len()).any(|w| w.eq_ignore_ascii_case(lowercase_query.as_bytes()))
+    } else {
+        text.to_lowercase().contains(lowercase_query)
+    }
+}

@@ -211,6 +211,7 @@ pub fn settings() -> ControllerSettings {
 pub fn set_settings(mut next: ControllerSettings) {
     next.calibration = next.calibration.clamped();
     *settings_lock().lock().unwrap_or_else(|e| e.into_inner()) = next;
+    crate::preferences_changed();
 }
 
 pub fn set_app_controllers(map: BTreeMap<AppId, u8>) {

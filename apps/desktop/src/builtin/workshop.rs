@@ -274,9 +274,11 @@ impl Workshop {
         ui.vertical(|ui| {
             ui.set_width(width);
             let (img, resp) = ui.allocate_exact_size(vec2(width, width), Sense::click());
-            match &it.preview {
-                Some(u) => w::image_or_skeleton(ui, t, img, u, t.corner_small()),
-                None => w::placeholder(ui, t, img, &it.title, t.corner_small()),
+            if ui.is_rect_visible(img) {
+                match &it.preview {
+                    Some(u) => w::image_or_skeleton(ui, t, img, u, t.corner_small()),
+                    None => w::placeholder(ui, t, img, &it.title, t.corner_small()),
+                }
             }
             if resp.hovered() {
                 ui.painter().rect_stroke(img, t.corner_small(), egui::Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);

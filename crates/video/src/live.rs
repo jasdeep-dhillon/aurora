@@ -71,8 +71,8 @@ pub fn validate_live_hls_url(raw: &str) -> Result<String, String> {
 }
 
 struct DvrState {
-    /// Latest full-res 960×540 RGB24 frame for live playback.
-    live_frame: Option<Vec<u8>>,
+    /// Latest full-res 960×540 frame, expanded on the decoder thread.
+    live_frame: Option<Arc<egui::ColorImage>>,
     /// 480×270 RGB24 frames at 10 Hz (newest at back), up to 30 seconds.
     frames: VecDeque<Vec<u8>>,
     /// 0.1s stereo 48 kHz f32 PCM chunks (newest at back), up to 30 seconds.
@@ -112,12 +112,14 @@ impl DvrState {
         self.behind = self.behind.clamp(0.0, max);
     }
 
-    fn push_video(&mut self, rgb: Vec<u8>, push_dvr: bool) {
+    fn push_video(&mut self, image: Arc<egui::ColorImage>, rgb: &[u8], push_dvr: bool) -> Option<Arc<egui::ColorImage>> {
         if push_dvr {
-            let small = downsample_2x_rgb(&rgb, LIVE_W, LIVE_H);
-            if self.frames.len() >= DVR_MAX_CHUNKS {
-                self.frames.pop_front();
-            }
+            let mut small = if self.frames.len() >= DVR_MAX_CHUNKS {
+                self.frames.pop_front().unwrap()
+            } else {
+                vec![0; DVR_W * DVR_H * 3]
+            };
+            downsample_2x_rgb(rgb, LIVE_W, LIVE_H, &mut small);
             self.frames.push_back(small);
             if self.paused {
                 // Keep the frozen frame pinned as new live frames arrive.
@@ -126,10 +128,11 @@ impl DvrState {
                 self.clamp_behind();
             }
         }
-        self.live_frame = Some(rgb);
-        if !self.paused {
+        let old = self.live_frame.replace(image);
+        if !self.paused && (self.is_live() || push_dvr) {
             self.revision = self.revision.wrapping_add(1);
         }
+        old
     }
 
     fn push_audio_and_pick(&mut self, live_chunk: Vec<f32>) -> Option<Vec<f32>> {
@@ -148,28 +151,23 @@ impl DvrState {
         self.audio.get(idx).cloned()
     }
 
-    fn current_frame(&self) -> Option<([usize; 2], &[u8])> {
+    fn current_frame(&self) -> Option<Arc<egui::ColorImage>> {
         if self.is_live() && !self.paused {
-            if let Some(f) = self.live_frame.as_deref() {
-                return Some(([LIVE_W, LIVE_H], f));
-            }
+            return self.live_frame.clone();
         }
-        if !self.frames.is_empty() {
-            let back_idx = (self.behind * DVR_FPS as f32).round() as usize;
-            let idx = self.frames.len().saturating_sub(1).saturating_sub(back_idx);
-            if let Some(f) = self.frames.get(idx) {
-                return Some(([DVR_W, DVR_H], f.as_slice()));
-            }
-        }
-        self.live_frame.as_deref().map(|f| ([LIVE_W, LIVE_H], f))
+        let back_idx = (self.behind * DVR_FPS as f32).round() as usize;
+        let idx = self.frames.len().saturating_sub(1).saturating_sub(back_idx);
+        self.frames.get(idx)
+            .map(|rgb| Arc::new(egui::ColorImage::from_rgb([DVR_W, DVR_H], rgb)))
+            .or_else(|| self.live_frame.clone())
     }
+
 }
 
 /// Fast 2×2 nearest downsample of an RGB24 frame (`w×h` -> `(w/2)×(h/2)`).
-fn downsample_2x_rgb(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+fn downsample_2x_rgb(src: &[u8], w: usize, h: usize, dst: &mut [u8]) {
     let dw = w / 2;
     let dh = h / 2;
-    let mut dst = vec![0u8; dw * dh * 3];
     for y in 0..dh {
         let sy = y * 2;
         let row_src = sy * w * 3;
@@ -182,7 +180,6 @@ fn downsample_2x_rgb(src: &[u8], w: usize, h: usize) -> Vec<u8> {
             dst[di + 2] = src[si + 2];
         }
     }
-    dst
 }
 
 pub struct LivePlayer {
@@ -200,6 +197,10 @@ pub struct LivePlayer {
 
 impl LivePlayer {
     pub fn start(ctx: &egui::Context, url: String) -> Self {
+        Self::start_with_auth(ctx, url, String::new())
+    }
+
+    pub fn start_with_auth(ctx: &egui::Context, url: String, auth_params: String) -> Self {
         let dvr = Arc::new(Mutex::new(DvrState::default()));
         let muted = Arc::new(AtomicBool::new(false));
         let volume = Arc::new(AtomicU32::new(0.8_f32.to_bits()));
@@ -220,13 +221,31 @@ impl LivePlayer {
 
         #[cfg(not(windows))]
         if let Some(url) = validated_url {
-            use std::io::Read;
+            use std::io::{BufRead, Read};
+            use std::os::fd::OwnedFd;
+            use std::os::unix::net::UnixStream;
             use std::process::{Command, Stdio};
+
+            // Steam's Akamai HLS broadcasts require `cdn_auth_url_parameters`
+            // on every segment/init-section request, which FFmpeg's HLS demuxer
+            // does not propagate from master.m3u8. Rewrite only the tiny .m3u8
+            // playlists on loopback so segments still stream directly from CDN.
+            let uses_local_proxy = !auth_params.is_empty();
+            let url = if uses_local_proxy {
+                start_hls_auth_proxy(url, auth_params, stop.clone()).unwrap_or_else(|e| {
+                    tracing::warn!("broadcast auth proxy unavailable: {e}");
+                    String::new()
+                })
+            } else {
+                url
+            };
+            let whitelist = if uses_local_proxy { "http,https,tls,tcp,crypto" } else { "https,tls,tcp,crypto" };
 
             let bin = std::env::var("STEAMINRUST_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
 
-            // 1. Video stream thread: live HLS -> 960x540 RGB24 frames @ 30fps.
-            {
+            // FFmpeg writes PCM to its full-duplex stdin socket. -nostdin
+            // disables interactive reads, leaving stderr for diagnostics.
+            if let Ok((mut audio_input, audio_output)) = UnixStream::pair() {
                 let bin_v = bin.clone();
                 let url_v = url.clone();
                 let dvr_v = dvr.clone();
@@ -246,9 +265,8 @@ impl LivePlayer {
                             "-loglevel",
                             "error",
                             "-nostdin",
-                            "-re",
                             "-protocol_whitelist",
-                            "https,tls,tcp,crypto",
+                            whitelist,
                             "-extension_picky",
                             "0",
                             "-allowed_extensions",
@@ -263,18 +281,29 @@ impl LivePlayer {
                             "2",
                             "-i",
                             &url_v,
-                            "-an",
+                            "-map",
+                            "0:v:0",
+                            "-map",
+                            "0:a:0?",
+                            "-c:v",
+                            "rawvideo",
                             "-vf",
                             &vf,
                             "-r",
                             "30",
                             "-pix_fmt",
                             "rgb24",
+                            "-c:a",
+                            "pcm_f32le",
+                            "-ar",
+                            "48000",
+                            "-ac",
+                            "2",
                             "-f",
-                            "rawvideo",
-                            "-",
+                            "tee",
+                            "[select=v:f=rawvideo]pipe:1|[select=a:onfail=ignore:f=f32le]pipe:0",
                         ])
-                        .stdin(Stdio::null())
+                        .stdin(Stdio::from(OwnedFd::from(audio_output)))
                         .stdout(Stdio::piped())
                         .stderr(Stdio::piped())
                         .spawn();
@@ -291,20 +320,34 @@ impl LivePlayer {
                         let _ = child.wait();
                         return;
                     };
-                    let stderr_pipe = child.stderr.take();
+                    let diagnostic = Arc::new(Mutex::new(None));
+                    if let Some(stderr) = child.stderr.take() {
+                        let diagnostic = diagnostic.clone();
+                        std::thread::spawn(move || {
+                            for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+                                let mut first = diagnostic.lock().unwrap();
+                                if first.is_none() {
+                                    *first = Some(line);
+                                }
+                            }
+                        });
+                    }
                     {
-                        let mut list = procs_v.lock().unwrap();
+                        let mut children = procs_v.lock().unwrap();
                         if stop_v.load(Ordering::Acquire) {
                             let _ = child.kill();
                             let _ = child.wait();
                             return;
                         }
-                        list.push(child);
+                        children.push(child);
                     }
 
                     let mut frame_idx: u32 = 0;
+                    let mut buf = vec![0u8; frame_bytes];
+                    let mut free_pixels = Vec::new();
+                    let frame_period = std::time::Duration::from_nanos(1_000_000_000 / 30);
+                    let mut next_frame_at: Option<std::time::Instant> = None;
                     while !stop_v.load(Ordering::Relaxed) {
-                        let mut buf = vec![0u8; frame_bytes];
                         let mut got = 0;
                         while got < frame_bytes && !stop_v.load(Ordering::Relaxed) {
                             match stdout.read(&mut buf[got..]) {
@@ -315,110 +358,55 @@ impl LivePlayer {
                         if got < frame_bytes {
                             break;
                         }
+                        // Pace delivery at 30 fps so HLS segment bursts play
+                        // smoothly instead of fast-forwarding then freezing
+                        // while waiting for the next segment.
+                        let now = std::time::Instant::now();
+                        match next_frame_at {
+                            None => next_frame_at = Some(now + frame_period),
+                            Some(target) => {
+                                if target > now {
+                                    let wait = target - now;
+                                    if wait <= std::time::Duration::from_millis(100) {
+                                        std::thread::sleep(wait);
+                                    }
+                                    next_frame_at = Some(target + frame_period);
+                                } else if now.duration_since(target) > std::time::Duration::from_millis(250) {
+                                    next_frame_at = Some(now + frame_period);
+                                } else {
+                                    next_frame_at = Some(target + frame_period);
+                                }
+                            }
+                        }
                         let push_dvr = frame_idx % DVR_STRIDE == 0;
                         frame_idx = frame_idx.wrapping_add(1);
-                        dvr_v.lock().unwrap().push_video(buf, push_dvr);
+                        free_pixels.clear();
+                        free_pixels.extend(buf.chunks_exact(3).map(|rgb| egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])));
+                        let image = Arc::new(egui::ColorImage::new([LIVE_W, LIVE_H], free_pixels));
+                        let old = dvr_v.lock().unwrap().push_video(image, &buf, push_dvr);
+                        free_pixels = old.and_then(|img| Arc::try_unwrap(img).ok()).map_or_else(Vec::new, |img| img.pixels);
                         has_v.store(true, Ordering::Release);
                         ctx_v.request_repaint();
                     }
                     if !stop_v.load(Ordering::Relaxed) && !has_v.load(Ordering::Acquire) {
-                        let mut msg = String::new();
-                        if let Some(mut se) = stderr_pipe {
-                            let _ = se.read_to_string(&mut msg);
-                        }
-                        let msg = msg.trim();
-                        *err_v.lock().unwrap() = Some(if msg.is_empty() {
-                            "Stream ended or could not be decoded.".into()
-                        } else {
-                            msg.lines().next().unwrap_or(msg).to_string()
-                        });
+                        let msg = diagnostic.lock().unwrap().take()
+                            .unwrap_or_else(|| "Stream ended or could not be decoded.".into());
+                        *err_v.lock().unwrap() = Some(msg);
                         ctx_v.request_repaint();
                     }
                 });
-            }
 
-            // 2. Audio stream thread: live HLS -> 48kHz stereo f32le -> PulseAudio/PipeWire.
-            {
-                let bin_a = bin;
-                let url_a = url;
+                let (audio_tx, audio_rx) = std::sync::mpsc::sync_channel::<Option<Vec<f32>>>(16);
                 let dvr_a = dvr.clone();
-                let muted_a = muted.clone();
-                let vol_a = volume.clone();
                 let stop_a = stop.clone();
-                let procs_a = procs.clone();
-                let _ = std::thread::Builder::new().name("live-audio".into()).spawn(move || {
-                    let mut out = match crate::pulse::Output::new(AUDIO_RATE, AUDIO_CHANNELS as u16) {
-                        Ok(o) => o,
-                        Err(e) => {
-                            tracing::warn!("broadcast audio output unavailable: {e}");
-                            return;
-                        }
-                    };
-                    if let Err(e) = out.start() {
-                        tracing::warn!("broadcast audio start failed: {e}");
-                        return;
-                    }
-                    let Ok(mut child) = Command::new(&bin_a)
-                        .args([
-                            "-hide_banner",
-                            "-loglevel",
-                            "error",
-                            "-nostdin",
-                            "-re",
-                            "-protocol_whitelist",
-                            "https,tls,tcp,crypto",
-                            "-extension_picky",
-                            "0",
-                            "-allowed_extensions",
-                            "ALL",
-                            "-allowed_segment_extensions",
-                            "ALL",
-                            "-reconnect",
-                            "1",
-                            "-reconnect_streamed",
-                            "1",
-                            "-reconnect_delay_max",
-                            "2",
-                            "-i",
-                            &url_a,
-                            "-vn",
-                            "-f",
-                            "f32le",
-                            "-ar",
-                            "48000",
-                            "-ac",
-                            "2",
-                            "-",
-                        ])
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::null())
-                        .spawn()
-                    else {
-                        return;
-                    };
-                    let Some(mut stdout) = child.stdout.take() else {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return;
-                    };
-                    {
-                        let mut list = procs_a.lock().unwrap();
-                        if stop_a.load(Ordering::Acquire) {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return;
-                        }
-                        list.push(child);
-                    }
-
+                // Drain FFmpeg's audio pipe without ever blocking on PulseAudio:
+                // otherwise the synchronous `tee` muxer stalls video & HLS reads.
+                let _ = std::thread::Builder::new().name("live-audio-read".into()).spawn(move || {
                     let mut raw = vec![0u8; AUDIO_CHUNK_SAMPLES * 4];
-                    let mut scaled = vec![0.0f32; AUDIO_CHUNK_SAMPLES];
-                    let mut was_paused = false;
                     while !stop_a.load(Ordering::Relaxed) {
                         let mut got = 0;
                         while got < raw.len() && !stop_a.load(Ordering::Relaxed) {
-                            match stdout.read(&mut raw[got..]) {
+                            match audio_input.read(&mut raw[got..]) {
                                 Ok(0) | Err(_) => break,
                                 Ok(n) => got += n,
                             }
@@ -432,34 +420,67 @@ impl LivePlayer {
                             chunk.push(f32::from_le_bytes([ch[0], ch[1], ch[2], ch[3]]));
                         }
                         let to_play = dvr_a.lock().unwrap().push_audio_and_pick(chunk);
+                        // Non-blocking send: drop if PulseAudio is temporarily behind.
+                        let _ = audio_tx.try_send(to_play);
+                    }
+                });
+
+                let muted_p = muted.clone();
+                let vol_p = volume.clone();
+                let stop_p = stop.clone();
+                let _ = std::thread::Builder::new().name("live-audio-play".into()).spawn(move || {
+                    let mut out = None;
+                    let mut attempted_audio = false;
+                    let mut scaled = vec![0.0f32; AUDIO_CHUNK_SAMPLES];
+                    let mut was_paused = false;
+                    while !stop_p.load(Ordering::Relaxed) {
+                        let Ok(to_play) = audio_rx.recv() else { break };
+                        if stop_p.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        if !attempted_audio {
+                            attempted_audio = true;
+                            match crate::pulse::Output::new(AUDIO_RATE, AUDIO_CHANNELS as u16)
+                                .and_then(|mut output| {
+                                    output.start()?;
+                                    Ok(output)
+                                })
+                            {
+                                Ok(output) => out = Some(output),
+                                Err(error) => tracing::warn!("broadcast audio output unavailable: {error}"),
+                            }
+                        }
+                        let Some(output) = &mut out else { continue };
                         match to_play {
                             None => {
                                 if !was_paused {
-                                    let _ = out.reset();
-                                    let _ = out.start();
+                                    let _ = output.reset();
+                                    let _ = output.start();
                                     was_paused = true;
                                 }
                             }
                             Some(samples) => {
                                 was_paused = false;
-                                let v = f32::from_bits(vol_a.load(Ordering::Relaxed)).clamp(0.0, 1.0);
-                                let gain = if muted_a.load(Ordering::Relaxed) { 0.0 } else { v * v };
+                                let v = f32::from_bits(vol_p.load(Ordering::Relaxed)).clamp(0.0, 1.0);
+                                let gain = if muted_p.load(Ordering::Relaxed) { 0.0 } else { v * v };
                                 scaled.clear();
                                 scaled.extend(samples.iter().map(|s| s * gain));
-                                if let Err(e) = out.write(&scaled) {
+                                if let Err(e) = output.write(&scaled) {
                                     tracing::warn!("broadcast audio write failed: {e}");
-                                    break;
+                                    out = None;
                                 }
                             }
                         }
                     }
                 });
+            } else {
+                *error.lock().unwrap() = Some("Could not open broadcast audio pipe.".into());
             }
         }
 
         #[cfg(windows)]
         {
-            let _ = (ctx, validated_url);
+            let _ = (ctx, validated_url, auth_params);
             *error.lock().unwrap() = Some("Live broadcast playback is currently supported on Linux (ffmpeg).".into());
         }
 
@@ -560,9 +581,7 @@ impl LivePlayer {
             if st.revision == self.uploaded_rev {
                 None
             } else {
-                st.current_frame().map(|(size, rgb)| {
-                    (st.revision, egui::ColorImage::from_rgb(size, rgb))
-                })
+                st.current_frame().map(|img| (st.revision, img))
             }
         };
         if let Some((rev, img)) = maybe_img {
@@ -595,33 +614,87 @@ impl Drop for LivePlayer {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires local ffmpeg HLS fixtures"]
+    fn ffmpeg_broadcast_handles_audio_and_silent_feeds() {
+        let ctx = egui::Context::default();
+        for (env, expect_audio) in [("AURORA_TEST_HLS_AV", true), ("AURORA_TEST_HLS_SILENT", false)] {
+            let player = LivePlayer::start(&ctx, std::env::var(env).expect(env));
+            let start = std::time::Instant::now();
+            while start.elapsed() < std::time::Duration::from_secs(8) {
+                assert!(player.error().is_none(), "{:?}", player.error());
+                if player.has_frame() && (!expect_audio || !player.dvr.lock().unwrap().audio.is_empty()) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            assert!(player.has_frame());
+            let dvr = player.dvr.lock().unwrap();
+            assert_eq!(dvr.live_frame.as_ref().unwrap().size, [LIVE_W, LIVE_H]);
+            assert_eq!(!dvr.audio.is_empty(), expect_audio);
+            assert_eq!(player.procs.lock().unwrap().len(), 1);
+        }
+    }
+
     #[test]
     fn dvr_rewind_pause_and_jump_to_live() {
         let mut st = DvrState::default();
+        let push = |st: &mut DvrState, i| {
+            let rgb = vec![i; LIVE_W * LIVE_H * 3];
+            st.push_video(Arc::new(egui::ColorImage::from_rgb([LIVE_W, LIVE_H], &rgb)), &rgb, true);
+        };
         for i in 0..30u8 {
-            st.push_video(vec![i; LIVE_W * LIVE_H * 3], true);
+            push(&mut st, i);
             let _ = st.push_audio_and_pick(vec![i as f32; 8]);
         }
         assert!(st.buffered_secs() >= 2.8);
         assert!(st.is_live());
         // Live returns full-res latest frame.
-        let (sz, data) = st.current_frame().unwrap();
-        assert_eq!(sz, [LIVE_W, LIVE_H]);
-        assert_eq!(data[0], 29);
+        let frame = st.current_frame().unwrap();
+        assert_eq!(frame.size, [LIVE_W, LIVE_H]);
+        assert_eq!(frame.pixels[0].r(), 29);
 
         // Rewind 1.0s (10 chunks back) returns downscaled DVR frame & matching audio.
         st.behind = 1.0;
         assert!(!st.is_live());
-        let (sz, data) = st.current_frame().unwrap();
-        assert_eq!(sz, [DVR_W, DVR_H]);
-        assert_eq!(data[0], 19);
+        let frame = st.current_frame().unwrap();
+        assert_eq!(frame.size, [DVR_W, DVR_H]);
+        assert_eq!(frame.pixels[0].r(), 19);
 
         // Pause freezes frame and silences audio while live continues buffering.
         st.paused = true;
-        st.push_video(vec![30; LIVE_W * LIVE_H * 3], true);
+        push(&mut st, 30);
         assert!(st.push_audio_and_pick(vec![30.0; 8]).is_none());
-        let (_, data) = st.current_frame().unwrap();
-        assert_eq!(data[0], 19);
+        assert_eq!(st.current_frame().unwrap().pixels[0].r(), 19);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn rewrites_hls_auth_params_for_playlists_maps_and_segments() {
+        let auth = "&token=ip=1.2.3.4~hmac=abc";
+        let base = "http://127.0.0.1:42000";
+        let mut playlists = vec!["https://cdn/master.m3u8?origin=x".to_string()];
+        let master = concat!(
+            "#EXTM3U\n",
+            "#EXT-X-MEDIA:TYPE=AUDIO,URI=\"https://cdn/audio.m3u8?origin=x\"\n",
+            "#EXT-X-STREAM-INF:BANDWIDTH=1000\n",
+            "https://cdn/video.m3u8?origin=x\n",
+        );
+        let rewritten_master = rewrite_hls_playlist(master, auth, base, &mut playlists);
+        assert!(rewritten_master.contains("URI=\"http://127.0.0.1:42000/p/1.m3u8\""));
+        assert!(rewritten_master.contains("\nhttp://127.0.0.1:42000/p/2.m3u8\n"));
+        assert_eq!(playlists.len(), 3);
+
+        let media = concat!(
+            "#EXTM3U\n",
+            "#EXT-X-MAP:URI=\"https://cdn/init/audio?origin=x\"\n",
+            "#EXTINF:2.0,\n",
+            "https://cdn/segment/audio/1/100/?origin=x\n",
+        );
+        let rewritten_media = rewrite_hls_playlist(media, auth, base, &mut playlists);
+        assert!(rewritten_media.contains("URI=\"https://cdn/init/audio?origin=x&token=ip=1.2.3.4~hmac=abc\""));
+        assert!(rewritten_media.contains("https://cdn/segment/audio/1/100/?origin=x&token=ip=1.2.3.4~hmac=abc"));
     }
 
     #[test]
@@ -643,4 +716,141 @@ mod tests {
             assert!(validate_live_hls_url(bad).is_err(), "expected rejection for {bad:?}");
         }
     }
+}
+
+#[cfg(not(windows))]
+fn append_auth(url: &str, auth: &str) -> String {
+    if auth.is_empty() || url.contains("token=") {
+        return url.to_string();
+    }
+    let clean = auth.trim_start_matches(['&', '?']);
+    if url.contains('?') {
+        format!("{url}&{clean}")
+    } else {
+        format!("{url}?{clean}")
+    }
+}
+
+#[cfg(not(windows))]
+fn register_playlist(playlists: &mut Vec<String>, url: &str) -> usize {
+    if let Some(pos) = playlists.iter().position(|u| u == url) {
+        pos
+    } else {
+        let idx = playlists.len();
+        playlists.push(url.to_string());
+        idx
+    }
+}
+
+#[cfg(not(windows))]
+fn rewrite_hls_playlist(body: &str, auth: &str, base_local: &str, playlists: &mut Vec<String>) -> String {
+    let mut out = String::with_capacity(body.len() + 512);
+    for raw in body.lines() {
+        let line = raw.trim_end_matches('\r');
+        if (line.starts_with("#EXT-X-MEDIA:") || line.starts_with("#EXT-X-MAP:"))
+            && let Some(uri_start) = line.find("URI=\"")
+        {
+            let val_start = uri_start + 5;
+            if let Some(val_end_rel) = line[val_start..].find('"') {
+                let val_end = val_start + val_end_rel;
+                let uri = &line[val_start..val_end];
+                let replacement = if uri.contains(".m3u8") || line.starts_with("#EXT-X-MEDIA:") {
+                    let idx = register_playlist(playlists, uri);
+                    format!("{base_local}/p/{idx}.m3u8")
+                } else {
+                    append_auth(uri, auth)
+                };
+                out.push_str(&line[..val_start]);
+                out.push_str(&replacement);
+                out.push_str(&line[val_end..]);
+                out.push('\n');
+                continue;
+            }
+        } else if line.starts_with("http://") || line.starts_with("https://") {
+            if line.contains(".m3u8") {
+                let idx = register_playlist(playlists, line);
+                out.push_str(&format!("{base_local}/p/{idx}.m3u8\n"));
+            } else {
+                out.push_str(&append_auth(line, auth));
+                out.push('\n');
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn start_hls_auth_proxy(master_url: String, auth_params: String, stop: Arc<AtomicBool>) -> std::io::Result<String> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    listener.set_nonblocking(true)?;
+    let base_local = format!("http://127.0.0.1:{port}");
+    let entry = format!("{base_local}/p/0.m3u8");
+
+    std::thread::Builder::new().name("live-hls-proxy".into()).spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent("Mozilla/5.0 Aurora")
+            .build()
+            .unwrap_or_default();
+        let mut playlists = vec![master_url];
+
+        while !stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+                    let mut req_buf = [0u8; 2048];
+                    let n = stream.read(&mut req_buf).unwrap_or(0);
+                    let req = std::str::from_utf8(&req_buf[..n]).unwrap_or("");
+                    let path = req.lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("");
+                    let idx = path
+                        .strip_prefix("/p/")
+                        .and_then(|s| s.strip_suffix(".m3u8"))
+                        .and_then(|s| s.parse::<usize>().ok());
+                    let Some(upstream) = idx.and_then(|i| playlists.get(i)).cloned() else {
+                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        continue;
+                    };
+                    let upstream_auth = append_auth(&upstream, &auth_params);
+                    let fetched = rt.block_on(async {
+                        let resp = http.get(&upstream_auth).send().await.ok()?;
+                        if !resp.status().is_success() {
+                            return None;
+                        }
+                        resp.text().await.ok()
+                    });
+                    match fetched {
+                        Some(body) => {
+                            let rewritten = rewrite_hls_playlist(&body, &auth_params, &base_local, &mut playlists);
+                            let header = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                rewritten.len()
+                            );
+                            let _ = stream.write_all(header.as_bytes());
+                            let _ = stream.write_all(rewritten.as_bytes());
+                        }
+                        None => {
+                            let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+    })?;
+
+    Ok(entry)
 }

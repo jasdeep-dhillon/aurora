@@ -255,7 +255,7 @@ fn snapshot(app: &SteamApp) -> MenuData {
         signed_in: app.state.steam_id != 0,
         name: if app.state.persona_name.is_empty() { me.name.clone() } else { app.state.persona_name.clone() },
         me,
-        online: app.state.friend_list().iter().filter(|p| p.state != PersonaState::Offline).count(),
+        online: app.state.online_friend_count(),
         download: app.state.downloads.values().find(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)).map(|d| {
             let pct = d.disk_done as f64 * 100.0 / d.disk_total.max(1) as f64;
             format!("{pct:.0}%")

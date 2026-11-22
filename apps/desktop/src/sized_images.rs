@@ -85,9 +85,10 @@ impl SizedLoader {
 }
 
 fn worker(rx: &Mutex<Receiver<Job>>, entries: &Mutex<HashMap<String, Entry>>) {
+    let mut resizer = fast_image_resize::Resizer::new();
     loop {
         let Ok(job) = rx.lock().unwrap().recv() else { return };
-        let result = decode(&job.bytes, job.cover, job.w, job.h);
+        let result = decode_with(&job.bytes, job.cover, job.w, job.h, &mut resizer);
         let mut map = entries.lock().unwrap();
         // Forgotten meanwhile (another page): don't keep it.
         if matches!(map.get(&job.uri), Some(Entry::Pending)) {
@@ -102,22 +103,49 @@ fn worker(rx: &Mutex<Receiver<Job>>, entries: &Mutex<HashMap<String, Entry>>) {
 }
 
 /// Decode, then shrink so the picture still covers (or fits in) `w`×`h`.
+#[cfg(test)]
 fn decode(bytes: &[u8], cover: bool, w: u32, h: u32) -> Result<ColorImage, String> {
+    let mut resizer = fast_image_resize::Resizer::new();
+    decode_with(bytes, cover, w, h, &mut resizer)
+}
+
+fn decode_with(
+    bytes: &[u8],
+    cover: bool,
+    w: u32,
+    h: u32,
+    resizer: &mut fast_image_resize::Resizer,
+) -> Result<ColorImage, String> {
+    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, images::{Image, ImageRef}};
+
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
+    if reader.format() == Some(image::ImageFormat::WebP)
+        && image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).is_ok_and(|d| d.has_animation())
+    {
+        return Err(ui::widgets::USE_ORIGINAL_IMAGE.into());
+    }
     reader.limits(image_limits());
     let img = reader.decode().map_err(|e| e.to_string())?;
     let (iw, ih) = (img.width().max(1), img.height().max(1));
     let (sx, sy) = (w as f32 / iw as f32, h as f32 / ih as f32);
     let scale = if cover { sx.max(sy) } else { sx.min(sy) };
-    let img = if scale < 0.9 {
+    let rgba = img.into_rgba8();
+    if scale < 0.9 {
         let (nw, nh) = (((iw as f32 * scale).ceil() as u32).max(1), ((ih as f32 * scale).ceil() as u32).max(1));
-        img.resize_exact(nw, nh, image::imageops::FilterType::Triangle)
-    } else {
-        img
-    };
-    let rgba = img.to_rgba8();
+        if let Ok(src) = ImageRef::new(iw, ih, rgba.as_raw(), PixelType::U8x4) {
+            let mut dst = Image::new(nw, nh, PixelType::U8x4);
+            let opts = ResizeOptions::new()
+                .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
+                .use_alpha(false);
+            if resizer.resize(&src, &mut dst, &opts).is_ok() {
+                return Ok(ColorImage::from_rgba_unmultiplied([nw as usize, nh as usize], dst.buffer()));
+            }
+        }
+        let fallback = image::imageops::resize(&rgba, nw, nh, image::imageops::FilterType::Triangle);
+        return Ok(ColorImage::from_rgba_unmultiplied([nw as usize, nh as usize], fallback.as_raw()));
+    }
     Ok(ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()))
 }
 
@@ -130,7 +158,6 @@ impl ImageLoader for SizedLoader {
         let Some((url, cover, w, h)) = ui::widgets::parse_sized(uri) else {
             return Err(LoadError::NotSupported);
         };
-        self.sweep();
         match self.entries.lock().unwrap().get(uri) {
             Some(Entry::Pending) => return Ok(ImagePoll::Pending { size: None }),
             Some(Entry::Ready(image, _)) => return Ok(ImagePoll::Ready { image: image.clone() }),
@@ -141,8 +168,10 @@ impl ImageLoader for SizedLoader {
             Ok(BytesPoll::Ready { bytes, .. }) => {
                 self.entries.lock().unwrap().insert(uri.to_string(), Entry::Pending);
                 // The decoder has its own copy now; the disk cache has the file.
-                for loader in ctx.loaders().bytes.lock().iter() {
-                    loader.forget(url);
+                if bytes.get(8..12) != Some(b"WEBP") {
+                    for loader in ctx.loaders().bytes.lock().iter() {
+                        loader.forget(url);
+                    }
                 }
                 let job = Job { uri: uri.to_string(), bytes, cover, w, h, ctx: ctx.clone() };
                 if self.jobs.lock().unwrap().send(job).is_err() {
@@ -153,6 +182,10 @@ impl ImageLoader for SizedLoader {
             Ok(BytesPoll::Pending { size }) => Ok(ImagePoll::Pending { size }),
             Err(e) => Err(e),
         }
+    }
+
+    fn end_pass(&self, _pass_index: u64) {
+        self.sweep();
     }
 
     fn forget(&self, uri: &str) {
@@ -181,6 +214,24 @@ mod tests {
         let mut out = std::io::Cursor::new(Vec::new());
         img.write_to(&mut out, image::ImageFormat::Jpeg).unwrap();
         out.into_inner()
+    }
+
+    #[test]
+    fn resizes_static_webp_and_preserves_animation() {
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(128, 64).write_to(&mut encoded, image::ImageFormat::WebP).unwrap();
+        assert_eq!(decode(encoded.get_ref(), false, 32, 32).unwrap().size, [32, 16]);
+        let animated = b"\
+        \x52\x49\x46\x46\x84\x00\x00\x00\x57\x45\x42\x50\x56\x50\x38\x58\
+        \x0a\x00\x00\x00\x02\x00\x00\x00\x07\x00\x00\x07\x00\x00\x41\x4e\
+        \x49\x4d\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x41\x4e\x4d\x46\
+        \x28\x00\x00\x00\x00\x00\x00\x00\x00\x00\x07\x00\x00\x07\x00\x00\
+        \x64\x00\x00\x02\x56\x50\x38\x4c\x10\x00\x00\x00\x2f\x07\xc0\x01\
+        \x00\x07\x10\xe5\x2e\x45\xff\x03\x11\xd1\xff\x00\x41\x4e\x4d\x46\
+        \x28\x00\x00\x00\x00\x00\x00\x00\x00\x00\x07\x00\x00\x07\x00\x00\
+        \x64\x00\x00\x00\x56\x50\x38\x4c\x0f\x00\x00\x00\x2f\x07\xc0\x01\
+        \x00\x07\x10\x51\xee\xfe\x07\x22\xa2\xff\x01\x00";
+        assert_eq!(decode(animated, false, 4, 4).unwrap_err(), ui::widgets::USE_ORIGINAL_IMAGE);
     }
 
     #[test]

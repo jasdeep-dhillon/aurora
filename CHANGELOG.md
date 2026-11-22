@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.0-rc2]
+
+### Faster
+
+* Ranked download servers in parallel and moved depot decompression, verification, and file writes off the async workers, with SIMD `zlib-rs`, `lzma-rust2`, `ruzstd 0.9`, and `fast_image_resize`.
+* Reduced per-frame CPU/GPU work across the Library, Store, Wishlist, Points Shop, Hub, Friends, Themes, and In-Game Overlay; added bounded LRU caches, a 96 MiB offscreen texture budget, cached Linux font discovery, and image/heap purging when minimizing or hiding to tray.
+
+### Fixes
+
+* **Windows installer & auto-updater:** replaced fragile PowerShell shortcut creation with native Win32 COM (`IShellLinkW` / `IPersistFile`), `SHGetKnownFolderPath`, `SHChangeNotify`, and `App Paths` registration so the Start Menu shortcut is always created and repaired on update; fixed the auto-updater launching two instances of Aurora after an update.
+* **Live Steam Broadcasts:** switched to a single FFmpeg process with decoupled audio playback, 30 fps frame pacing, and a loopback HLS auth manifest rewriter for Akamai `cdn_auth_url_parameters`.
+* **Window chrome & Linux overlay:** added 12 px rounded corners for floating windows, removed the cramped top-bar back/forward arrows, added X11 focus-loss auto-ungrab to the Vulkan overlay, and fixed fail-closed Proton anti-cheat launch-option detection.
+* **Packaging & icons:** restored the Arch package (`.pkg.tar.zst`), added a Fedora `.rpm`, added a release-notes download table, dropped the duplicate `SteamInRust-Setup` installer asset, and updated Linux and Windows icons to the Aurora logo.
+
 ## [1.0.0-rc1](https://github.com/mollie2999/Aurora/compare/v0.9.2...v1.0.0-rc1) (2026-11-22)
 
 > **Release Candidate / Test Version:** Aurora `1.0.0-rc1` is a pre-1.0 test release to validate all new features across Linux and Windows before tagging `1.0.0`. The updater now supports SemVer prerelease ordering, so anyone on `1.0.0-rc1` will automatically be offered `1.0.0` when it ships. Please report any bugs with your `aurora.log` file from your settings folder!

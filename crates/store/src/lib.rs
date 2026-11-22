@@ -136,11 +136,13 @@ impl Default for StoreClient {
 
 impl StoreClient {
     pub fn new(country: &str, language: &str) -> Self {
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("Aurora/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("http client");
-        Self { http, country: country.into(), language: language.into() }
+        static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+            reqwest::Client::builder()
+                .user_agent(concat!("Aurora/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .expect("http client")
+        });
+        Self { http: HTTP.clone(), country: country.into(), language: language.into() }
     }
 
     /// Price history from IsThereAnyDeal (needs the user's API key).

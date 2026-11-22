@@ -252,7 +252,11 @@ struct X11 {
     >,
     XMapRaised: Option<unsafe extern "C" fn(*mut Display, Window) -> c_int>,
     XDestroyWindow: Option<unsafe extern "C" fn(*mut Display, Window) -> c_int>,
+    XResizeWindow: Option<unsafe extern "C" fn(*mut Display, Window, c_uint, c_uint) -> c_int>,
     XSetInputFocus: Option<unsafe extern "C" fn(*mut Display, Window, c_int, Time) -> c_int>,
+    XGetInputFocus: Option<unsafe extern "C" fn(*mut Display, *mut Window, *mut c_int) -> c_int>,
+    XQueryTree: Option<unsafe extern "C" fn(*mut Display, Window, *mut Window, *mut Window, *mut *mut Window, *mut c_uint) -> c_int>,
+    XFree: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
     XTranslateCoordinates: Option<
         unsafe extern "C" fn(*mut Display, Window, Window, c_int, c_int, *mut c_int, *mut c_int, *mut Window) -> Bool,
     >,
@@ -312,7 +316,11 @@ impl X11 {
                 XCreateWindow: sym(lib, c"XCreateWindow"),
                 XMapRaised: sym(lib, c"XMapRaised"),
                 XDestroyWindow: sym(lib, c"XDestroyWindow"),
+                XResizeWindow: sym(lib, c"XResizeWindow"),
                 XSetInputFocus: sym(lib, c"XSetInputFocus"),
+                XGetInputFocus: sym(lib, c"XGetInputFocus"),
+                XQueryTree: sym(lib, c"XQueryTree"),
+                XFree: sym(lib, c"XFree"),
                 XTranslateCoordinates: sym(lib, c"XTranslateCoordinates"),
                 XCreateFontCursor: sym(lib, c"XCreateFontCursor"),
                 XFreeCursor: sym(lib, c"XFreeCursor"),
@@ -425,6 +433,45 @@ fn combo_matches(keymap: &[u8; 32], req_mods: u8, kc_key: u8, mods_kc: (u8, u8, 
     held == (req_mods & 0x07)
 }
 
+fn is_ancestor_of(x11: &X11, dpy: *mut Display, maybe_anc: Window, mut child: Window) -> bool {
+    let Some(query_tree) = x11.XQueryTree else { return false };
+    for _ in 0..8 {
+        let mut root: Window = 0;
+        let mut parent: Window = 0;
+        let mut children: *mut Window = std::ptr::null_mut();
+        let mut nchildren: c_uint = 0;
+        let ok = unsafe { query_tree(dpy, child, &mut root, &mut parent, &mut children, &mut nchildren) };
+        if !children.is_null() {
+            if let Some(free_fn) = x11.XFree {
+                unsafe { free_fn(children.cast()) };
+            }
+        }
+        if ok == 0 || parent == 0 || parent == root {
+            return false;
+        }
+        if parent == maybe_anc {
+            return true;
+        }
+        child = parent;
+    }
+    false
+}
+
+fn window_has_focus(x11: &X11, dpy: *mut Display, win: Window, shield: Window) -> bool {
+    let Some(get_focus) = x11.XGetInputFocus else { return true };
+    let mut focus: Window = 0;
+    let mut revert: c_int = 0;
+    unsafe { get_focus(dpy, &mut focus, &mut revert) };
+    // 0 = None, 1 = PointerRoot
+    if focus <= 1 {
+        return false;
+    }
+    if focus == win || (shield != 0 && focus == shield) {
+        return true;
+    }
+    is_ancestor_of(x11, dpy, focus, win) || is_ancestor_of(x11, dpy, win, focus)
+}
+
 fn input_loop() {
     let Some(x11) = (unsafe { X11::load() }) else {
         return;
@@ -503,6 +550,7 @@ fn input_loop() {
         let is_wayland = SURFACE_IS_WAYLAND.load(Ordering::Relaxed);
         let mut win = ACTIVE_WINDOW.load(Ordering::Relaxed) as Window;
         if is_wayland && win == 0 {
+            eprintln!("[aurora-vk-overlay] open: surface=wayland (X11 input capture unavailable)");
             // Native Wayland surfaces don't support XGrabPointer; wait cleanly until closed.
             while shared().is_open() && !shared().is_shutdown() && SURFACE_IS_WAYLAND.load(Ordering::Relaxed) {
                 refresh_keys(&mut cur_ov, &mut cur_sh);
@@ -578,10 +626,14 @@ fn input_loop() {
         let mut ptr_grabbed = try_ptr_grab(grab_target);
         let mut kbd_grabbed = try_kbd_grab(grab_target);
         unsafe { (x11.XFlush)(dpy) };
+        eprintln!(
+            "[aurora-vk-overlay] open: surface=x11 win=0x{win:x} shield=0x{shield:x} geom={win_w}x{win_h} ptr_grab={ptr_grabbed} kbd_grab={kbd_grabbed}"
+        );
 
         let mut last_poll_pos: Option<(i32, i32)> = None;
         let mut last_poll_mask: c_uint = 0;
         let mut ticks = 0u32;
+        let mut unfocused_checks = 0u32;
 
         while shared().is_open() && !shared().is_shutdown() {
             refresh_keys(&mut cur_ov, &mut cur_sh);
@@ -601,8 +653,27 @@ fn input_loop() {
                 (win_w, win_h) = query_geom(win);
             } else if ticks % 30 == 0 {
                 let geom = query_geom(win);
-                if geom.0 > 0 && geom.1 > 0 {
+                if geom.0 > 0 && geom.1 > 0 && geom != (win_w, win_h) {
                     (win_w, win_h) = geom;
+                    if shield != 0 {
+                        if let Some(resize_fn) = x11.XResizeWindow {
+                            unsafe { resize_fn(dpy, shield, win_w.max(128), win_h.max(128)) };
+                        }
+                    }
+                }
+            }
+            // If focus leaves the game (Alt+Tab, Super, compositor dialog),
+            // release grabs and close the overlay so we never freeze or trigger
+            // Mutter's "not responding" dialog.
+            if ticks > 25 && ticks % 8 == 0 {
+                if window_has_focus(&x11, dpy, win, shield) {
+                    unfocused_checks = 0;
+                } else {
+                    unfocused_checks += 1;
+                    if unfocused_checks >= 2 {
+                        shared().notify_opened(false);
+                        break;
+                    }
                 }
             }
             if ticks % 12 == 0 {

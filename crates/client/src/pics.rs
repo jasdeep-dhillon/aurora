@@ -285,7 +285,7 @@ pub async fn raw_app_info(conn: &Connection, id: AppId) -> Option<vdf::Obj> {
     let http = crate::http();
     for resp in product_info(conn, &req).await.ok()? {
         let host = resp.http_host.clone().filter(|h| !h.is_empty());
-        for app in resp.apps.into_iter().filter(|a| a.appid() == id) {
+        if let Some(app) = resp.apps.into_iter().find(|a| a.appid() == id) {
             let text = match app.buffer.as_deref().filter(|b| !b.is_empty()) {
                 Some(buf) => String::from_utf8_lossy(buf).into_owned(),
                 None => fetch_http(&http, host.as_deref()?, id, app.sha.as_deref()?).await?,

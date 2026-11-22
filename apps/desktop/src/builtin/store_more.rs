@@ -102,7 +102,7 @@ impl Store {
         f.hidden_descriptors = self.hidden.iter().copied().collect();
         if self.query.as_ref().is_none_or(|(key, page, _)| *key != f || *page != self.browse_page) {
             let (api, ff, start) = (self.api.clone(), f.clone(), self.browse_page * 48);
-            let slot = self.fetch(async move { api.query(&ff, start, 48).await });
+            let slot = self.fetch(async move { api.query(&ff, start, 48).await.map(std::sync::Arc::new) });
             self.query = Some((f.clone(), self.browse_page, slot));
         }
         ui.horizontal_top(|ui| {
@@ -116,9 +116,10 @@ impl Store {
                 match snapshot(slot) {
                     None => w::loading(ui, t, t!("Searching…")),
                     Some(Err(e)) => w::empty(ui, t, icons::WARNING, t!("Search failed"), &e),
-                    Some(Ok((items, total))) => {
+                    Some(Ok(result)) => {
+                        let (items, total) = result.as_ref();
                         let owned = |id: &AppId| self.owned.contains(id);
-                        let items: Vec<QueryItem> = items.into_iter().filter(|i| !self.hide_owned || !owned(&i.app_id)).collect();
+                        let items: Vec<_> = items.iter().filter(|i| !self.hide_owned || !owned(&i.app_id)).collect();
                         ui.label(w::text(t!("{n} results", n = total), 13.5, t.text_dim));
                         ui.add_space(8.0);
                         for it in &items {
@@ -484,7 +485,7 @@ impl Store {
         sorted_ids.sort_unstable();
         if self.wish_items.as_ref().is_none_or(|(k, _)| *k != sorted_ids) {
             let (api, ids2) = (self.api.clone(), sorted_ids.clone());
-            let slot = self.fetch(async move { api.items(&ids2).await });
+            let slot = self.fetch(async move { api.items(&ids2).await.map(std::sync::Arc::from) });
             self.wish_items = Some((sorted_ids, slot));
         }
         let Some(Ok(items)) = self.wish_items.as_ref().and_then(|(_, s)| snapshot(s)) else {
@@ -541,9 +542,9 @@ impl Store {
         ui.add_space(10.0);
 
         let q = self.wish.query.trim().to_lowercase();
-        let mut shown: Vec<QueryItem> = items
-            .into_iter()
-            .filter(|i| q.is_empty() || i.name.to_lowercase().contains(&q))
+        let mut shown: Vec<_> = items
+            .iter()
+            .filter(|i| model::contains_ignore_case(&i.name, &q))
             .filter(|i| match self.wish.platform {
                 1 => i.platforms.0,
                 2 => i.platforms.1,
@@ -559,11 +560,11 @@ impl Store {
             .collect();
         match self.wish.sort {
             WishSort::Rank => shown.sort_by_key(|i| rank_of.get(&i.app_id).copied().unwrap_or(usize::MAX)),
-            WishSort::Discount => shown.sort_by_key(|i| (std::cmp::Reverse(i.price.discount), i.name.to_lowercase())),
-            WishSort::PriceLow => shown.sort_by_key(|i| (i.price.final_.unwrap_or(u64::MAX), i.name.to_lowercase())),
-            WishSort::PriceHigh => shown.sort_by_key(|i| (std::cmp::Reverse(i.price.final_.unwrap_or(0)), i.name.to_lowercase())),
-            WishSort::Name => shown.sort_by_key(|i| i.name.to_lowercase()),
-            WishSort::Released => shown.sort_by_key(|i| (std::cmp::Reverse(i.released), i.name.to_lowercase())),
+            WishSort::Discount => shown.sort_by(|a, b| (std::cmp::Reverse(a.price.discount)).cmp(&(std::cmp::Reverse(b.price.discount))).then_with(|| model::cmp_ignore_case(&a.name, &b.name))),
+            WishSort::PriceLow => shown.sort_by(|a, b| (a.price.final_.unwrap_or(u64::MAX)).cmp(&(b.price.final_.unwrap_or(u64::MAX))).then_with(|| model::cmp_ignore_case(&a.name, &b.name))),
+            WishSort::PriceHigh => shown.sort_by(|a, b| (std::cmp::Reverse(a.price.final_.unwrap_or(0))).cmp(&(std::cmp::Reverse(b.price.final_.unwrap_or(0)))).then_with(|| model::cmp_ignore_case(&a.name, &b.name))),
+            WishSort::Name => shown.sort_by(|a, b| model::cmp_ignore_case(&a.name, &b.name)),
+            WishSort::Released => shown.sort_by(|a, b| (std::cmp::Reverse(a.released)).cmp(&(std::cmp::Reverse(b.released))).then_with(|| model::cmp_ignore_case(&a.name, &b.name))),
             WishSort::Reviews => shown.sort_by_key(|i| (std::cmp::Reverse(i.review_percent), std::cmp::Reverse(i.review_count))),
         }
 
@@ -612,9 +613,13 @@ impl Store {
                     let per = (((ui.available_width() + gap) / (250.0 + gap)).floor() as usize).max(1);
                     let cw = (ui.available_width() - gap * (per as f32 - 1.0)) / per as f32;
                     for row in shown.chunks(per) {
+                        if w::skip_offscreen_row(ui, cw * 215.0 / 460.0 + 64.0) {
+                            ui.add_space(gap);
+                            continue;
+                        }
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = gap;
-                            for it in row {
+                            for &it in row {
                                 let item = super::query_card(it.clone());
                                 let owned = self.owned.contains(&it.app_id);
                                 if self.store_card(ui, t, &item, cw, owned).clicked() {
@@ -638,7 +643,7 @@ impl Store {
         });
     }
 
-    fn wish_drag(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, order: &[AppId], shown: &[QueryItem]) {
+    fn wish_drag(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, order: &[AppId], shown: &[&QueryItem]) {
         let Some(dragged) = self.wish.drag else { return };
         let Some(pos) = ui.ctx().pointer_latest_pos() else {
             if !ui.input(|i| i.pointer.primary_down()) {
@@ -890,7 +895,7 @@ impl Store {
             // Online friends first, then by name; avatar and status on each row.
             let q = g.search.trim().to_lowercase();
             let mut friends: Vec<_> = ctx.state.friend_list().into_iter().filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q)).collect();
-            friends.sort_by_key(|p| (p.state == model::PersonaState::Offline, !p.in_game(), p.name.to_lowercase()));
+            friends.sort_by_key(|p| (p.state == model::PersonaState::Offline, !p.in_game()));
             egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                 for p in &friends {
                     let sel = g.to == Some(p.steam_id);

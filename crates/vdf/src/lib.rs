@@ -85,26 +85,57 @@ impl fmt::Display for Value {
 
 /// Write a document in Valve's text format (tabs, quoted keys/values).
 pub fn write(obj: &Obj) -> String {
-    fn esc(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('"', "\\\"")
+    fn push_escaped(out: &mut String, s: &str) {
+        let bytes = s.as_bytes();
+        let mut start = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'\\' || b == b'"' {
+                out.push_str(&s[start..i]);
+                out.push('\\');
+                out.push(b as char);
+                start = i + 1;
+            }
+        }
+        out.push_str(&s[start..]);
+    }
+    fn push_tabs(out: &mut String, depth: usize) {
+        const TABS: &str = "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t";
+        let mut left = depth;
+        while left > 0 {
+            let take = left.min(TABS.len());
+            out.push_str(&TABS[..take]);
+            left -= take;
+        }
     }
     fn go(o: &Obj, depth: usize, out: &mut String) {
         if depth >= MAX_DEPTH {
             return;
         }
-        let pad = "\t".repeat(depth);
         for (k, v) in &o.0 {
             match v {
-                Value::Str(s) => out.push_str(&format!("{pad}\"{}\"\t\t\"{}\"\n", esc(k), esc(s))),
+                Value::Str(s) => {
+                    push_tabs(out, depth);
+                    out.push('"');
+                    push_escaped(out, k);
+                    out.push_str("\"\t\t\"");
+                    push_escaped(out, s);
+                    out.push_str("\"\n");
+                }
                 Value::Obj(inner) => {
-                    out.push_str(&format!("{pad}\"{}\"\n{pad}{{\n", esc(k)));
+                    push_tabs(out, depth);
+                    out.push('"');
+                    push_escaped(out, k);
+                    out.push_str("\"\n");
+                    push_tabs(out, depth);
+                    out.push_str("{\n");
                     go(inner, depth + 1, out);
-                    out.push_str(&format!("{pad}}}\n"));
+                    push_tabs(out, depth);
+                    out.push_str("}\n");
                 }
             }
         }
     }
-    let mut out = String::new();
+    let mut out = String::with_capacity(obj.0.len().saturating_mul(32));
     go(obj, 0, &mut out);
     out
 }
@@ -123,11 +154,12 @@ impl Obj {
 /// Parse a whole document. The result is the top-level object, which usually
 /// holds a single root key such as `"libraryfolders"` or `"AppState"`.
 pub fn parse(input: &str) -> Result<Obj, Error> {
-    let mut p = Parser { src: input.as_bytes(), pos: 0 };
+    let mut p = Parser { text: input, src: input.as_bytes(), pos: 0 };
     p.object(true, 0)
 }
 
 struct Parser<'a> {
+    text: &'a str,
     src: &'a [u8],
     pos: usize,
 }
@@ -204,21 +236,39 @@ impl Parser<'_> {
 
     fn quoted(&mut self) -> Result<String, Error> {
         self.pos += 1; // opening quote
-        let mut buf = Vec::new();
-        while let Some(&c) = self.src.get(self.pos) {
-            self.pos += 1;
-            match c {
-                b'"' => return Ok(String::from_utf8_lossy(&buf).into_owned()),
-                b'\\' => {
-                    let esc = *self.src.get(self.pos).ok_or(Error::Eof)?;
+        let start = self.pos;
+        let bytes = self.src;
+        while self.pos < bytes.len() {
+            match bytes[self.pos] {
+                b'"' => {
+                    // Fast path: no escapes; `self.text` is already valid UTF-8 and both
+                    // opening and closing `"` are ASCII char boundaries.
+                    let s = self.text[start..self.pos].to_owned();
                     self.pos += 1;
-                    buf.push(match esc {
-                        b'n' => b'\n',
-                        b't' => b'\t',
-                        other => other,
-                    });
+                    return Ok(s);
                 }
-                _ => buf.push(c),
+                b'\\' => {
+                    let mut buf = Vec::with_capacity(self.pos - start + 16);
+                    buf.extend_from_slice(&bytes[start..self.pos]);
+                    while let Some(&c) = bytes.get(self.pos) {
+                        self.pos += 1;
+                        match c {
+                            b'"' => return Ok(String::from_utf8_lossy(&buf).into_owned()),
+                            b'\\' => {
+                                let esc = *bytes.get(self.pos).ok_or(Error::Eof)?;
+                                self.pos += 1;
+                                buf.push(match esc {
+                                    b'n' => b'\n',
+                                    b't' => b'\t',
+                                    other => other,
+                                });
+                            }
+                            _ => buf.push(c),
+                        }
+                    }
+                    return Err(Error::Eof);
+                }
+                _ => self.pos += 1,
             }
         }
         Err(Error::Eof)
@@ -232,7 +282,7 @@ impl Parser<'_> {
             }
             self.pos += 1;
         }
-        String::from_utf8_lossy(&self.src[start..self.pos]).into_owned()
+        self.text[start..self.pos].to_owned()
     }
 }
 

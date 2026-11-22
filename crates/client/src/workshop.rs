@@ -468,9 +468,16 @@ mod tests {
 
     #[test]
     fn finds_the_library_of_an_install() {
-        let p = Path::new(r"D:\Games\SteamLibrary\steamapps\common\Human Fall Flat");
-        assert_eq!(library_of(p), Some(PathBuf::from(r"D:\Games\SteamLibrary")));
-        assert_eq!(library_of(Path::new(r"C:\Games\Somewhere")), None);
+        let lib = PathBuf::from("Games").join("SteamLibrary");
+        let p = lib.join("steamapps").join("common").join("Human Fall Flat");
+        assert_eq!(library_of(&p), Some(lib));
+        assert_eq!(library_of(&PathBuf::from("Games").join("Somewhere")), None);
+        #[cfg(windows)]
+        {
+            let wp = Path::new(r"D:\Games\SteamLibrary\steamapps\common\Human Fall Flat");
+            assert_eq!(library_of(wp), Some(PathBuf::from(r"D:\Games\SteamLibrary")));
+            assert_eq!(library_of(Path::new(r"C:\Games\Somewhere")), None);
+        }
     }
 
     #[test]

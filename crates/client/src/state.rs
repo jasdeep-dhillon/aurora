@@ -3,7 +3,7 @@
 use crate::{Event, Guard};
 use model::{
     AppId, ChatGroup, ChatMessage, ChatRoomId, GroupBanInfo, GroupChatId, GroupInviteInfo, GroupInviteLink, GroupMessage, OwnedApp, Persona,
-    ProfileInfo, Relationship, SteamId, steam_id_to_account,
+    PersonaState, ProfileInfo, Relationship, SteamId, steam_id_to_account,
 };
 use std::collections::{BTreeMap, HashMap};
 
@@ -30,11 +30,11 @@ pub struct State {
     pub wallet: Option<(i64, i32)>,
     /// Wallet money not released yet (recent Market sales, refunds), in cents.
     pub wallet_pending: i64,
-    pub profiles: HashMap<SteamId, ProfileInfo>,
+    pub profiles: crate::read_cache::ReadCache<SteamId, ProfileInfo, 64>,
     /// Loaded inventories by (account, app, context).
-    pub inventories: HashMap<(SteamId, AppId, u64), model::Inventory>,
+    pub inventories: crate::read_cache::ReadCache<(SteamId, AppId, u64), model::Inventory, 32>,
     /// Market prices by (app, market hash name).
-    pub market_prices: HashMap<(AppId, String), Result<model::MarketPrice, String>>,
+    pub market_prices: crate::read_cache::ReadCache<(AppId, String), Result<model::MarketPrice, String>, 128>,
     pub my_listings: Option<Result<model::MyListings, String>>,
     pub profile_edit: Option<Result<model::ProfileEdit, String>>,
     /// Location lists by (country, state).
@@ -49,12 +49,12 @@ pub struct State {
     pub shader_compiling: HashMap<AppId, (u32, u32)>,
     /// Games whose install script is running before they start: the step.
     pub install_script: HashMap<AppId, String>,
-    pub comments: HashMap<SteamId, Result<model::Comments, String>>,
-    pub badges: HashMap<SteamId, Result<model::Badges, String>>,
+    pub comments: crate::read_cache::ReadCache<SteamId, Result<model::Comments, String>, 64>,
+    pub badges: crate::read_cache::ReadCache<SteamId, Result<model::Badges, String>, 64>,
     /// Profile reviews by (profile, page).
-    pub reviews: HashMap<(SteamId, u32), Result<model::UserReviews, String>>,
+    pub reviews: crate::read_cache::ReadCache<(SteamId, u32), Result<model::UserReviews, String>, 64>,
     /// Reviews of games by filter (summary and pages loaded so far).
-    pub app_reviews: HashMap<(AppId, model::ReviewFilter), Result<model::AppReviews, String>>,
+    pub app_reviews: crate::read_cache::ReadCache<(AppId, model::ReviewFilter), Result<model::AppReviews, String>, 64>,
     /// Games you marked "Not interested" in the store.
     pub ignored_apps: std::collections::HashSet<AppId>,
     /// Your Steam Points Shop balance, when loaded.
@@ -83,13 +83,13 @@ pub struct State {
     /// Games with inventories, by account.
     pub inventory_apps: HashMap<SteamId, Result<Vec<model::InventoryApp>, String>>,
     /// Games on profiles (yours and friends'), or why they're hidden.
-    pub player_games: HashMap<SteamId, Result<Vec<model::PlayerGame>, String>>,
+    pub player_games: crate::read_cache::ReadCache<SteamId, Result<Vec<model::PlayerGame>, String>, 32>,
     /// Your achievements per game: (unlocked, total).
     pub achievements: HashMap<AppId, (u32, u32)>,
     /// Game server details asked for with "View server info".
     pub servers: HashMap<String, Result<crate::a2s::ServerInfo, String>>,
     /// A game's achievement list, once loaded.
-    pub achievement_list: HashMap<AppId, Result<Vec<model::Achievement>, String>>,
+    pub achievement_list: crate::read_cache::ReadCache<AppId, Result<Vec<model::Achievement>, String>, 64>,
     pub downloads: HashMap<AppId, model::DownloadStatus>,
     pub download_queue: Vec<AppId>,
     pub wishlist: Option<Vec<(AppId, u64)>>,
@@ -100,7 +100,7 @@ pub struct State {
     pub friends: HashMap<SteamId, Relationship>,
     pub personas: HashMap<SteamId, Persona>,
     /// Conversations by friend, oldest message first.
-    pub chats: HashMap<SteamId, Vec<ChatMessage>>,
+    pub chats: crate::read_cache::ReadCache<SteamId, Vec<ChatMessage>, 128>,
     /// Unread message counts by friend.
     pub unread: HashMap<SteamId, usize>,
     /// When each friend last sent a typing notice (unix seconds).
@@ -108,7 +108,7 @@ pub struct State {
     /// Joined Steam group chats keyed by `chat_group_id`.
     pub chat_groups: BTreeMap<GroupChatId, ChatGroup>,
     /// Group chat channel histories by `(chat_group_id, chat_id)`.
-    pub group_messages: HashMap<(GroupChatId, ChatRoomId), Vec<GroupMessage>>,
+    pub group_messages: crate::read_cache::ReadCache<(GroupChatId, ChatRoomId), Vec<GroupMessage>, 128>,
     /// Whether older history pages exist for `(chat_group_id, chat_id)`.
     pub group_more_history: HashMap<(GroupChatId, ChatRoomId), bool>,
     /// Resolved group invite previews keyed by `GroupInviteRef::key()`.
@@ -327,7 +327,11 @@ impl State {
                 self.cloud_syncing.remove(&report.app_id);
                 self.cloud.insert(report.app_id, report.clone());
             }
-            Event::Notifications(n) => self.notifications = Some(n.clone()),
+            Event::Notifications(n) => {
+                let mut notifications = n.clone();
+                notifications.items.sort_by_key(|n| std::cmp::Reverse(n.time));
+                self.notifications = Some(notifications);
+            }
             Event::NotificationsArrived(_) => {}
             Event::SupportTickets(r) => self.support_tickets = Some(r.clone()),
             Event::AccountSecurity(r) => self.account_security = Some(r.clone()),
@@ -399,7 +403,7 @@ impl State {
                 }
             }
             Event::Message(m) => {
-                let chat = self.chats.entry(m.friend).or_default();
+                let chat = self.chats.get_or_default(m.friend);
                 // The server echoes our own messages; skip exact duplicates.
                 if !chat.iter().rev().take(5).any(|c| c.from == m.from && c.text == m.text && c.invite == m.invite && c.time.abs_diff(m.time) < 5) {
                     chat.push(m.clone());
@@ -413,7 +417,7 @@ impl State {
                 self.typing.insert(*from, now());
             }
             Event::History { friend, messages } => {
-                let chat = self.chats.entry(*friend).or_default();
+                let chat = self.chats.get_or_default(*friend);
                 let newest_loaded = messages.last().map(|m| m.time).unwrap_or(0);
                 let mut merged = messages.clone();
                 merged.extend(chat.iter().filter(|m| m.time > newest_loaded).cloned());
@@ -491,7 +495,7 @@ impl State {
             Event::GroupJoined(_) => {}
             Event::GroupHistory { group_id, chat_id, prepend, more, messages } => {
                 self.group_more_history.insert((*group_id, *chat_id), *more);
-                let chat = self.group_messages.entry((*group_id, *chat_id)).or_default();
+                let chat = self.group_messages.get_or_default((*group_id, *chat_id));
                 let mut merged = if *prepend {
                     let mut all = messages.clone();
                     for existing in chat.iter() {
@@ -514,7 +518,7 @@ impl State {
                 *chat = merged;
             }
             Event::GroupMessage(m) => {
-                let chat = self.group_messages.entry((m.group_id, m.chat_id)).or_default();
+                let chat = self.group_messages.get_or_default((m.group_id, m.chat_id));
                 let is_new = !chat.iter().rev().take(10).any(|c| same_group_msg(c, m));
                 if is_new {
                     chat.push(m.clone());
@@ -757,7 +761,45 @@ impl State {
             .filter(|(_, r)| **r == Relationship::Friend)
             .map(|(id, _)| self.persona(*id))
             .collect();
-        out.sort_by_key(|p| p.name.to_lowercase());
+        out.sort_by(|a, b| model::cmp_ignore_case(&a.name, &b.name));
+        out
+    }
+
+    /// Accepted friends in display order, including IDs whose persona has not arrived.
+    pub fn friend_refs(&self) -> Vec<(SteamId, Option<&Persona>)> {
+        let mut friends: Vec<_> = self.friends.iter()
+            .filter(|(_, relationship)| **relationship == Relationship::Friend)
+            .map(|(&id, _)| (id, self.personas.get(&id)))
+            .collect();
+        friends.sort_by(|(_, a), (_, b)| {
+            model::cmp_ignore_case(a.map_or("", |p| p.name.as_str()), b.map_or("", |p| p.name.as_str()))
+        });
+        friends
+    }
+
+    pub fn friend_count(&self) -> usize {
+        self.friends.values().filter(|r| **r == Relationship::Friend).count()
+    }
+
+    pub fn online_friend_count(&self) -> usize {
+        self.friends
+            .iter()
+            .filter(|(id, relationship)| {
+                **relationship == Relationship::Friend
+                    && self.personas.get(*id).is_some_and(|p| p.state != PersonaState::Offline)
+            })
+            .count()
+    }
+
+    pub fn friends_playing(&self, app_id: AppId) -> Vec<&Persona> {
+        let mut out: Vec<_> = self
+            .friends
+            .iter()
+            .filter(|(_, relationship)| **relationship == Relationship::Friend)
+            .filter_map(|(id, _)| self.personas.get(id))
+            .filter(|p| p.game_app_id == Some(app_id))
+            .collect();
+        out.sort_by(|a, b| model::cmp_ignore_case(&a.name, &b.name));
         out
     }
 
@@ -897,6 +939,25 @@ fn merge_group(dst: &mut ChatGroup, prev: &ChatGroup, summary_only: bool) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+    use model::{Notification, Notifications};
+
+    #[test]
+    fn stores_notifications_newest_first_with_stable_ties() {
+        let mut state = State::default();
+        let items = [(1, 10), (2, 20), (3, 20), (4, 5)]
+            .map(|(id, time)| Notification { id, time, ..Default::default() })
+            .to_vec();
+
+        state.apply(&Event::Notifications(Notifications { items, ..Default::default() }));
+
+        let ids: Vec<_> = state.notifications.unwrap().items.iter().map(|n| n.id).collect();
+        assert_eq!(ids, [2, 3, 1, 4]);
     }
 }
 

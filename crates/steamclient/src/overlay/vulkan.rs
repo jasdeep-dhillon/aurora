@@ -1843,7 +1843,14 @@ mod win_impl {
                     return None;
                 }
 
-                let wait_stages = vec![VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; wait_sems.len()];
+                let stages = [VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; 8];
+                let overflow;
+                let wait_stages = if let Some(slice) = stages.get(..wait_sems.len()) {
+                    slice
+                } else {
+                    overflow = vec![VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; wait_sems.len()];
+                    &overflow
+                };
                 let si = VkSubmitInfo {
                     s_type: VK_STRUCTURE_TYPE_SUBMIT_INFO,
                     p_next: std::ptr::null(),

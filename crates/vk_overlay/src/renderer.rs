@@ -1295,13 +1295,23 @@ impl OverlayRenderer {
             return (None, take_shot.then_some(Err(())));
         }
 
-        let wait_stages = vec![VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; wait_sems.len()];
+        const STAGE_MASK: VkFlags = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        let wait_stages_stack = [STAGE_MASK; 8];
+        let wait_stages_heap: Vec<VkFlags>;
+        let wait_stages_ptr = if wait_sems.is_empty() {
+            ptr::null()
+        } else if wait_sems.len() <= wait_stages_stack.len() {
+            wait_stages_stack.as_ptr()
+        } else {
+            wait_stages_heap = vec![STAGE_MASK; wait_sems.len()];
+            wait_stages_heap.as_ptr()
+        };
         let submit = VkSubmitInfo {
             sType: VK_STRUCTURE_TYPE_SUBMIT_INFO,
             pNext: ptr::null(),
             waitSemaphoreCount: wait_sems.len() as u32,
             pWaitSemaphores: if wait_sems.is_empty() { ptr::null() } else { wait_sems.as_ptr() },
-            pWaitDstStageMask: if wait_stages.is_empty() { ptr::null() } else { wait_stages.as_ptr() },
+            pWaitDstStageMask: wait_stages_ptr,
             commandBufferCount: 1,
             pCommandBuffers: &cmd,
             signalSemaphoreCount: 1,

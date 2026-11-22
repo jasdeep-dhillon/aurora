@@ -143,9 +143,6 @@ fn package() -> Result {
 
     cargo(&root, &["build", "--release", "-p", "installer"], &[("SIR_PAYLOAD", payload.as_os_str())], None)?;
     copy(&release.join("Aurora-Setup.exe"), &dist.join(format!("Aurora-Setup-{version}.exe")))?;
-    // Copies from before the rename (0.7.2 and older) only update to a
-    // "SteamInRust-Setup…" file: the same setup under that name too.
-    copy(&release.join("Aurora-Setup.exe"), &dist.join(format!("SteamInRust-Setup-{version}.exe")))?;
     copy(&payload, &dist.join(format!("Aurora-{version}-portable.zip")))?;
 
     // LF line endings and no BOM, like sha256sum writes.

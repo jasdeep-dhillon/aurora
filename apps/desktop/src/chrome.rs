@@ -22,6 +22,22 @@ pub fn toggle_maximized(ctx: &egui::Context) {
     ctx.send_viewport_cmd(ViewportCommand::Maximized(!max));
 }
 
+/// Minimize the window and release cached image/heap memory immediately.
+pub fn minimize(ctx: &egui::Context) {
+    ctx.forget_all_images();
+    crate::release_memory();
+    ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+}
+
+/// Outer corner radius for floating (non-maximized, non-fullscreen) windows.
+pub fn window_rounding(ctx: &egui::Context) -> egui::CornerRadius {
+    if ctx.input(|i| i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)) {
+        egui::CornerRadius::ZERO
+    } else {
+        egui::CornerRadius::same(12)
+    }
+}
+
 /// Minimize, maximize/restore and close, right to left (call inside a
 /// right-to-left layout). `height` is the bar height.
 pub fn window_buttons(ui: &mut Ui, t: &Theme, height: f32, can_maximize: bool) {
@@ -58,11 +74,11 @@ pub fn window_buttons_variant(
                         }
                     }
                     if button(ui, t, icons::MINUS, height, false).on_hover_text(i18n::tr_dyn("Minimize")).clicked() {
-                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                        minimize(&ctx);
                     }
                 } else {
                     if button(ui, t, icons::MINUS, height, false).on_hover_text(i18n::tr_dyn("Minimize")).clicked() {
-                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                        minimize(&ctx);
                     }
                     if can_maximize {
                         let (icon, tip) = if max { (icons::RESTORE, "Restore") } else { (icons::SQUARE, "Maximize") };
@@ -100,7 +116,7 @@ pub fn window_buttons_variant(
                     let r = traffic_light(ui, height, Color32::from_rgb(0xFF, 0xBD, 0x2E), "−", show_glyphs).on_hover_text(i18n::tr_dyn("Minimize"));
                     any_hovered |= r.hovered();
                     if r.clicked() {
-                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                        minimize(&ctx);
                     }
                 } else {
                     let r = traffic_light(ui, height, Color32::from_rgb(0xFF, 0x5F, 0x56), "×", show_glyphs).on_hover_text(i18n::tr_dyn("Close"));
@@ -111,7 +127,7 @@ pub fn window_buttons_variant(
                     let r = traffic_light(ui, height, Color32::from_rgb(0xFF, 0xBD, 0x2E), "−", show_glyphs).on_hover_text(i18n::tr_dyn("Minimize"));
                     any_hovered |= r.hovered();
                     if r.clicked() {
-                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                        minimize(&ctx);
                     }
                     if can_maximize {
                         let tip = if max { "Restore" } else { "Maximize" };
@@ -140,11 +156,11 @@ pub fn window_buttons_variant(
                         }
                     }
                     if minimal_button(ui, t, icons::MINUS, height, false).on_hover_text(i18n::tr_dyn("Minimize")).clicked() {
-                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                        minimize(&ctx);
                     }
                 } else {
                     if minimal_button(ui, t, icons::MINUS, height, false).on_hover_text(i18n::tr_dyn("Minimize")).clicked() {
-                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                        minimize(&ctx);
                     }
                     if can_maximize {
                         let (icon, tip) = if max { (icons::RESTORE, "Restore") } else { (icons::SQUARE, "Maximize") };
@@ -199,7 +215,13 @@ fn button(ui: &mut Ui, t: &Theme, icon: &str, height: f32, close: bool) -> egui:
     let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.08);
     let bg = if close { Color32::from_rgb(0xC4, 0x2B, 0x1C) } else { t.surface_hover };
     if hover > 0.0 {
-        ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, bg.gamma_multiply(hover));
+        let r = if close {
+            let wr = window_rounding(ui.ctx());
+            egui::CornerRadius { ne: wr.ne, ..egui::CornerRadius::ZERO }
+        } else {
+            egui::CornerRadius::ZERO
+        };
+        ui.painter().rect_filled(rect, r, bg.gamma_multiply(hover));
     }
     let fg = if close && hover > 0.5 { Color32::WHITE } else { w::mix(t.text_dim, t.text, hover) };
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, w::font(14.0), fg);
@@ -243,12 +265,13 @@ pub fn resize_handles(ctx: &egui::Context) {
 
 /// A thin border, since a frameless window has none of its own.
 pub fn border(ctx: &egui::Context, t: &Theme) {
-    if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+    let rounding = window_rounding(ctx);
+    if rounding == egui::CornerRadius::ZERO {
         return;
     }
     let rect = ctx.content_rect();
     ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::unique(("window-border", ctx.viewport_id()))))
-        .rect_stroke(rect, egui::CornerRadius::ZERO, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+        .rect_stroke(rect, rounding, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
 }
 
 /// Resize handles drawn into `ui` itself (for child windows such as Friends &
