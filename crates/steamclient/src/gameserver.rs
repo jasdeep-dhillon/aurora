@@ -116,13 +116,15 @@ struct Gs {
     players: HashMap<u64, PlayerInfo>,
     next_unauth: u32,
     outgoing: VecDeque<(Vec<u8>, u32, u16)>,
-    challenge_secret: u32,
+    challenge_secret: [u8; 32],
     user_stats: HashMap<u64, Stats>,
 }
 
 impl Default for Gs {
     fn default() -> Self {
-        let pid = std::process::id();
+        use rand::RngCore;
+        let mut challenge_secret = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut challenge_secret);
         Self {
             initialized: false,
             logged_on: false,
@@ -152,7 +154,7 @@ impl Default for Gs {
             players: HashMap::new(),
             next_unauth: 1,
             outgoing: VecDeque::new(),
-            challenge_secret: pid.wrapping_mul(0x9E37_79B1) ^ 0x5A17_C3D1,
+            challenge_secret,
             user_stats: HashMap::new(),
         }
     }
@@ -176,13 +178,35 @@ fn make_unauth_user_id(id: u32) -> u64 {
     (1u64 << 56) | (10u64 << 52) | (1u64 << 32) | (id.max(1) as u64)
 }
 
-fn challenge_for(secret: u32, src_ip: u32, src_port: u16) -> i32 {
-    let mut h = secret ^ src_ip ^ ((src_port as u32) << 16);
-    h ^= h >> 16;
-    h = h.wrapping_mul(0x45d9_f3b);
-    h ^= h >> 16;
-    let c = (h as i32) & 0x7fff_ffff;
+const CHALLENGE_WINDOW_SECS: u64 = 60;
+
+fn current_challenge_bucket() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / CHALLENGE_WINDOW_SECS)
+        .unwrap_or(0)
+}
+
+/// Derive an unforgeable per-endpoint, time-windowed 4-byte A2S challenge token
+/// using HMAC-SHA256 keyed by a 256-bit OS CSPRNG secret.
+fn challenge_for_bucket(secret: &[u8; 32], src_ip: u32, src_port: u16, bucket: u64) -> i32 {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = <Hmac<Sha256>>::new_from_slice(secret).expect("HMAC accepts any key size");
+    mac.update(&src_ip.to_le_bytes());
+    mac.update(&src_port.to_le_bytes());
+    mac.update(&bucket.to_le_bytes());
+    let tag = mac.finalize().into_bytes();
+    let raw = u32::from_le_bytes([tag[0], tag[1], tag[2], tag[3]]);
+    let c = (raw & 0x7fff_ffff) as i32;
     if c == 0 { 1 } else { c }
+}
+
+fn is_valid_challenge(secret: &[u8; 32], src_ip: u32, src_port: u16, bucket: u64, supplied: i32) -> bool {
+    if supplied == challenge_for_bucket(secret, src_ip, src_port, bucket) {
+        return true;
+    }
+    bucket > 0 && supplied == challenge_for_bucket(secret, src_ip, src_port, bucket - 1)
 }
 
 /// Build an A2S_INFO response packet (`0xFF 0xFF 0xFF 0xFF 'I' ...`).
@@ -257,24 +281,48 @@ fn build_a2s_rules(s: &Gs) -> Vec<u8> {
     out
 }
 
+const A2S_INFO_HEADER: &[u8] = b"\xff\xff\xff\xffTSource Engine Query\0";
+
 /// Process an incoming A2S query packet; returns the response packet if handled.
 fn process_a2s(s: &Gs, data: &[u8], src_ip: u32, src_port: u16) -> Option<Vec<u8>> {
     if data.len() < 5 || data[..4] != [0xFF, 0xFF, 0xFF, 0xFF] {
         return None;
     }
-    let expected = challenge_for(s.challenge_secret, src_ip, src_port);
+    let bucket = current_challenge_bucket();
+    let expected = challenge_for_bucket(&s.challenge_secret, src_ip, src_port, bucket);
     match data[4] {
-        // A2S_INFO
-        0x54 => Some(build_a2s_info(s)),
+        // A2S_INFO (Valve challenge-response anti-amplification):
+        // Request must carry the full 25-byte Source Engine Query header; reply
+        // with a 9-byte challenge until the client echoes a valid 4-byte token.
+        0x54 => {
+            if !data.starts_with(A2S_INFO_HEADER) {
+                return None;
+            }
+            if data.len() >= A2S_INFO_HEADER.len() + 4 {
+                let ch = i32::from_le_bytes(data[A2S_INFO_HEADER.len()..A2S_INFO_HEADER.len() + 4].try_into().ok()?);
+                if is_valid_challenge(&s.challenge_secret, src_ip, src_port, bucket, ch) {
+                    return Some(build_a2s_info(s));
+                }
+            }
+            Some(build_a2s_challenge(expected))
+        }
         // A2S_PLAYER
         0x55 if data.len() >= 9 => {
             let ch = i32::from_le_bytes(data[5..9].try_into().ok()?);
-            if ch == expected { Some(build_a2s_players(s)) } else { Some(build_a2s_challenge(expected)) }
+            if is_valid_challenge(&s.challenge_secret, src_ip, src_port, bucket, ch) {
+                Some(build_a2s_players(s))
+            } else {
+                Some(build_a2s_challenge(expected))
+            }
         }
         // A2S_RULES
         0x56 if data.len() >= 9 => {
             let ch = i32::from_le_bytes(data[5..9].try_into().ok()?);
-            if ch == expected { Some(build_a2s_rules(s)) } else { Some(build_a2s_challenge(expected)) }
+            if is_valid_challenge(&s.challenge_secret, src_ip, src_port, bucket, ch) {
+                Some(build_a2s_rules(s))
+            } else {
+                Some(build_a2s_challenge(expected))
+            }
         }
         _ => None,
     }
@@ -649,7 +697,24 @@ mod tests {
         s.kv.insert("mode".into(), "coop".into());
         s.players.insert(1, PlayerInfo { name: "Alice".into(), score: 10, joined: Instant::now() });
 
-        let info = process_a2s(&s, b"\xff\xff\xff\xffTSource Engine Query\0", 0x7f00_0001, 12345).unwrap();
+        // Short/malformed A2S_INFO probe is ignored.
+        assert!(process_a2s(&s, b"\xff\xff\xff\xffT", 0x7f00_0001, 12345).is_none());
+
+        // Initial A2S_INFO without challenge returns a 9-byte challenge (no amplification).
+        let info_ch = process_a2s(&s, A2S_INFO_HEADER, 0x7f00_0001, 12345).unwrap();
+        assert_eq!(&info_ch[..5], b"\xff\xff\xff\xffA");
+        assert_eq!(info_ch.len(), 9);
+
+        // Wrong challenge returns challenge again.
+        let mut bad_info = A2S_INFO_HEADER.to_vec();
+        bad_info.extend_from_slice(&0i32.to_le_bytes());
+        let retry_ch = process_a2s(&s, &bad_info, 0x7f00_0001, 12345).unwrap();
+        assert_eq!(&retry_ch[..5], b"\xff\xff\xff\xffA");
+
+        // Echoing the challenge returns the full A2S_INFO payload.
+        let mut info_req = A2S_INFO_HEADER.to_vec();
+        info_req.extend_from_slice(&info_ch[5..9]);
+        let info = process_a2s(&s, &info_req, 0x7f00_0001, 12345).unwrap();
         assert_eq!(&info[..5], b"\xff\xff\xff\xffI");
         assert!(info.windows(b"Aurora Listen".len()).any(|w| w == b"Aurora Listen"));
 
