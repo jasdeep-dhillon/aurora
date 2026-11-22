@@ -166,13 +166,27 @@ impl NativeThemeConfig {
     }
 }
 
-/// Polls GNOME's read-only GSettings values away from the rendering thread.
-/// Missing schemas/commands retain the previous successful values. Other
-/// platforms keep the manifest's portable Adwaita fallback.
+#[cfg(target_os = "linux")]
+enum MonitorMsg {
+    Changed,
+    Exited(usize),
+    Stop,
+}
+
+/// Watches GNOME's read-only GSettings values away from the rendering thread.
+/// Uses `gsettings monitor` (event-driven, zero idle subprocess churn) when
+/// GNOME schemas are present, and exits immediately on desktops without them.
+/// Other platforms keep the manifest's portable Adwaita fallback.
 pub struct NativeAppearanceWatcher {
     latest: Arc<Mutex<Option<NativeAppearance>>>,
     stop: Arc<AtomicBool>,
     artwork: Arc<Mutex<Option<Arc<ui::native_style::NativeControlArtwork>>>>,
+    #[cfg(target_os = "linux")]
+    wake_tx: std::sync::mpsc::Sender<MonitorMsg>,
+    #[cfg(target_os = "linux")]
+    children: Arc<Mutex<Vec<Option<std::process::Child>>>>,
+    #[cfg(target_os = "linux")]
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Default for NativeAppearanceWatcher {
@@ -183,80 +197,61 @@ impl Default for NativeAppearanceWatcher {
 
 impl NativeAppearanceWatcher {
     pub fn new() -> Self {
-        let watcher = Self {
-            latest: Arc::new(Mutex::new(None)),
-            stop: Arc::new(AtomicBool::new(false)),
-            artwork: Arc::new(Mutex::new(None)),
-        };
         #[cfg(target_os = "linux")]
-        {
-            let latest = Arc::clone(&watcher.latest);
-            let stop = Arc::clone(&watcher.stop);
-            let artwork = Arc::clone(&watcher.artwork);
-            let _ = std::thread::Builder::new()
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel::<MonitorMsg>();
+        #[cfg(target_os = "linux")]
+        let children: Arc<Mutex<Vec<Option<std::process::Child>>>> = Arc::new(Mutex::new(Vec::new()));
+        let latest = Arc::new(Mutex::new(None));
+        let stop = Arc::new(AtomicBool::new(false));
+        let artwork = Arc::new(Mutex::new(None));
+
+        #[cfg(target_os = "linux")]
+        let worker = {
+            let latest = Arc::clone(&latest);
+            let stop = Arc::clone(&stop);
+            let artwork = Arc::clone(&artwork);
+            let children = Arc::clone(&children);
+            let tx = wake_tx.clone();
+            std::thread::Builder::new()
                 .name("aurora-native-theme".into())
                 .spawn(move || {
-                    let mut current = NativeAppearance::default();
-                    let mut desktop = NativeAppearance::default();
-                    let mut previous_preferences = None;
-                    while !stop.load(Ordering::Relaxed) {
-                        if let Some(raw) =
-                            read_setting("org.gnome.desktop.interface", "color-scheme")
-                        {
-                            if let Some(dark) = parse_color_scheme(&raw) {
-                                desktop.dark = Some(dark);
-                            }
-                        }
-                        if let Some(raw) =
-                            read_setting("org.gnome.desktop.interface", "accent-color")
-                        {
-                            if let Some(accent) = parse_accent(&raw) {
-                                desktop.accent = Some(accent);
-                            }
-                        }
-                        if let Some(raw) =
-                            read_setting("org.gnome.desktop.a11y.interface", "high-contrast")
-                        {
-                            match raw.as_str() {
-                                "true" => desktop.high_contrast = true,
-                                "false" => desktop.high_contrast = false,
-                                _ => {}
-                            }
-                        }
-                        let preferences = (desktop.dark, desktop.accent, desktop.high_contrast);
-                        if previous_preferences != Some(preferences) {
-                            previous_preferences = Some(preferences);
-                            current.dark = desktop.dark;
-                            current.accent = desktop.accent;
-                            current.high_contrast = desktop.high_contrast;
-                            match query_native_helper() {
-                                Ok(native) => {
-                                    tracing::info!(gtk = ?native.palette.gtk_version, libadwaita = ?native.palette.adwaita_version, "loaded native Adwaita styling");
-                                    current.dark = Some(native.dark);
-                                    current.high_contrast = native.high_contrast;
-                                    current.accent = Some(native.accent);
-                                    current.library = Some(native.palette);
-                                    if let Ok(mut cached) = artwork.lock() {
-                                        *cached = native.artwork.map(Arc::new);
-                                    }
-                                }
-                                Err(error) => tracing::debug!(%error, "native Adwaita unavailable; using portable styling"),
-                            }
-                        }
-                        if let Ok(mut value) = latest.lock() {
-                            *value = Some(current);
-                        }
-                        // Short sleeps let dropping a watcher stop idle work promptly.
-                        for _ in 0..20 {
-                            if stop.load(Ordering::Relaxed) {
-                                return;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                        }
-                    }
-                });
+                    watch_linux_appearance(latest, stop, artwork, children, tx, wake_rx);
+                })
+                .ok()
+        };
+
+        Self {
+            latest,
+            stop,
+            artwork,
+            #[cfg(target_os = "linux")]
+            wake_tx,
+            #[cfg(target_os = "linux")]
+            children,
+            #[cfg(target_os = "linux")]
+            worker,
         }
-        watcher
+    }
+
+    /// Explicitly stop the background watcher and terminate/reap any `gsettings
+    /// monitor` child processes before process exit.
+    pub fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        #[cfg(target_os = "linux")]
+        {
+            let _ = self.wake_tx.send(MonitorMsg::Stop);
+            if let Ok(mut list) = self.children.lock() {
+                for slot in list.iter_mut() {
+                    if let Some(mut c) = slot.take() {
+                        let _ = c.kill();
+                        let _ = c.wait();
+                    }
+                }
+            }
+            if let Some(handle) = self.worker.take() {
+                let _ = handle.join();
+            }
+        }
     }
 
     pub fn latest(&self) -> Option<NativeAppearance> {
@@ -265,6 +260,224 @@ impl NativeAppearanceWatcher {
 
     pub fn latest_artwork(&self) -> Option<Arc<ui::native_style::NativeControlArtwork>> {
         self.artwork.lock().ok().and_then(|value| value.clone())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn poll_gsettings_once(desktop: &mut NativeAppearance) -> bool {
+    let mut any = false;
+    if let Some(raw) = read_setting("org.gnome.desktop.interface", "color-scheme") {
+        any = true;
+        if let Some(dark) = parse_color_scheme(&raw) {
+            desktop.dark = Some(dark);
+        }
+    }
+    if let Some(raw) = read_setting("org.gnome.desktop.interface", "accent-color") {
+        any = true;
+        if let Some(accent) = parse_accent(&raw) {
+            desktop.accent = Some(accent);
+        }
+    }
+    if let Some(raw) = read_setting("org.gnome.desktop.a11y.interface", "high-contrast") {
+        any = true;
+        match raw.as_str() {
+            "true" => desktop.high_contrast = true,
+            "false" => desktop.high_contrast = false,
+            _ => {}
+        }
+    }
+    any
+}
+
+#[cfg(target_os = "linux")]
+fn refresh_native_state(
+    desktop: &NativeAppearance,
+    current: &mut NativeAppearance,
+    previous_preferences: &mut Option<(Option<bool>, Option<Color32>, bool)>,
+    latest: &Arc<Mutex<Option<NativeAppearance>>>,
+    artwork: &Arc<Mutex<Option<Arc<ui::native_style::NativeControlArtwork>>>>,
+) {
+    let preferences = (desktop.dark, desktop.accent, desktop.high_contrast);
+    if *previous_preferences != Some(preferences) {
+        *previous_preferences = Some(preferences);
+        current.dark = desktop.dark;
+        current.accent = desktop.accent;
+        current.high_contrast = desktop.high_contrast;
+        match query_native_helper() {
+            Ok(native) => {
+                tracing::info!(gtk = ?native.palette.gtk_version, libadwaita = ?native.palette.adwaita_version, "loaded native Adwaita styling");
+                current.dark = Some(native.dark);
+                current.high_contrast = native.high_contrast;
+                current.accent = Some(native.accent);
+                current.library = Some(native.palette);
+                if let Ok(mut cached) = artwork.lock() {
+                    *cached = native.artwork.map(Arc::new);
+                }
+            }
+            Err(error) => tracing::debug!(%error, "native Adwaita unavailable; using portable styling"),
+        }
+    }
+    if let Ok(mut value) = latest.lock() {
+        *value = Some(*current);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn watch_linux_appearance(
+    latest: Arc<Mutex<Option<NativeAppearance>>>,
+    stop: Arc<AtomicBool>,
+    artwork: Arc<Mutex<Option<Arc<ui::native_style::NativeControlArtwork>>>>,
+    children: Arc<Mutex<Vec<Option<std::process::Child>>>>,
+    tx: std::sync::mpsc::Sender<MonitorMsg>,
+    rx: std::sync::mpsc::Receiver<MonitorMsg>,
+) {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    let mut current = NativeAppearance::default();
+    let mut desktop = NativeAppearance::default();
+    let mut previous_preferences = None;
+
+    let has_gsettings = poll_gsettings_once(&mut desktop);
+    refresh_native_state(&desktop, &mut current, &mut previous_preferences, &latest, &artwork);
+    if !has_gsettings || stop.load(Ordering::Relaxed) {
+        // Non-GNOME desktop or `gsettings` unavailable: keep the initial snapshot
+        // and exit cleanly instead of spawning subprocesses forever.
+        return;
+    }
+
+    // Event-driven monitoring via `gsettings monitor` (zero idle CPU or
+    // subprocess churn). `shutdown()`/`Drop` kills children and sends `Stop`.
+    let spawn_monitor = |schema: &'static str, tx: std::sync::mpsc::Sender<MonitorMsg>| -> Option<usize> {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut child = Command::new("gsettings")
+            .args(["monitor", schema])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let stdout = child.stdout.take()?;
+        let idx = {
+            let mut list = children.lock().ok()?;
+            if stop.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            let idx = list.len();
+            list.push(Some(child));
+            idx
+        };
+        let stop_flag = Arc::clone(&stop);
+        let _ = std::thread::Builder::new()
+            .name("aurora-gsettings-mon".into())
+            .spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+                while !stop_flag.load(Ordering::Relaxed) {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            if line.starts_with("color-scheme:")
+                                || line.starts_with("accent-color:")
+                                || line.starts_with("high-contrast:")
+                            {
+                                let _ = tx.send(MonitorMsg::Changed);
+                            }
+                        }
+                    }
+                }
+                let _ = tx.send(MonitorMsg::Exited(idx));
+            });
+        Some(idx)
+    };
+
+    let mut alive_monitors = 0usize;
+    let total_schemas = 2usize;
+    if spawn_monitor("org.gnome.desktop.interface", tx.clone()).is_some() {
+        alive_monitors += 1;
+    }
+    if spawn_monitor("org.gnome.desktop.a11y.interface", tx.clone()).is_some() {
+        alive_monitors += 1;
+    }
+    drop(tx);
+
+    // Reconcile once after monitors are subscribed so any change that happened
+    // during startup (between the initial poll and monitor subscription) is caught.
+    if !stop.load(Ordering::Relaxed) {
+        poll_gsettings_once(&mut desktop);
+        refresh_native_state(&desktop, &mut current, &mut previous_preferences, &latest, &artwork);
+    }
+
+    // If all schemas are actively monitored, block with zero polling; if any
+    // schema monitor failed or exited early, fall back to a low-frequency 10s
+    // timeout while still reaping exited children promptly.
+    while !stop.load(Ordering::Relaxed) {
+        let msg = if alive_monitors >= total_schemas {
+            match rx.recv() {
+                Ok(m) => Some(m),
+                Err(_) => break,
+            }
+        } else {
+            match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(m) => Some(m),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        };
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match msg {
+            Some(MonitorMsg::Stop) => break,
+            Some(MonitorMsg::Exited(idx)) => {
+                if let Ok(mut list) = children.lock() {
+                    if let Some(slot) = list.get_mut(idx) {
+                        if let Some(mut c) = slot.take() {
+                            let _ = c.wait();
+                            alive_monitors = alive_monitors.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+            Some(MonitorMsg::Changed) | None => {
+                let mut should_stop = false;
+                while let Ok(extra) = rx.try_recv() {
+                    match extra {
+                        MonitorMsg::Stop => should_stop = true,
+                        MonitorMsg::Exited(idx) => {
+                            if let Ok(mut list) = children.lock() {
+                                if let Some(slot) = list.get_mut(idx) {
+                                    if let Some(mut c) = slot.take() {
+                                        let _ = c.wait();
+                                        alive_monitors = alive_monitors.saturating_sub(1);
+                                    }
+                                }
+                            }
+                        }
+                        MonitorMsg::Changed => {}
+                    }
+                }
+                if should_stop || stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                poll_gsettings_once(&mut desktop);
+                refresh_native_state(&desktop, &mut current, &mut previous_preferences, &latest, &artwork);
+            }
+        }
+    }
+
+    if let Ok(mut list) = children.lock() {
+        for slot in list.iter_mut() {
+            if let Some(mut c) = slot.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
     }
 }
 
@@ -323,7 +536,7 @@ fn query_native_helper() -> Result<crate::adwaita::NativeLibrarySnapshot, String
 
 impl Drop for NativeAppearanceWatcher {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.shutdown();
     }
 }
 

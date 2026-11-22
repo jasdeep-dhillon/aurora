@@ -55,19 +55,10 @@ pub fn paint_background_texture(
                 painter.image(tex.id(), dst, uv, img_tint);
             }
             BackgroundFit::Tile => {
-                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
                 let step_x = tex_size.x.max(16.0);
                 let step_y = tex_size.y.max(16.0);
-                let mut y = rect.top();
-                while y < rect.bottom() {
-                    let mut x = rect.left();
-                    while x < rect.right() {
-                        let tile = Rect::from_min_size(pos2(x, y), vec2(step_x, step_y));
-                        painter.image(tex.id(), tile, uv, img_tint);
-                        x += step_x;
-                    }
-                    y += step_y;
-                }
+                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(rect.width() / step_x, rect.height() / step_y));
+                painter.image(tex.id(), rect, uv, img_tint);
             }
         }
     }

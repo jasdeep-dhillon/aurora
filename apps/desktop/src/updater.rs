@@ -327,8 +327,11 @@ fn run_setup(setup: &std::path::Path, expected_sha256: &str) -> bool {
 /// Built from source (`cargo run`, or anything in a cargo `target` folder):
 /// updates come through git, so don't offer installers on our own.
 fn is_dev_build() -> bool {
-    cfg!(debug_assertions)
-        || std::env::current_exe().is_ok_and(|p| p.components().any(|c| c.as_os_str().eq_ignore_ascii_case("target")))
+    static IS_DEV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *IS_DEV.get_or_init(|| {
+        cfg!(debug_assertions)
+            || std::env::current_exe().is_ok_and(|p| p.components().any(|c| c.as_os_str().eq_ignore_ascii_case("target")))
+    })
 }
 
 pub fn tick(app: &mut SteamApp, ctx: &egui::Context) {
