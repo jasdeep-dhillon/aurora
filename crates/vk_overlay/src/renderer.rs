@@ -1005,7 +1005,7 @@ impl OverlayRenderer {
             match op {
                 TexOp::ClearAll => {
                     for (_, t) in self.textures.drain() {
-                        new_retired.push(t);
+                        self.retired_tex.push((retire_gen, t));
                     }
                 }
                 TexOp::Free(id) => {
