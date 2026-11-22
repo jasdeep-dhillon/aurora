@@ -13,7 +13,7 @@ use ui::{Theme, icons, widgets as w};
 pub(super) fn show(hv: &mut HubView, ui: &mut Ui, t: &Theme, io: &mut Io, app: AppId, friend: Option<SteamId>) {
     let lang = io.lang();
     let have = io.state.achievement_list.contains_key(&app);
-    if !have && hv.asked.insert(format!("ach{app}")) {
+    if hv.should_request(format!("ach{app}"), have) {
         io.send(Command::LoadAchievements { app_id: app, language: lang.clone() });
     }
     if let Some(f) = friend {
@@ -134,11 +134,15 @@ pub(super) fn show(hv: &mut HubView, ui: &mut Ui, t: &Theme, io: &mut Io, app: A
     }
     let friend_name = friend.map(|f| io.state.persona(f).name);
     for a in list {
+        if w::skip_offscreen_row(ui, 72.0) {
+            ui.add_space(4.0);
+            continue;
+        }
         let other = match &theirs {
-            Some(Ok(map)) => map.get(&key(a)).cloned(),
+            Some(Ok(map)) => map.get(&key(a)),
             _ => None,
         };
-        row(ui, t, a, other.as_ref(), friend_name.as_deref());
+        row(ui, t, a, other, friend_name.as_deref());
         ui.add_space(4.0);
     }
 }

@@ -33,6 +33,7 @@ enum Load<T> {
     Failed(String),
 }
 type Shared<T> = Arc<Mutex<Load<T>>>;
+type StoreFront = (Vec<Item>, Vec<Section>);
 
 struct Players {
     asked: std::time::Instant,
@@ -61,7 +62,7 @@ pub struct Store {
     /// The personal picks were asked for (once per sign-in).
     recs_asked: bool,
     /// Personal shelves built from the picks: (picks they came from, shelves).
-    recs: Option<(model::StoreRecommendations, Shared<Vec<Section>>)>,
+    recs: Option<(model::StoreRecommendations, Shared<Arc<[Section]>>)>,
     /// A view opened inside the store, to record in Back/Forward history.
     nav_out: Option<Option<String>>,
     /// Set while the app navigates us (Back, Forward, links): don't record again.
@@ -73,7 +74,7 @@ pub struct Store {
     rt: tokio::runtime::Handle,
     egui: egui::Context,
     api: StoreClient,
-    front: Option<Shared<(Vec<Item>, Vec<Section>)>>,
+    front: Option<Shared<Arc<StoreFront>>>,
     details: HashMap<AppId, Shared<Arc<Details>>>,
     browse: HashMap<AppId, Shared<Arc<BrowseInfo>>>,
     /// Games whose details, info, players and price history are kept.
@@ -111,7 +112,7 @@ pub struct Store {
     demo_ignored: HashMap<AppId, bool>,
     demo_wish_removed: HashSet<AppId>,
     demo_wish_added: Vec<(AppId, u64)>,
-    search: Option<(String, Shared<Vec<Item>>)>,
+    search: Option<(String, Shared<Arc<[Item]>>)>,
     view: View,
     hero: usize,
     hero_changed: f64,
@@ -128,10 +129,10 @@ pub struct Store {
     drawn_frame: u64,
     filters: store::query::Filters,
     browse_page: u32,
-    query: Option<(store::query::Filters, u32, Shared<(Vec<store::query::QueryItem>, u64)>)>,
+    query: Option<(store::query::Filters, u32, Shared<Arc<(Vec<store::query::QueryItem>, u64)>>)>,
     hide_owned: bool,
     wish: more::WishView,
-    wish_items: Option<(Vec<AppId>, Shared<Vec<store::query::QueryItem>>)>,
+    wish_items: Option<(Vec<AppId>, Shared<Arc<[store::query::QueryItem]>>)>,
     cart_names: Option<(Vec<u32>, Shared<Vec<(u32, String, String, AppId)>>)>,
     /// Steam's "Added to your cart!" popup, for one game.
     cart_popup: Option<more::CartPopup>,
@@ -342,10 +343,10 @@ impl Store {
     }
 
     fn sync_locale_to(&mut self, country: String) -> bool {
-        let language = i18n::language().steam_name().to_string();
-        if self.locale != (country.clone(), language.clone()) {
-            self.api = self.api.with_locale(&country, &language);
-            self.locale = (country, language);
+        let language = i18n::language().steam_name();
+        if (self.locale.0.as_str(), self.locale.1.as_str()) != (country.as_str(), language) {
+            self.api = self.api.with_locale(&country, language);
+            self.locale = (country, language.to_string());
             self.front = None;
             self.details.clear();
             self.browse.clear();
@@ -415,7 +416,7 @@ impl Store {
     pub(super) fn start_search(&mut self, q: String) {
         let api = self.api.clone();
         let qq = q.clone();
-        let slot = self.fetch(async move { api.search(&qq).await });
+        let slot = self.fetch(async move { api.search(&qq).await.map(Arc::from) });
         self.search = Some((q.clone(), slot));
         self.open(View::Search(q));
     }
@@ -459,7 +460,7 @@ impl Store {
     /// A developer's or publisher's games, like their store page.
     fn open_creator(&mut self, kind: &str, name: &str) {
         let (api, k, n) = (self.api.clone(), kind.to_string(), name.to_string());
-        let slot = self.fetch(async move { api.creator(&k, &n).await });
+        let slot = self.fetch(async move { api.creator(&k, &n).await.map(Arc::from) });
         self.search = Some((format!("{kind}:{name}"), slot));
         self.open(View::Creator(kind.to_string(), name.to_string()));
     }
@@ -602,7 +603,7 @@ impl Extension for Store {
         }
         if self.front.is_none() {
             let api = self.api.clone();
-            self.front = Some(self.fetch(async move { api.front().await }));
+            self.front = Some(self.fetch(async move { api.front().await.map(Arc::new) }));
         }
         egui::ScrollArea::vertical().id_salt(("store", view_key(&self.view))).auto_shrink([false, false]).show(ui, |ui| {
             // Paint game background art from the very top of the page so the
@@ -735,7 +736,7 @@ fn pad_margin(ui: &Ui, max: f32) -> f32 {
 }
 
 impl Store {
-    fn front_data(&self) -> Option<Result<(Vec<Item>, Vec<Section>), String>> {
+    fn front_data(&self) -> Option<Result<Arc<StoreFront>, String>> {
         match &*self.front.as_ref()?.lock().unwrap() {
             Load::Loading => None,
             Load::Ready(d) => Some(Ok(d.clone())),
@@ -752,10 +753,6 @@ impl Store {
         let ui = &mut row;
         ui.spacing_mut().item_spacing.x = 6.0;
 
-        let sections = match self.front_data() {
-            Some(Ok((_, sections))) => sections,
-            _ => Vec::new(),
-        };
         if w::nav_tab_icon(ui, t, Some(icons::SPARKLE), t!("Featured"), self.view == View::Home, 34.0).clicked() {
             self.open(View::Home);
         }
@@ -767,7 +764,8 @@ impl Store {
                 self.open(View::Browse);
                 ui.close();
             }
-            for s in &sections {
+            let front = self.front_data().and_then(Result::ok);
+            for s in front.as_deref().into_iter().flat_map(|(_, sections)| sections) {
                 let icon = match s.id.as_str() {
                     "specials" => icons::TAG,
                     "top_sellers" => icons::FIRE,
@@ -831,7 +829,7 @@ impl Store {
             w::skeleton(ui, t, r, t.corner());
             return;
         };
-        let (spotlight, sections) = match data {
+        let front = match data {
             Ok(d) => d,
             Err(e) => {
                 w::empty(ui, t, icons::WARNING, t!("The store didn't load"), &e);
@@ -842,36 +840,35 @@ impl Store {
             }
         };
         // Hide items the user filtered out; wait for ratings before showing art.
-        let spotlight: Vec<Item> = spotlight.into_iter().filter(|i| self.safe(i.app_id) == Some(true)).collect();
-        let sections: Vec<Section> = sections
-            .into_iter()
-            .map(|mut s| {
-                s.items.retain(|i| self.safe(i.app_id) != Some(false));
-                s
+        let (spotlight, sections) = front.as_ref();
+        let spotlight: Vec<_> = spotlight.iter().filter(|i| self.safe(i.app_id) == Some(true)).collect();
+        let mut sections: Vec<_> = sections
+            .iter()
+            .map(|s| {
+                let items: Vec<_> = s.items.iter().filter(|i| self.safe(i.app_id) != Some(false)).collect();
+                (s, items)
             })
             .collect();
         // Your picks first (Steam's discovery queues, friends, favourite tags),
         // without games you own; the featured lists follow.
-        let personal: Vec<Section> = self
-            .personal_sections()
-            .into_iter()
-            .map(|mut s| {
-                s.items.retain(|i| !self.owned.contains(&i.app_id) && self.safe(i.app_id) != Some(false));
-                s
+        let recommendations = self.personal_sections();
+        let personal: Vec<_> = recommendations
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|s| {
+                let items: Vec<_> = s.items.iter().filter(|i| !self.owned.contains(&i.app_id) && self.safe(i.app_id) != Some(false)).collect();
+                (s, items)
             })
-            .filter(|s| s.items.len() >= 3)
+            .filter(|(_, items)| items.len() >= 3)
             .collect();
         let spotlight = match personal.first() {
-            Some(s) => s.items.iter().filter(|i| self.safe(i.app_id) == Some(true)).take(10).cloned().collect(),
+            Some((_, items)) => items.iter().copied().filter(|i| self.safe(i.app_id) == Some(true)).take(10).collect(),
             None => spotlight,
         };
-        let sections: Vec<Section> = sections
-            .into_iter()
-            .map(|mut s| {
-                s.items.retain(|i| !self.owned.contains(&i.app_id));
-                s
-            })
-            .collect();
+        for (_, items) in &mut sections {
+            items.retain(|i| !self.owned.contains(&i.app_id));
+        }
         if spotlight.is_empty() && !self.ratings_pending.is_empty() {
             let w_ = ui.available_width();
             let (r, _) = ui.allocate_exact_size(vec2(w_, 400.0), Sense::hover());
@@ -879,15 +876,15 @@ impl Store {
             ui.add_space(32.0);
         }
         if !spotlight.is_empty() {
-            if let Some(s) = personal.first() {
+            if let Some((s, _)) = personal.first() {
                 ui.label(w::text_bold(&s.title, 20.0, t.text));
                 ui.add_space(8.0);
             }
             self.carousel(ui, t, &spotlight);
             ui.add_space(32.0);
         }
-        for s in personal.iter().skip(1).chain(sections.iter()) {
-            self.shelf(ui, t, s);
+        for (s, items) in personal.iter().skip(1).chain(sections.iter()) {
+            self.shelf(ui, t, s, items);
             ui.add_space(28.0);
         }
     }
@@ -937,33 +934,34 @@ impl Store {
                     out.push(Section { id: format!("you-tag-{tag}"), title: tag_title.replace("{tag}", name), items: items.into_iter().map(query_card).collect() });
                 }
             }
-            Ok(out)
+            Ok(Arc::from(out))
         });
         self.recs = Some((recs, shelves));
     }
 
-    fn personal_sections(&self) -> Vec<Section> {
-        match self.recs.as_ref().map(|(_, s)| s.lock().unwrap()) {
-            Some(guard) => match &*guard {
-                Load::Ready(s) => s.clone(),
-                _ => Vec::new(),
-            },
-            None => Vec::new(),
+    fn personal_sections(&self) -> Option<Arc<[Section]>> {
+        match &*self.recs.as_ref()?.1.lock().unwrap() {
+            Load::Ready(s) => Some(s.clone()),
+            _ => None,
         }
     }
 
-    fn carousel(&mut self, ui: &mut Ui, t: &Theme, items: &[Item]) {
+    fn carousel(&mut self, ui: &mut Ui, t: &Theme, items: &[&Item]) {
         let now = ui.input(|i| i.time);
         let n = items.len();
         self.hero %= n;
-        let item = items[self.hero].clone();
         let width = ui.available_width();
         let (rect, resp) = ui.allocate_exact_size(vec2(width, 400.0), Sense::click());
-        if !resp.hovered() && now - self.hero_changed > 8.0 {
-            self.hero = (self.hero + 1) % n;
-            self.hero_changed = now;
+        if !resp.hovered() && n > 1 {
+            let elapsed = now - self.hero_changed;
+            if elapsed >= 8.0 {
+                self.hero = (self.hero + 1) % n;
+                self.hero_changed = now;
+            }
+            let remaining = (8.0 - (now - self.hero_changed)).max(0.1);
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(remaining));
         }
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+        let item = items[self.hero];
 
         let p = ui.painter();
         p.rect_filled(rect, t.corner(), t.surface);
@@ -1061,11 +1059,11 @@ impl Store {
         }
     }
 
-    fn shelf(&mut self, ui: &mut Ui, t: &Theme, s: &Section) {
+    fn shelf(&mut self, ui: &mut Ui, t: &Theme, s: &Section, items: &[&Item]) {
         let card_w = 272.0;
         let gap = 16.0;
         let per = (((ui.available_width() + gap) / (card_w + gap)).floor() as usize).max(1);
-        let pages = s.items.len().div_ceil(per);
+        let pages = items.len().div_ceil(per);
         let page = self.shelf_page.get(&s.id).copied().unwrap_or(0).min(pages.saturating_sub(1));
         let mut see_all = false;
         ui.horizontal(|ui| {
@@ -1089,7 +1087,7 @@ impl Store {
         let actual_w = (ui.available_width() - gap * (per as f32 - 1.0)) / per as f32;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            for item in s.items.iter().skip(page * per).take(per) {
+            for item in items.iter().copied().skip(page * per).take(per) {
                 if self.safe(item.app_id).is_none() {
                     let h = actual_w * 215.0 / 460.0 + 64.0;
                     let (r, _) = ui.allocate_exact_size(vec2(actual_w, h), Sense::hover());
@@ -1108,24 +1106,24 @@ impl Store {
     }
 
     fn section(&mut self, ui: &mut Ui, t: &Theme, id: &str) {
-        let Some(Ok((_, sections))) = self.front_data() else {
+        let Some(Ok(front)) = self.front_data() else {
             w::loading(ui, t, t!("Loading…"));
             return;
         };
-        let Some(s) = sections.iter().find(|s| s.id == id) else { return };
-        let items: Vec<Item> = s.items.iter().filter(|i| self.safe(i.app_id) == Some(true)).cloned().collect();
+        let Some(s) = front.1.iter().find(|s| s.id == id) else { return };
+        let items: Vec<_> = s.items.iter().filter(|i| self.safe(i.app_id) == Some(true)).collect();
         w::page_title(ui, t, &i18n::tr_dyn(&s.title), Some(&t!("{n} games", n = items.len())));
         self.grid(ui, t, &items);
     }
 
-    fn grid(&mut self, ui: &mut Ui, t: &Theme, items: &[Item]) {
+    fn grid(&mut self, ui: &mut Ui, t: &Theme, items: &[&Item]) {
         let gap = 16.0;
         let per = (((ui.available_width() + gap) / (272.0 + gap)).floor() as usize).max(1);
         let cw = (ui.available_width() - gap * (per as f32 - 1.0)) / per as f32;
         for row in items.chunks(per) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                for item in row {
+                for &item in row {
                     let owned = self.owned.contains(&item.app_id);
                     if self.store_card(ui, t, item, cw, owned).clicked() {
                         self.open(View::App(item.app_id));
@@ -1149,7 +1147,7 @@ impl Store {
             Some(Err(e)) => w::empty(ui, t, icons::WARNING, t!("Search failed"), &e),
             Some(Ok(v)) if v.is_empty() => w::empty(ui, t, icons::SEARCH, t!("No results"), t!("Try a different name.")),
             Some(Ok(v)) => {
-                let v: Vec<Item> = v.into_iter().filter(|i| self.safe(i.app_id) == Some(true)).collect();
+                let v: Vec<_> = v.iter().filter(|i| self.safe(i.app_id) == Some(true)).collect();
                 if v.is_empty() && !self.ratings_pending.is_empty() {
                     w::loading(ui, t, t!("Searching…"));
                 }
@@ -1723,8 +1721,8 @@ impl Store {
         let info = self.browse_info(id);
         let local = ctx.local.games.iter().find(|g| g.app_id == id);
         let owned = ctx.state.apps.as_ref().is_some_and(|a| a.contains_key(&id)) || local.is_some();
-        let top_seller = matches!(self.front_data(), Some(Ok((_, ref s))) if s.iter().any(|s| s.id == "top_sellers" && s.items.iter().any(|i| i.app_id == id)));
-        let playing: Vec<_> = ctx.state.friend_list().into_iter().filter(|p| p.game_app_id == Some(id)).collect();
+        let top_seller = matches!(self.front_data(), Some(Ok(front)) if front.1.iter().any(|s| s.id == "top_sellers" && s.items.iter().any(|i| i.app_id == id)));
+        let playing = ctx.state.friends_playing(id);
 
         w::card(t).show(ui, |ui| {
             ui.set_width(ui.available_width());

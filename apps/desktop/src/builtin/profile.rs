@@ -92,6 +92,12 @@ impl Extension for Profile {
     }
 
     fn on_event(&mut self, event: &client::Event, ctx: &mut Ctx) {
+        match event {
+            client::Event::Profile(p) => { self.requested.remove(&p.steam_id); }
+            client::Event::PlayerGames { steam_id, .. } => { self.games_requested.remove(steam_id); }
+            client::Event::Reviews { steam_id, page, .. } => { self.lists_requested.remove(&(*steam_id, Section::Reviews, *page)); }
+            _ => {}
+        }
         self.edit_event(event, ctx);
         if let client::Event::CommentPosted { result, .. } = event {
             match result {
@@ -132,7 +138,7 @@ impl Extension for Profile {
         let t = ctx.theme.clone();
         let id = self.viewing.filter(|id| *id != ctx.state.steam_id).unwrap_or(ctx.state.steam_id);
         let mine = id == ctx.state.steam_id;
-        if id != 0 && self.requested.insert(id) {
+        if id != 0 && !ctx.state.profiles.contains_key(&id) && self.requested.insert(id) {
             ctx.send(Command::LoadProfile { steam_id: id });
         }
         let persona = ctx.state.persona(id);
@@ -146,7 +152,7 @@ impl Extension for Profile {
                 Visibility::FriendsOnly => friend,
                 Visibility::Private => false,
             };
-        if id != 0 && open && self.games_requested.insert(id) {
+        if id != 0 && open && !ctx.state.player_games.contains_key(&id) && self.games_requested.insert(id) {
             ctx.send(Command::LoadPlayerGames { steam_id: id, language: i18n::language().steam_name().into() });
         }
         let display_name = if mine && !ctx.state.persona_name.is_empty() { ctx.state.persona_name.clone() } else { persona.name.clone() };
@@ -351,7 +357,7 @@ impl Profile {
         };
         let web = |path: &str| Link::Web(format!("https://steamcommunity.com/profiles/{id}/{path}"));
         let friends_link = if mine { Link::Page("community", None) } else { web("friends/") };
-        let friends_count = if mine { ctx.state.friend_list().len().to_string() } else { String::new() };
+        let friends_count = if mine { ctx.state.friend_count().to_string() } else { String::new() };
         // Counts once those lists have loaded.
         let reviews = match ctx.state.reviews.get(&(id, 1)) {
             Some(Ok(r)) if r.total > 0 => r.total.to_string(),
@@ -435,16 +441,24 @@ impl Profile {
     }
 
     fn request_social(&mut self, ctx: &mut Ctx, id: SteamId) {
-        if self.social_requested.insert(id) {
-            ctx.send(Command::LoadBadges { steam_id: id });
-            ctx.send(Command::LoadComments { steam_id: id, start: 0 });
-            // For the review and group counts in the sidebar.
-            if self.lists_requested.insert((id, Section::Reviews, 1)) {
-                ctx.send(Command::LoadReviews { steam_id: id, page: 1 });
+        let have_badges = ctx.state.badges.contains_key(&id);
+        let have_comments = ctx.state.comments.contains_key(&id);
+        if have_badges && have_comments {
+            self.social_requested.remove(&id);
+        } else if self.social_requested.insert(id) {
+            if !have_badges {
+                ctx.send(Command::LoadBadges { steam_id: id });
             }
-            if self.lists_requested.insert((id, Section::Groups, 0)) {
-                ctx.send(Command::LoadGroups { steam_id: id });
+            if !have_comments {
+                ctx.send(Command::LoadComments { steam_id: id, start: 0 });
             }
+        }
+        // For the review and group counts in the sidebar.
+        if !ctx.state.reviews.contains_key(&(id, 1)) && self.lists_requested.insert((id, Section::Reviews, 1)) {
+            ctx.send(Command::LoadReviews { steam_id: id, page: 1 });
+        }
+        if self.lists_requested.insert((id, Section::Groups, 0)) {
+            ctx.send(Command::LoadGroups { steam_id: id });
         }
     }
 
@@ -796,7 +810,7 @@ impl Profile {
             match self.games_sort {
                 GameSort::Recent => list.sort_by_key(|g| std::cmp::Reverse(g.last_played.unwrap_or(0))),
                 GameSort::Playtime => list.sort_by_key(|g| std::cmp::Reverse(g.playtime_minutes)),
-                GameSort::Name => list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                GameSort::Name => list.sort_by(|a, b| model::cmp_ignore_case(&a.name, &b.name)),
             }
             if list.is_empty() {
                 ui.label(w::text(t!("No games match your search."), 13.5, t.text_faint));

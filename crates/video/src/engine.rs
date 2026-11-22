@@ -158,6 +158,11 @@ fn emit(sh: &Shared, epoch: u64, target: f64, t: &Track, pic: mf::Picture, px: &
     if pic.data.len() < need {
         return;
     }
+    if px.is_empty() {
+        if let Some(reused) = sh.lock().free_px.pop() {
+            *px = reused;
+        }
+    }
     yuv::nv12_to_rgba(&pic.data[..luma], &pic.data[luma..], pic.stride, w, h, px);
     let image = egui::ColorImage::new([w, h], std::mem::take(px));
     let mut st = sh.lock();
@@ -165,6 +170,9 @@ fn emit(sh: &Shared, epoch: u64, target: f64, t: &Track, pic: mf::Picture, px: &
         st = sh.wait(st, 100);
     }
     if st.epoch != epoch {
+        if st.free_px.len() < 4 {
+            st.free_px.push(image.pixels);
+        }
         return;
     }
     let first = st.frames.is_empty();

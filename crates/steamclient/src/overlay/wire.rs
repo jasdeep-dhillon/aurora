@@ -339,7 +339,17 @@ impl FromGame {
 
 impl ToGame {
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = W(Vec::new());
+        let capacity = match self {
+            ToGame::Frame { set, free, meshes, .. } => {
+                let textures: usize = set.iter().map(|t| 22 + 8 * usize::from(t.pos.is_some()) + t.rgba.len()).sum();
+                let geometry: usize = meshes.iter().map(|m| 32 + m.vertices.len() + 4 * m.indices.len()).sum();
+                18 + textures + free.len() * 8 + geometry
+            }
+            ToGame::SetOpen(_) => 2,
+            ToGame::Config { .. } => 11,
+            ToGame::TakeScreenshot => 1,
+        };
+        let mut w = W(Vec::with_capacity(capacity));
         match self {
             ToGame::Frame { pixels_per_point, cursor, set, free, meshes } => {
                 w.u8(FRAME);

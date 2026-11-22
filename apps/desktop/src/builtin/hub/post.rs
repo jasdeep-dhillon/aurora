@@ -164,8 +164,9 @@ pub fn card(ui: &mut Ui, t: &Theme, state: &State, p: &Post, width: f32, show_ga
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     let (pic, pr) = ui.allocate_exact_size(vec2(62.0, 29.0), Sense::click());
-                    if ui.is_rect_visible(pic) && !w::paint_cover(ui, pic, &art::header(p.app_id), t.corner_small()) {
-                        if w::image_state(ui, &art::header(p.app_id)) == w::ImageState::Missing {
+                    let header = art::header(p.app_id);
+                    if ui.is_rect_visible(pic) && !w::paint_cover(ui, pic, &header, t.corner_small()) {
+                        if w::image_state(ui, &header) == w::ImageState::Missing {
                             ui.painter().rect_filled(pic, t.corner_small(), t.raised);
                             ui.painter().text(pic.center(), Align2::CENTER_CENTER, icons::CONTROLLER, w::font(16.0), t.text_dim);
                         } else {
@@ -213,8 +214,8 @@ pub fn card(ui: &mut Ui, t: &Theme, state: &State, p: &Post, width: f32, show_ga
 /// Avatar, name, what they did; the date on the right.
 fn author_row(ui: &mut Ui, t: &Theme, state: &State, p: &Post) -> Option<Click> {
     let mut click = None;
-    let persona = (p.author != 0).then(|| state.persona(p.author));
-    let name = persona.as_ref().map(|x| x.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| p.author_name.clone());
+    let persona = (p.author != 0).then(|| state.personas.get(&p.author)).flatten();
+    let name = persona.map(|x| x.name.as_str()).filter(|n| !n.is_empty()).unwrap_or(&p.author_name);
     let avatar = p.avatar.clone().or_else(|| persona.as_ref().filter(|x| x.avatar_hash.is_some()).map(|x| art::avatar(x.avatar_hash.as_deref())));
     let starts = |s: &str| !s.is_empty() && p.action.starts_with(s);
     let sentence = starts(&name) || starts(&p.author_name);
@@ -227,7 +228,8 @@ fn author_row(ui: &mut Ui, t: &Theme, state: &State, p: &Post) -> Option<Click> 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let date = when(p);
-        let date_w = if date.is_empty() { 0.0 } else { ui.painter().layout_no_wrap(date.clone(), w::font(12.0), t.text_dim).size().x + 12.0 };
+        let date = (!date.is_empty()).then(|| ui.painter().layout_no_wrap(date, w::font(12.0), t.text_dim));
+        let date_w = date.as_ref().map_or(0.0, |galley| galley.size().x + 12.0);
         let room = (ui.available_width() - date_w).max(40.0);
         ui.allocate_ui_with_layout(vec2(room, 22.0), Layout::left_to_right(Align::Center), |ui| {
             if let Some(a) = &avatar {
@@ -238,7 +240,7 @@ fn author_row(ui: &mut Ui, t: &Theme, state: &State, p: &Post) -> Option<Click> 
             } else if p.kind == PostKind::Announcement {
                 ui.label(w::text(super::NEWSPAPER, 13.5, t.text_dim));
             }
-            let label = if sentence { p.action.trim_end_matches([':', ' ']).to_string() } else { name };
+            let label = if sentence { p.action.trim_end_matches([':', ' ']) } else { name };
             if !label.is_empty() {
                 let r = ui.add(egui::Label::new(w::text_medium(label, 13.5, t.text)).truncate().sense(Sense::click()));
                 if p.author != 0 && r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -249,9 +251,9 @@ fn author_row(ui: &mut Ui, t: &Theme, state: &State, p: &Post) -> Option<Click> 
                 ui.add(egui::Label::new(w::text(detail, 13.5, t.text_dim)).truncate());
             }
         });
-        if !date.is_empty() {
+        if let Some(date) = date {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(w::text(date, 12.0, t.text_dim));
+                ui.label(date);
             });
         }
     });

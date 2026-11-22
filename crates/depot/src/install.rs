@@ -9,16 +9,17 @@
 
 use crate::cdn::Cdn;
 use crate::manifest::{Chunk, FileEntry, Manifest};
-use crate::{Error, Result, chunk};
+use crate::{Error, Result, chunk, crypto};
 use futures_util::StreamExt;
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 
 pub struct DepotJob {
     pub depot: u32,
@@ -92,18 +93,17 @@ pub struct Report {
 struct Work {
     file: usize,
     depot: u32,
-    key: Arc<Vec<u8>>,
+    key: Arc<crypto::DepotKey>,
     chunk: Chunk,
     /// Where an identical chunk sits in the currently installed file.
     reuse_from: Option<(PathBuf, u64)>,
 }
 
-fn sha1_file(path: &Path) -> Option<Vec<u8>> {
+fn sha1_file_with_buf(path: &Path, buf: &mut [u8]) -> Option<Vec<u8>> {
     let mut f = fs::File::open(path).ok()?;
     let mut h = Sha1::new();
-    let mut buf = vec![0u8; 1 << 20];
     loop {
-        let n = f.read(&mut buf).ok()?;
+        let n = f.read(buf).ok()?;
         if n == 0 {
             break;
         }
@@ -277,122 +277,153 @@ pub fn resolve_inside(dir: &Path, rel: &str) -> Result<PathBuf> {
 }
 
 pub async fn install(cdn: Arc<Cdn>, dir: &Path, jobs: Vec<DepotJob>, progress: Arc<Progress>) -> Result<Report> {
-    let mut report = Report::default();
     progress.set_phase(Phase::Checking);
-    ensure_real_dir(dir)?;
-    for job in &jobs {
-        for f in &job.manifest.files {
-            validate_rel_path(&f.name)?;
-        }
-    }
-    fs::create_dir_all(dir)?;
-    ensure_real_dir(dir)?;
+    let dir_buf = dir.to_path_buf();
+    let progress_plan = progress.clone();
 
-    // A file can be in more than one depot (a language or platform depot
-    // replacing a base file). Like Steam, the later depot's copy wins; the
-    // earlier one is skipped, so the file is never written (and its
-    // temporary file renamed) twice.
-    let key_of = |name: &str| name.replace('\\', "/").to_lowercase();
-    let mut owner: HashMap<String, usize> = HashMap::new();
-    for (i, job) in jobs.iter().enumerate() {
-        for f in job.manifest.files.iter().filter(|f| !f.directory) {
-            owner.insert(key_of(&f.name), i);
-        }
-    }
-
-    // Plan: which files need work, and where each chunk comes from.
-    let mut files: Vec<(PathBuf, String, FileEntry)> = Vec::new();
-    let mut work: Vec<Work> = Vec::new();
-    for (job_index, job) in jobs.iter().enumerate() {
-        let key = Arc::new(job.key.clone());
-        let mut old_files: HashMap<String, &FileEntry> = HashMap::new();
-        // Index of every verified chunk in the installed version, for reuse.
-        let mut old_chunks: HashMap<&[u8], (PathBuf, u64)> = HashMap::new();
-        for f in job.old.iter().flat_map(|m| &m.files).filter(|f| !f.directory && f.link.is_none()) {
-            let Ok(old_path) = resolve_inside(dir, &f.name) else { continue };
-            let is_reg = fs::symlink_metadata(&old_path)
-                .map(|m| !is_symlink_or_reparse(&m) && m.is_file())
-                .unwrap_or(false);
-            if !is_reg {
-                continue;
+    // Run blocking manifest validation, existing-file SHA-1 checking, and `.sirpart`
+    // preallocation on a blocking thread so tokio's async workers stay responsive.
+    let (jobs, mut report, files, work) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let dir = dir_buf.as_path();
+        let mut report = Report::default();
+        ensure_real_dir(dir)?;
+        for job in &jobs {
+            for f in &job.manifest.files {
+                validate_rel_path(&f.name)?;
             }
-            old_files.insert(key_of(&f.name), f);
-            for c in &f.chunks {
-                if c.sha.len() == 20 {
-                    old_chunks.entry(c.sha.as_slice()).or_insert_with(|| (old_path.clone(), c.offset));
+        }
+        fs::create_dir_all(dir)?;
+        ensure_real_dir(dir)?;
+
+        // A file can be in more than one depot (a language or platform depot
+        // replacing a base file). Like Steam, the later depot's copy wins; the
+        // earlier one is skipped, so the file is never written (and its
+        // temporary file renamed) twice.
+        let key_of = |name: &str| name.replace('\\', "/").to_lowercase();
+        let mut owner: HashMap<String, usize> = HashMap::new();
+        for (i, job) in jobs.iter().enumerate() {
+            for f in job.manifest.files.iter().filter(|f| !f.directory) {
+                owner.insert(key_of(&f.name), i);
+            }
+        }
+
+        // Plan: which files need work, and where each chunk comes from.
+        let mut files: Vec<(PathBuf, String, FileEntry)> = Vec::new();
+        let mut work: Vec<Work> = Vec::new();
+        // Reuse one 256 KiB buffer across all file checks instead of mmap/munmap per file.
+        let mut hash_buf = vec![0u8; 256 * 1024];
+        for (job_index, job) in jobs.iter().enumerate() {
+            let key = Arc::new(crypto::DepotKey::new(&job.key)?);
+            let mut old_files: HashMap<String, &FileEntry> = HashMap::new();
+            // Index of every verified chunk in the installed version, for reuse.
+            let mut old_chunks: HashMap<&[u8], (PathBuf, u64)> = HashMap::new();
+            for f in job.old.iter().flat_map(|m| &m.files).filter(|f| !f.directory && f.link.is_none()) {
+                let Ok(old_path) = resolve_inside(dir, &f.name) else { continue };
+                let is_reg = fs::symlink_metadata(&old_path)
+                    .map(|m| !is_symlink_or_reparse(&m) && m.is_file())
+                    .unwrap_or(false);
+                if !is_reg {
+                    continue;
+                }
+                old_files.insert(key_of(&f.name), f);
+                for c in &f.chunks {
+                    if c.sha.len() == 20 {
+                        old_chunks.entry(c.sha.as_slice()).or_insert_with(|| (old_path.clone(), c.offset));
+                    }
                 }
             }
-        }
-        for f in &job.manifest.files {
-            let path = resolve_inside(dir, &f.name)?;
-            if f.directory {
-                fs::create_dir_all(&path)?;
-                ensure_real_dir(&path)?;
-                continue;
-            }
-            if f.link.is_some() || owner.get(&key_of(&f.name)) != Some(&job_index) {
-                continue;
-            }
-            progress.disk_total.fetch_add(f.size, Ordering::Relaxed);
-            report.files += 1;
-            // Unchanged since the installed version and the size matches: trust it.
-            let same_as_old = old_files.get(&key_of(&f.name)).is_some_and(|o| f.sha.len() == 20 && o.sha == f.sha);
-            let size_ok = fs::symlink_metadata(&path)
-                .map(|m| !is_symlink_or_reparse(&m) && m.is_file() && m.len() == f.size)
-                .unwrap_or(false);
-            if size_ok && (same_as_old || sha1_file(&path).is_some_and(|h| f.sha.len() == 20 && h == f.sha)) {
-                report.skipped += 1;
-                progress.disk_done.fetch_add(f.size, Ordering::Relaxed);
-                continue;
-            }
-            let idx = files.len();
-            for c in &f.chunks {
-                let reuse_from = if c.sha.len() == 20 {
-                    old_chunks.get(c.sha.as_slice()).cloned()
-                } else {
-                    None
-                };
-                if reuse_from.is_none() {
-                    progress.download_total.fetch_add(c.compressed as u64, Ordering::Relaxed);
+            for f in &job.manifest.files {
+                let path = resolve_inside(dir, &f.name)?;
+                if f.directory {
+                    fs::create_dir_all(&path)?;
+                    ensure_real_dir(&path)?;
+                    continue;
                 }
-                work.push(Work { file: idx, depot: job.depot, key: key.clone(), chunk: c.clone(), reuse_from });
+                let fkey = key_of(&f.name);
+                if f.link.is_some() || owner.get(&fkey) != Some(&job_index) {
+                    continue;
+                }
+                progress_plan.disk_total.fetch_add(f.size, Ordering::Relaxed);
+                report.files += 1;
+                // Unchanged since the installed version and the size matches: trust it.
+                let same_as_old = old_files.get(&fkey).is_some_and(|o| f.sha.len() == 20 && o.sha == f.sha);
+                let size_ok = fs::symlink_metadata(&path)
+                    .map(|m| !is_symlink_or_reparse(&m) && m.is_file() && m.len() == f.size)
+                    .unwrap_or(false);
+                if size_ok && (same_as_old || sha1_file_with_buf(&path, &mut hash_buf).is_some_and(|h| f.sha.len() == 20 && h == f.sha)) {
+                    report.skipped += 1;
+                    progress_plan.disk_done.fetch_add(f.size, Ordering::Relaxed);
+                    continue;
+                }
+                let idx = files.len();
+                for c in &f.chunks {
+                    let reuse_from = if c.sha.len() == 20 {
+                        old_chunks.get(c.sha.as_slice()).cloned()
+                    } else {
+                        None
+                    };
+                    if reuse_from.is_none() {
+                        progress_plan.download_total.fetch_add(c.compressed as u64, Ordering::Relaxed);
+                    }
+                    work.push(Work { file: idx, depot: job.depot, key: key.clone(), chunk: c.clone(), reuse_from });
+                }
+                files.push((path, f.name.clone(), f.clone()));
             }
-            files.push((path, f.name.clone(), f.clone()));
         }
-    }
-    progress.files_total.store(files.len(), Ordering::Relaxed);
+        progress_plan.files_total.store(files.len(), Ordering::Relaxed);
 
-    // Pre-allocate partial files.
-    for (path, rel, f) in &files {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        // Pre-allocate partial files.
+        for (path, rel, f) in &files {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let checked = resolve_inside(dir, rel)?;
+            let part = part_path(&checked);
+            ensure_not_symlink(&part)?;
+            let file = OpenOptions::new().create(true).write(true).truncate(false).open(&part)?;
+            file.set_len(f.size)?;
         }
-        let checked = resolve_inside(dir, rel)?;
-        let part = part_path(&checked);
-        ensure_not_symlink(&part)?;
-        let file = OpenOptions::new().create(true).write(true).truncate(false).open(&part)?;
-        file.set_len(f.size)?;
-    }
-    let remaining: Arc<Vec<AtomicUsize>> = Arc::new(files.iter().map(|(_, _, f)| AtomicUsize::new(f.chunks.len())).collect());
-    // Empty files are complete immediately.
-    for (i, (path, rel, f)) in files.iter().enumerate() {
-        if f.chunks.is_empty() {
-            resolve_inside(dir, rel)?;
-            finish_file(path)?;
-            progress.files_done.fetch_add(1, Ordering::Relaxed);
-            remaining[i].store(usize::MAX, Ordering::Relaxed);
+        // Empty files are complete immediately.
+        for (path, rel, f) in &files {
+            if f.chunks.is_empty() {
+                resolve_inside(dir, rel)?;
+                finish_file(path)?;
+                progress_plan.files_done.fetch_add(1, Ordering::Relaxed);
+            }
         }
-    }
+        Ok((jobs, report, files, work))
+    })
+    .await
+    .map_err(|e| Error::Format(format!("install plan task failed: {e}")))??;
+
+    let remaining: Arc<Vec<AtomicUsize>> = Arc::new(
+        files
+            .iter()
+            .map(|(_, _, f)| AtomicUsize::new(if f.chunks.is_empty() { usize::MAX } else { f.chunks.len() }))
+            .collect(),
+    );
 
     progress.set_phase(Phase::Downloading);
     let files = Arc::new(files);
+    // Keep a small bounded pool of open `.sirpart` handles so multi-thousand-chunk
+    // files use positional writes (`pwrite`/`seek_write`) instead of open+close per chunk.
+    let open_handles: Arc<Mutex<HashMap<usize, Arc<File>>>> = Arc::new(Mutex::new(HashMap::new()));
     let reused = Arc::new(AtomicU64::new(0));
     let started = Instant::now();
     let dir_buf = dir.to_path_buf();
     let concurrency = progress.concurrency.load(Ordering::Relaxed).clamp(1, 64) as usize;
-    let results: Vec<Result<()>> = futures_util::stream::iter(work.into_iter().map(|w| {
-        let (cdn, files, remaining, progress, reused, dir_buf) =
-            (cdn.clone(), files.clone(), remaining.clone(), progress.clone(), reused.clone(), dir_buf.clone());
+    let writes = Arc::new(Semaphore::new(concurrency));
+    let chunk_stream = futures_util::stream::iter(work.into_iter().map(|w| {
+        let (cdn, files, remaining, open_handles, progress, reused, dir_buf) = (
+            cdn.clone(),
+            files.clone(),
+            remaining.clone(),
+            open_handles.clone(),
+            progress.clone(),
+            reused.clone(),
+            dir_buf.clone(),
+        );
+        let writes = writes.clone();
         async move {
             loop {
                 if progress.cancel.load(Ordering::Relaxed) {
@@ -404,68 +435,130 @@ pub async fn install(cdn: Arc<Cdn>, dir: &Path, jobs: Vec<DepotJob>, progress: A
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
             let data = match &w.reuse_from {
-                Some((src, off)) => match read_range(src, *off, w.chunk.size as usize) {
-                    Some(d) if chunk::verify(&d, &w.chunk.sha) => {
-                        reused.fetch_add(d.len() as u64, Ordering::Relaxed);
-                        d
+                Some((src, off)) => {
+                    let src = src.clone();
+                    let off = *off;
+                    let size = w.chunk.size as usize;
+                    let sha = w.chunk.sha.clone();
+                    let reused_data = tokio::task::spawn_blocking(move || {
+                        read_range(&src, off, size).filter(|d| chunk::verify(d, &sha))
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    match reused_data {
+                        Some(d) => {
+                            reused.fetch_add(d.len() as u64, Ordering::Relaxed);
+                            d
+                        }
+                        None => {
+                            progress.download_total.fetch_add(w.chunk.compressed as u64, Ordering::Relaxed);
+                            download(&cdn, &w, &progress, started).await?
+                        }
                     }
-                    _ => {
-                        progress.download_total.fetch_add(w.chunk.compressed as u64, Ordering::Relaxed);
-                        download(&cdn, &w, &progress, started).await?
-                    }
-                },
+                }
                 None => download(&cdn, &w, &progress, started).await?,
             };
-            let (path, rel, _) = &files[w.file];
-            resolve_inside(&dir_buf, rel)?;
-            write_at(&part_path(path), w.chunk.offset, &data)?;
-            progress.disk_done.fetch_add(data.len() as u64, Ordering::Relaxed);
-            progress.written.fetch_add(data.len() as u64, Ordering::Relaxed);
-            if remaining[w.file].fetch_sub(1, Ordering::AcqRel) == 1 {
-                resolve_inside(&dir_buf, rel)?;
-                finish_file(path)?;
-                progress.files_done.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok(())
+            let data_len = data.len() as u64;
+            let file_idx = w.file;
+            let chunk_offset = w.chunk.offset;
+            let permit = writes.acquire_owned().await.expect("write semaphore is never closed");
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let _permit = permit;
+                if progress.cancel.load(Ordering::Relaxed) {
+                    return Err(Error::Cancelled);
+                }
+                let (path, rel, _) = &files[file_idx];
+                let handle = {
+                    let existing = open_handles.lock().unwrap().get(&file_idx).cloned();
+                    match existing {
+                        Some(h) => h,
+                        None => {
+                            resolve_inside(&dir_buf, rel)?;
+                            let part = part_path(path);
+                            ensure_not_symlink(&part)?;
+                            let f = Arc::new(OpenOptions::new().write(true).open(&part)?);
+                            let mut map = open_handles.lock().unwrap();
+                            if map.len() >= 32 {
+                                map.clear();
+                            }
+                            map.entry(file_idx).or_insert_with(|| f.clone()).clone()
+                        }
+                    }
+                };
+                write_file_at(&handle, chunk_offset, &data)?;
+                drop(handle);
+                progress.disk_done.fetch_add(data_len, Ordering::Relaxed);
+                progress.written.fetch_add(data_len, Ordering::Relaxed);
+                if remaining[file_idx].fetch_sub(1, Ordering::AcqRel) == 1 {
+                    // Release any cached handle BEFORE rename (mandatory on Windows).
+                    open_handles.lock().unwrap().remove(&file_idx);
+                    resolve_inside(&dir_buf, rel)?;
+                    finish_file(path)?;
+                    progress.files_done.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| Error::Format(format!("chunk write task failed: {e}")))?
         }
     }))
-    .buffer_unordered(concurrency)
-    .collect()
-    .await;
-    if let Some(e) = results.into_iter().find_map(|r| r.err()) {
-        return Err(e);
-    }
+    .buffer_unordered(concurrency);
 
-    // Remove files the new version no longer has.
-    progress.set_phase(Phase::Finishing);
-    for job in &jobs {
-        if let Some(old) = &job.old {
-            let keep: std::collections::HashSet<String> = job.manifest.files.iter().map(|f| key_of(&f.name)).collect();
-            for f in old.files.iter().filter(|f| !f.directory && !keep.contains(&key_of(&f.name))) {
-                if let Ok(path) = resolve_inside(dir, &f.name)
-                    && fs::remove_file(path).is_ok()
-                {
-                    report.removed += 1;
-                }
-            }
+    let mut stream = chunk_stream;
+    let mut failure = None;
+    while let Some(result) = stream.next().await {
+        if let Err(error) = result {
+            failure = Some(error);
+            break;
         }
     }
-    // Programs the manifest marks executable (a Linux build's game binary,
-    // its launcher): new files and ones already there, so an install from
-    // before this gets fixed by its next update or check.
-    #[cfg(unix)]
-    for job in &jobs {
-        for f in job.manifest.files.iter().filter(|f| f.executable && !f.directory && f.link.is_none()) {
-            match resolve_inside(dir, &f.name) {
-                Ok(p) => {
-                    if let Err(e) = make_executable(&p) {
-                        tracing::warn!("couldn't mark {} executable: {e}", f.name);
+    drop(stream);
+    // A dropped spawn_blocking handle does not stop its writes. Wait before
+    // returning so cancellation cleanup or a retry cannot race a part-file write.
+    if let Some(error) = failure {
+        let _drained = writes.acquire_many(concurrency as u32).await.expect("write semaphore is never closed");
+        return Err(error);
+    }
+    open_handles.lock().unwrap().clear();
+
+    // Remove files the new version no longer has and apply executable bits on blocking thread.
+    progress.set_phase(Phase::Finishing);
+    let dir_finish = dir.to_path_buf();
+    let removed = tokio::task::spawn_blocking(move || -> usize {
+        let dir = dir_finish.as_path();
+        let key_of = |name: &str| name.replace('\\', "/").to_lowercase();
+        let mut removed = 0usize;
+        for job in &jobs {
+            if let Some(old) = &job.old {
+                let keep: std::collections::HashSet<String> = job.manifest.files.iter().map(|f| key_of(&f.name)).collect();
+                for f in old.files.iter().filter(|f| !f.directory && !keep.contains(&key_of(&f.name))) {
+                    if let Ok(path) = resolve_inside(dir, &f.name)
+                        && fs::remove_file(path).is_ok()
+                    {
+                        removed += 1;
                     }
                 }
-                Err(e) => tracing::warn!("couldn't mark {} executable: {e}", f.name),
             }
         }
-    }
+        #[cfg(unix)]
+        for job in &jobs {
+            for f in job.manifest.files.iter().filter(|f| f.executable && !f.directory && f.link.is_none()) {
+                match resolve_inside(dir, &f.name) {
+                    Ok(p) => {
+                        if let Err(e) = make_executable(&p) {
+                            tracing::warn!("couldn't mark {} executable: {e}", f.name);
+                        }
+                    }
+                    Err(e) => tracing::warn!("couldn't mark {} executable: {e}", f.name),
+                }
+            }
+        }
+        removed
+    })
+    .await
+    .map_err(|e| Error::Format(format!("install finishing task failed: {e}")))?;
+    report.removed = removed;
     report.reused_bytes = reused.load(Ordering::Relaxed);
     report.downloaded_bytes = progress.downloaded.load(Ordering::Relaxed);
     progress.set_phase(Phase::Done);
@@ -477,13 +570,26 @@ async fn download(cdn: &Cdn, w: &Work, progress: &Progress, started: Instant) ->
     for _ in 0..3 {
         let raw = cdn.chunk(w.depot, &w.chunk.sha).await?;
         let len = raw.len() as u64;
-        match chunk::decode(&raw, &w.key) {
-            Ok(data) if chunk::verify(&data, &w.chunk.sha) => {
+        let key = w.key.clone();
+        let sha = w.chunk.sha.clone();
+        let decoded = tokio::task::spawn_blocking(move || {
+            let mut scratch = Vec::new();
+            let data = chunk::decode_with_key(&raw, &key, &mut scratch)?;
+            if chunk::verify(&data, &sha) {
+                Ok(Some(data))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
+        .map_err(|e| Error::Format(format!("chunk decode task failed: {e}")))?;
+        match decoded {
+            Ok(Some(data)) => {
                 let total = progress.downloaded.fetch_add(len, Ordering::Relaxed) + len;
                 throttle(progress, total, started).await;
                 return Ok(data);
             }
-            Ok(_) => last = Some(Error::Format(format!("chunk {} failed verification", chunk::hex(&w.chunk.sha)))),
+            Ok(None) => last = Some(Error::Format(format!("chunk {} failed verification", chunk::hex(&w.chunk.sha)))),
             Err(e) => last = Some(e),
         }
     }
@@ -515,11 +621,24 @@ fn read_range(path: &Path, offset: u64, len: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn write_at(path: &Path, offset: u64, data: &[u8]) -> Result<()> {
-    ensure_not_symlink(path)?;
-    let mut f = OpenOptions::new().write(true).open(path)?;
-    f.seek(SeekFrom::Start(offset))?;
-    f.write_all(data)?;
+#[cfg(unix)]
+fn write_file_at(file: &File, offset: u64, data: &[u8]) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.write_all_at(data, offset)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn write_file_at(file: &File, mut offset: u64, mut data: &[u8]) -> Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !data.is_empty() {
+        let n = file.seek_write(data, offset)?;
+        if n == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+        }
+        data = &data[n..];
+        offset += n as u64;
+    }
     Ok(())
 }
 

@@ -604,6 +604,11 @@ impl Profile {
                     let mut options: Vec<(u32, Option<&model::Badge>)> = vec![(0, None)];
                     options.extend(list.iter().map(|(id, b)| (*id, Some(*b))));
                     for row in options.chunks(cols) {
+                        let subtitle = row.iter().any(|(_, badge)| badge.is_some_and(|b| !b.detail.is_empty()));
+                        if w::skip_offscreen_row(ui, tile.y + 22.0 + if subtitle { 15.0 } else { 0.0 }) {
+                            ui.add_space(6.0);
+                            continue;
+                        }
                         ui.horizontal_top(|ui| {
                             ui.spacing_mut().item_spacing.x = gap;
                             for (id, badge) in row {
@@ -908,6 +913,11 @@ fn item_grid(
     }
     let mut picked = None;
     for row in cells.chunks(cols) {
+        let subtitle = with_game && row.iter().any(|cell| cell.is_some_and(|item| !item.app_name.is_empty()));
+        if w::skip_offscreen_row(ui, tile.y + 22.0 + if subtitle { 15.0 } else { 0.0 }) {
+            ui.add_space(6.0);
+            continue;
+        }
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             for cell in row {

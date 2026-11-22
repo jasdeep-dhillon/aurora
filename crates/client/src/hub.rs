@@ -309,20 +309,20 @@ pub fn thread_key(url: &str, page: u32) -> String {
 /// Everything loaded so far, kept in [`crate::State::hub`].
 #[derive(Debug, Clone, Default)]
 pub struct Cache {
-    pub items: HashMap<u64, Result<Item, String>>,
-    pub files: HashMap<String, Result<FilePage, String>>,
-    pub guides: HashMap<u64, Result<Guide, String>>,
-    pub comments: HashMap<u64, Result<model::Comments, String>>,
-    pub topics: HashMap<String, Result<TopicPage, String>>,
-    pub threads: HashMap<String, Result<Thread, String>>,
-    pub news: HashMap<AppId, Result<Vec<News>, String>>,
-    pub achievements: HashMap<(SteamId, AppId), Result<Vec<model::Achievement>, String>>,
+    pub items: crate::read_cache::ReadCache<u64, Result<Item, String>, 64>,
+    pub files: crate::read_cache::ReadCache<String, Result<FilePage, String>, 64>,
+    pub guides: crate::read_cache::ReadCache<u64, Result<Guide, String>, 32>,
+    pub comments: crate::read_cache::ReadCache<u64, Result<model::Comments, String>, 64>,
+    pub topics: crate::read_cache::ReadCache<String, Result<TopicPage, String>, 64>,
+    pub threads: crate::read_cache::ReadCache<String, Result<Thread, String>, 64>,
+    pub news: crate::read_cache::ReadCache<AppId, Result<Vec<News>, String>, 64>,
+    pub achievements: crate::read_cache::ReadCache<(SteamId, AppId), Result<Vec<model::Achievement>, String>, 32>,
     /// Favorites you changed this session.
     pub favorites: HashMap<u64, bool>,
     /// Pages of your friends' activity by their start time.
-    pub activity: HashMap<u64, Result<crate::feed::Feed, String>>,
+    pub activity: crate::read_cache::ReadCache<u64, Result<crate::feed::Feed, String>, 64>,
     /// Pages of the community-wide feed by [`crate::feed::ExploreQuery::key`].
-    pub explore: HashMap<String, Result<crate::feed::Feed, String>>,
+    pub explore: crate::read_cache::ReadCache<String, Result<crate::feed::Feed, String>, 64>,
 }
 
 impl Cache {

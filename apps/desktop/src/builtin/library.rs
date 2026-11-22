@@ -818,7 +818,7 @@ impl Library {
     }
 
     /// "What's new": the latest update posts from games you play, newest first.
-    fn whats_new(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, recent: &[(AppId, String, u64)]) {
+    fn whats_new(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, recent: &[(AppId, &str, u64)]) {
         let mut posts: Vec<(AppId, usize, store::events::GameEvent)> = Vec::new();
         let mut loading = false;
         for (id, _, _) in recent.iter().take(10) {
@@ -1084,8 +1084,17 @@ impl Library {
     fn filtered<'a>(&self, ctx: &'a Ctx) -> Vec<Entry<'a>> {
         let mut items = entries(ctx.state, ctx.local);
         let q = self.search.to_lowercase();
+        let mut playtime = HashMap::new();
+        if self.adv.play.iter().any(|p| *p >= 2)
+            && let Some(Ok(games)) = ctx.state.player_games.get(&ctx.state.steam_id)
+        {
+            playtime.reserve(games.len());
+            for game in games {
+                playtime.entry(game.app_id).or_insert(game.playtime_minutes);
+            }
+        }
         items.retain(|e| {
-            (q.is_empty() || e.name.to_lowercase().contains(&q))
+            (model::contains_ignore_case(e.name, &q))
                 && match self.filter {
                     Filter::All => true,
                     Filter::Installed => e.installed.is_some(),
@@ -1094,10 +1103,10 @@ impl Library {
                     Filter::Collection(i) => self.collections.get(i).is_some_and(|c| c.games.contains(&e.app_id)),
                 }
                 && (self.show_hidden || !self.hidden.contains(&e.app_id))
-                && self.adv_match(ctx, e)
+                && self.adv_match(e, &playtime)
         });
         match self.sort {
-            Sort::Name => items.sort_by_key(|e| e.name.to_lowercase()),
+            Sort::Name => items.sort_by(|a, b| model::cmp_ignore_case(a.name, b.name)),
             Sort::Recent => items.sort_by_key(|e| std::cmp::Reverse(e.installed.and_then(|g| g.last_played))),
             Sort::Playtime => items.sort_by_key(|e| std::cmp::Reverse(e.installed.and_then(|g| g.playtime_minutes))),
             Sort::Size => items.sort_by_key(|e| std::cmp::Reverse(e.installed.map(|g| g.size_on_disk))),
@@ -1106,7 +1115,7 @@ impl Library {
     }
 
     /// Whether a game passes the advanced filters.
-    fn adv_match(&self, ctx: &Ctx, e: &Entry) -> bool {
+    fn adv_match(&self, e: &Entry, playtime: &HashMap<AppId, u64>) -> bool {
         let f = &self.adv;
         let o = e.owned;
         // Like Steam, the library lists games unless other types are picked
@@ -1121,10 +1130,7 @@ impl Library {
         let minutes = e
             .installed
             .and_then(|g| g.playtime_minutes)
-            .or_else(|| match ctx.state.player_games.get(&ctx.state.steam_id) {
-                Some(Ok(list)) => list.iter().find(|g| g.app_id == e.app_id).map(|g| g.playtime_minutes),
-                _ => None,
-            })
+            .or_else(|| playtime.get(&e.app_id).copied())
             .unwrap_or(0);
         let play_ok = f.play.is_empty()
             || f.play.iter().any(|p| match p {
@@ -1347,14 +1353,9 @@ impl Library {
                     let setup = setup_state(ctx, e.app_id, e.installed.is_some());
                     let busy = matches!(setup, Setup::Downloading(_) | Setup::Queued);
                     let color = if busy { t.accent } else if sel { t.text } else if e.installed.is_some() { w::mix(t.text_dim, t.text, hover) } else { t.text_faint };
-                    let galley = ui.painter().layout(e.name.to_string(), w::font_medium(13.5), color, rect.width() - 50.0);
-                    let galley = if galley.rows.len() > 1 {
-                        let mut job = egui::text::LayoutJob::simple_singleline(e.name.to_string(), w::font_medium(13.5), color);
-                        job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 50.0);
-                        ui.painter().layout_job(job)
-                    } else {
-                        galley
-                    };
+                    let mut job = egui::text::LayoutJob::simple_singleline(e.name.to_owned(), w::font_medium(13.5), color);
+                    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 50.0);
+                    let galley = ui.painter().layout_job(job);
                     ui.painter().galley(pos2(icon.right() + 10.0, rect.center().y - galley.size().y / 2.0), galley, color);
                     if ctx.state.playing == Some(e.app_id) {
                         ui.painter().circle_filled(rect.right_center() - vec2(10.0, 0.0), 4.0, t.in_game);
@@ -1577,9 +1578,9 @@ impl Library {
         let mut recent: Vec<_> = ctx.local.games.iter().filter(|g| g.last_played.is_some()).collect();
         recent.sort_by_key(|g| std::cmp::Reverse(g.last_played));
         // Recent games across the whole account (installed or not), like Steam.
-        let mut account_recent: Vec<(AppId, String, u64)> = match ctx.state.player_games.get(&ctx.state.steam_id) {
-            Some(Ok(list)) if !list.is_empty() => list.iter().filter_map(|g| Some((g.app_id, g.name.clone(), g.last_played?))).collect(),
-            _ => recent.iter().filter_map(|g| Some((g.app_id, g.name.clone(), g.last_played?))).collect(),
+        let mut account_recent: Vec<(AppId, &str, u64)> = match ctx.state.player_games.get(&ctx.state.steam_id) {
+            Some(Ok(list)) if !list.is_empty() => list.iter().filter_map(|g| Some((g.app_id, g.name.as_str(), g.last_played?))).collect(),
+            _ => recent.iter().filter_map(|g| Some((g.app_id, g.name.as_str(), g.last_played?))).collect(),
         };
         account_recent.sort_by_key(|g| std::cmp::Reverse(g.2));
 
@@ -1621,7 +1622,7 @@ impl Library {
 
                 // Recent games shelf: everything played lately, installed or not.
                 let first = recent.first().map(|g| g.app_id);
-                let shelf: Vec<&(AppId, String, u64)> = account_recent.iter().filter(|g| Some(g.0) != first).collect();
+                let shelf: Vec<&(AppId, &str, u64)> = account_recent.iter().filter(|g| Some(g.0) != first).collect();
                 if !shelf.is_empty() {
                     w::section(ui, t, t!("Recent games"), None);
                     // As many 2:3 covers as fit; a full row is widened a little so it
@@ -1673,7 +1674,13 @@ impl Library {
                 let size = vec2(self.tile, self.tile * 1.5);
                 let gap = 16.0;
                 let cols = (((ui.available_width() + gap) / (size.x + gap)).floor() as usize).max(1);
+                let label_height = ui.fonts_mut(|fonts| fonts.row_height(&w::font_medium(13.0)));
+                let row_height = size.y + 6.0 + label_height;
                 for row in items.chunks(cols) {
+                    if w::skip_offscreen_row(ui, row_height) {
+                        ui.add_space(10.0);
+                        continue;
+                    }
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = gap;
                         for e in row {
@@ -1697,13 +1704,16 @@ impl Library {
     }
 
     fn game_page(&mut self, id: AppId, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
-        let all = entries(ctx.state, ctx.local);
-        let Some(e) = all.iter().find(|e| e.app_id == id) else {
+        let owned = ctx.state.apps.as_ref().and_then(|apps| apps.get(&id)).filter(|app| !app.is_dlc());
+        let mut installs = ctx.local.games.iter().filter(|game| game.app_id == id);
+        // Match entries(): use the last install for owned apps and the first
+        // for apps that are only present on disk.
+        let installed = if owned.is_some() { installs.next_back() } else { installs.next() };
+        let Some(name) = owned.map(|app| &app.name).or_else(|| installed.map(|game| &game.name)) else {
             self.selected = None;
             return;
         };
-        let (name, installed, owned) = (e.name.to_string(), e.installed.cloned(), e.owned.cloned());
-        drop(all);
+        let (name, installed, owned) = (name.clone(), installed.cloned(), owned.cloned());
         let download = ctx.state.downloads.get(&id).cloned().filter(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed));
         let queued = ctx.state.download_queue.contains(&id);
 
@@ -2048,7 +2058,7 @@ impl Library {
         ui.add_space(12.0);
 
         // Friends who are playing.
-        let friends: Vec<_> = ctx.state.friend_list().into_iter().filter(|p| p.game_app_id == Some(id)).collect();
+        let friends = ctx.state.friends_playing(id);
         w::card(t).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(w::caption_text(&t, t!("FRIENDS PLAYING NOW")));
@@ -3498,6 +3508,10 @@ impl crate::theme_renderer::LibraryHost for Library {
         let ratio = if card_width > 0.0 { card_height / card_width } else if is_banner { 9.0 / 16.0 } else { 1.5 };
         let size = vec2(actual_w, (actual_w * ratio).round());
         for row in items.chunks(cols) {
+            if w::skip_offscreen_row(ui, size.y) {
+                ui.add_space(gap);
+                continue;
+            }
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = actual_gap;
                 for e in row {

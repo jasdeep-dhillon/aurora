@@ -156,7 +156,7 @@ pub fn verify(steam_root: &Path, game: &InstalledGame, progress: &Progress) -> V
     progress.total_bytes.store(work.iter().map(|f| f.size).sum(), Ordering::Relaxed);
     report.files = work.len();
 
-    let mut buf = vec![0u8; 1 << 20];
+    let mut buf = vec![0u8; 256 * 1024];
     for f in work {
         if progress.cancel.load(Ordering::Relaxed) {
             report.cancelled = true;
@@ -614,7 +614,7 @@ fn sha256_file(path: &Path) -> Result<(u64, String), String> {
     }
     let mut f = fs::File::open(path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
+    let mut buf = vec![0u8; 256 * 1024];
     let mut len = 0u64;
     loop {
         let n = f.read(&mut buf).map_err(|e| format!("could not read {}: {e}", path.display()))?;
@@ -652,7 +652,7 @@ fn copy_file_verified(
         .map_err(|e| format!("could not create {}: {e}", dst.display()))?;
 
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
+    let mut buf = vec![0u8; 256 * 1024];
     let mut copied = 0u64;
     loop {
         if progress.cancel.load(Ordering::Relaxed) {

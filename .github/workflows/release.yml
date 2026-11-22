@@ -1,6 +1,6 @@
 # Releases happen when the version goes up: bump `version` in Cargo.toml and
 # push to main. If there is no tag vX.Y.Z for that version yet, this builds
-#   - Linux: Aurora-Linux-x86_64.tar.gz (+ .sha256), an Arch package and a .deb
+#   - Linux: Aurora-Linux-x86_64.tar.gz (+ .sha256), an Arch package, a .deb and an RPM
 #   - Windows: the setup, a portable zip and SHA256SUMS.txt (the app's
 #     updater checks it)
 # in parallel, then tags the commit vX.Y.Z and publishes the release (with
@@ -188,7 +188,7 @@ jobs:
     if: always() && needs.version.outputs.release == 'true' && needs.linux.result == 'success' && (needs.version.outputs.prerelease != 'true' || needs.windows.result == 'success')
     runs-on: ubuntu-24.04
     steps:
-      # For the changelog and the Arch PKGBUILD.
+      # For the changelog and Linux package recipes.
       - uses: actions/checkout@v4
         with:
           path: repo
@@ -213,33 +213,34 @@ jobs:
           tar -tzf dist/$name.tar.gz
 
       # An Arch package of the same files (packaging/arch/PKGBUILD), built in
-      # an Arch container. Releases only; pkgver can't hold a "-", so a
-      # "X.Y.Z-N" release is pkgver X.Y.Z, pkgrel N+1. It never holds the
-      # release back.
+      # an Arch container. Arch sorts X.Y.ZrcN below X.Y.Z. Preserve the
+      # historical pkgrel mapping for releases with a numeric suffix.
       - name: Arch package
         id: arch
-        if: needs.version.outputs.prerelease != 'true'
         continue-on-error: true
         env:
           VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          case "$VERSION" in
-            *-*[!0-9]*) echo "pkgver can't contain '-': no Arch package for $VERSION"; exit 1;;
-            *-*) pkgver=${VERSION%-*}; pkgrel=$(( ${VERSION##*-} + 1 ));;
-            *) pkgver=$VERSION; pkgrel=1;;
-          esac
+          pkgrel=1
+          if [[ "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$ ]]; then
+            pkgver=${BASH_REMATCH[1]}
+            pkgrel=$((10#${BASH_REMATCH[2]} + 1))
+          else
+            pkgver=${VERSION//-/}
+          fi
           name=Aurora-Linux-x86_64
           mkdir -p arch
           cp repo/packaging/arch/PKGBUILD arch/
-          cp dist/$name.tar.gz arch/$name-$VERSION.tar.gz
+          cp "dist/$name.tar.gz" "arch/$name-${TAG#v}.tar.gz"
           sum=$(cut -d' ' -f1 dist/$name.tar.gz.sha256)
-          sed -i -e "s/^pkgver=.*/pkgver=$pkgver/" -e "s/^pkgrel=.*/pkgrel=$pkgrel/" -e "s/^_tag=.*/_tag=v$VERSION/" -e "s/^sha256sums=.*/sha256sums=('$sum')/" arch/PKGBUILD
-          echo "pkg=aurora-bin-$pkgver-$pkgrel-x86_64.pkg.tar.zst" >> "$GITHUB_OUTPUT"
+          sed -i -e "s/^pkgver=.*/pkgver=$pkgver/" -e "s/^pkgrel=.*/pkgrel=$pkgrel/" -e "s/^_tag=.*/_tag=$TAG/" -e "s/^sha256sums=.*/sha256sums=('$sum')/" arch/PKGBUILD
           docker run --rm -v "$PWD/arch:/pkg" archlinux:base-devel bash -c \
             'useradd -m build && chown -R build /pkg && cd /pkg && su build -c "makepkg --nodeps --noconfirm"'
-          cp arch/*.pkg.tar.zst dist/
+          pkg="aurora-bin-$pkgver-$pkgrel-x86_64.pkg.tar.zst"
+          cp "arch/$pkg" dist/
           cp arch/PKGBUILD dist/PKGBUILD
-          ls -l dist
+          echo "pkg=$pkg" >> "$GITHUB_OUTPUT"
 
       # A Debian/Ubuntu package of the same files (Ubuntu 22.04+, Mint,
       # Pop!_OS…): built from the Ubuntu 22.04 binaries. Test builds too, so
@@ -288,9 +289,30 @@ jobs:
           dpkg-deb --info dist/$deb && dpkg-deb --contents dist/$deb
           echo "pkg=$deb" >> "$GITHUB_OUTPUT"
 
+      - name: Fedora package
+        id: rpm
+        continue-on-error: true
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          mkdir -p rpm/SOURCES
+          cp dist/Aurora-Linux-x86_64.tar.gz rpm/SOURCES/
+          cp repo/packaging/fedora/aurora.spec rpm/
+          # RPM sorts a tilde prerelease below the final version.
+          rpm_version=${VERSION/-/\~}
+          docker run --rm -v "$PWD/rpm:/pkg" -e "AURORA_VERSION=$rpm_version" fedora:latest bash -ec '
+            dnf -y install rpm-build
+            rpmbuild -bb --define "_topdir /pkg" --define "aurora_version $AURORA_VERSION" /pkg/aurora.spec
+            rpm -qpl /pkg/RPMS/x86_64/*.rpm
+          '
+          pkg="aurora-$VERSION-1.x86_64.rpm"
+          cp "rpm/RPMS/x86_64/aurora-$rpm_version-1.x86_64.rpm" "dist/$pkg"
+          echo "pkg=$pkg" >> "$GITHUB_OUTPUT"
+
       - name: Release notes
         env:
           VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
           WINDOWS: ${{ needs.windows.result }}
           PRERELEASE: ${{ needs.version.outputs.prerelease }}
           BRANCH: ${{ github.ref_name }}
@@ -298,7 +320,10 @@ jobs:
           ARCH_PKG: ${{ steps.arch.outputs.pkg }}
           DEB: ${{ steps.deb.outcome }}
           DEB_PKG: ${{ steps.deb.outputs.pkg }}
+          RPM: ${{ steps.rpm.outcome }}
+          RPM_PKG: ${{ steps.rpm.outputs.pkg }}
         run: |
+          asset="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG"
           {
             echo "## Aurora $VERSION"
             echo
@@ -306,41 +331,29 @@ jobs:
               echo "> **Test build** from \`$BRANCH\` ($GITHUB_SHA). Not offered to installed copies as an update."
               echo
             fi
+            echo '| Platform / Build | Download | Notes |'
+            echo '| --- | --- | --- |'
+            if [ "$WINDOWS" = "success" ]; then
+              echo "| Windows x86-64 | [Installer]($asset/Aurora-Setup-$VERSION.exe) · [Portable ZIP]($asset/Aurora-$VERSION-portable.zip) · [SHA-256]($asset/SHA256SUMS.txt) | Run the installer or extract the ZIP |"
+            else
+              echo '| Windows x86-64 | Unavailable | The Windows CI build failed |'
+            fi
+            if [ "$DEB" = "success" ]; then
+              echo "| Debian / Ubuntu / Mint | [.deb]($asset/$DEB_PKG) | Install with apt |"
+            fi
+            if [ "$ARCH" = "success" ]; then
+              echo "| Arch Linux | [.pkg.tar.zst]($asset/$ARCH_PKG) · [PKGBUILD]($asset/PKGBUILD) | Install with pacman -U |"
+            fi
+            if [ "$RPM" = "success" ]; then
+              echo "| Fedora | [.rpm]($asset/$RPM_PKG) | Install with dnf |"
+            fi
+            echo "| Generic Linux x86-64 | [.tar.gz]($asset/Aurora-Linux-x86_64.tar.gz) · [SHA-256]($asset/Aurora-Linux-x86_64.tar.gz.sha256) | Extract and launch aurora |"
+            echo
             # This version's section of CHANGELOG.md (heading "## [X.Y.Z]…").
             awk -v v="[$VERSION]" 'index($0, "## " v) == 1 { f = 1; next } f && /^## / { exit } f' repo/CHANGELOG.md > changes.md
             if [ -s changes.md ]; then
               cat changes.md
               echo
-            fi
-            echo "**Linux (x86_64):** download \`Aurora-Linux-x86_64.tar.gz\`, then:"
-            echo
-            echo '```sh'
-            echo 'tar -xzf Aurora-Linux-x86_64.tar.gz'
-            echo './Aurora-Linux-x86_64/aurora'
-            echo '```'
-            echo
-            if [ "$ARCH" = "success" ]; then
-              echo "**Arch Linux:** download \`$ARCH_PKG\`, then:"
-              echo
-              echo '```sh'
-              echo "sudo pacman -U $ARCH_PKG"
-              echo '```'
-              echo
-              echo "It installs to \`/opt/aurora\` with an **Aurora** menu entry and the \`aurora\` command. The \`PKGBUILD\` is attached too."
-              echo
-            fi
-            if [ "$DEB" = "success" ]; then
-              echo "**Debian, Ubuntu 22.04+, Mint:** download \`$DEB_PKG\`, then:"
-              echo
-              echo '```sh'
-              echo "sudo apt install ./$DEB_PKG"
-              echo '```'
-              echo
-            fi
-            if [ "$WINDOWS" = "success" ]; then
-              echo "**Windows:** run \`Aurora-Setup-$VERSION.exe\`, or unzip the portable zip."
-            else
-              echo "_No Windows build this time (it failed in CI)._"
             fi
           } > notes.md
           ls -l dist

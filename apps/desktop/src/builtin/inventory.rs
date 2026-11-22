@@ -169,7 +169,7 @@ impl Extension for Inventory {
         };
         if fallback {
             for (app, cx, _, _) in &tabs {
-                if self.requested.insert((owner, *app, *cx)) {
+                if !ctx.state.inventories.contains_key(&(owner, *app, *cx)) && self.requested.insert((owner, *app, *cx)) {
                     ctx.send(Command::LoadInventory { steam_id: owner, app_id: *app, context_id: *cx, language: lang.clone() });
                 }
             }
@@ -198,7 +198,9 @@ impl Extension for Inventory {
             return;
         }
         let (app, cx) = self.app.unwrap_or((753, 6));
-        if self.requested.insert((owner, app, cx)) {
+        if ctx.state.inventories.contains_key(&(owner, app, cx)) {
+            self.requested.remove(&(owner, app, cx));
+        } else if self.requested.insert((owner, app, cx)) {
             ctx.send(Command::LoadInventory { steam_id: owner, app_id: app, context_id: cx, language: lang.clone() });
         }
 
@@ -339,7 +341,7 @@ impl Extension for Inventory {
             }
             match self.sort {
                 Sort::Newest => {}
-                Sort::Name => items.sort_by(|a, b| a.0.name.to_lowercase().cmp(&b.0.name.to_lowercase())),
+                Sort::Name => items.sort_by(|a, b| model::cmp_ignore_case(&a.0.name, &b.0.name)),
                 Sort::Kind => items.sort_by(|a, b| a.0.kind.cmp(&b.0.kind).then_with(|| a.0.name.cmp(&b.0.name))),
                 Sort::Price => items.sort_by_key(|(i, n)| std::cmp::Reverse(price_of(i).map(|p| p * n))),
             }
@@ -429,6 +431,9 @@ impl Extension for Inventory {
     }
 
     fn on_event(&mut self, event: &Event, ctx: &mut Ctx) {
+        if let client::Event::Inventory(inv) = event {
+            self.requested.remove(&(inv.steam_id, inv.app_id, inv.context_id));
+        }
         match event {
             Event::TradeOfferSent { result, .. } => self.trade_sent(ctx, result),
             Event::ItemListed { result, .. } => {

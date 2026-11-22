@@ -28,9 +28,11 @@ struct Server {
 /// WebSocket CM endpoints (`host:port`), best first.
 pub async fn websocket_servers() -> Result<Vec<String>> {
     let fetched: Result<Vec<String>> = async {
-        // Without a timeout a dead network can hang here for a long time.
-        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8)).build()?;
-        let env: Envelope = http.get(DIRECTORY).send().await?.error_for_status()?.json().await?;
+        static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+            // Without a timeout a dead network can hang here for a long time.
+            reqwest::Client::builder().timeout(std::time::Duration::from_secs(8)).build().unwrap_or_default()
+        });
+        let env: Envelope = HTTP.get(DIRECTORY).send().await?.error_for_status()?.json().await?;
         Ok(env
             .response
             .serverlist

@@ -50,6 +50,7 @@ pub struct Wizard {
     need: u64,
     free: Option<(String, u64)>,
     styled: bool,
+    launched: bool,
 }
 
 /// Segoe UI, like every Windows setup; the app's fonts if it's missing.
@@ -126,6 +127,7 @@ impl Wizard {
             need: work::payload_size(),
             free: None,
             styled: false,
+            launched: false,
         }
     }
 
@@ -271,7 +273,8 @@ impl eframe::App for Wizard {
                 Page::Location | Page::Confirm => self.start(&ctx),
                 Page::Working => self.page = Page::Finish,
                 Page::Finish => {
-                    if self.run_after && !uninstall {
+                    if self.run_after && !uninstall && !self.launched {
+                        self.launched = true;
                         work::launch(&PathBuf::from(self.dir.trim()));
                     }
                     ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -504,9 +507,14 @@ impl Wizard {
         let (done, total) = g.bytes;
         let detail = if total > 0 && !g.done { format!("{status} ({} {} {} KB)", done / 1024, t!("of"), total / 1024) } else { status.to_string() };
         p.text(pos2(o.x + 22.0, o.y + 114.0), Align2::LEFT_TOP, detail, font(11.5), Color32::from_rgb(0x8F, 0x98, 0xA0));
-        if g.done && !std::env::args().any(|a| a == "--no-launch") {
+        if g.done && !self.launched {
             // Straight back into the app, like Steam after its update.
-            work::launch(&PathBuf::from(self.dir.trim()));
+            // Guard with `launched`: `ViewportCommand::Close` is async and
+            // eframe can render another frame before exiting.
+            self.launched = true;
+            if !std::env::args().any(|a| a == "--no-launch") {
+                work::launch(&PathBuf::from(self.dir.trim()));
+            }
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
     }

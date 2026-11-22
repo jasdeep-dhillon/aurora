@@ -120,7 +120,7 @@ impl Extension for Community {
                     self.group_ui.chat_id = None;
                 }
                 ui.add_space(6.0);
-                w::caption(ui, &t, &format!("{} · {}", t!("Friends"), ctx.state.friend_list().len()));
+                w::caption(ui, &t, &format!("{} · {}", t!("Friends"), ctx.state.friend_count()));
                 let sel_friend = match self.selected {
                     Some(ChatTarget::Friend(id)) => Some(id),
                     _ => None,

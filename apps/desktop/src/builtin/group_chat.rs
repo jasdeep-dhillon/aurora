@@ -42,7 +42,7 @@ pub struct GroupUiState {
     pub show_members: bool,
     pub member_filter: String,
     pub loaded_groups: HashSet<GroupChatId>,
-    pub loaded_channels: HashSet<(GroupChatId, ChatRoomId)>,
+    pub loaded_channels: HashMap<(GroupChatId, ChatRoomId), std::time::Instant>,
     pub modal: Option<GroupModal>,
     last_search: HashMap<GroupChatId, String>,
 }
@@ -55,7 +55,7 @@ impl Default for GroupUiState {
             show_members: true,
             member_filter: String::new(),
             loaded_groups: HashSet::new(),
-            loaded_channels: HashSet::new(),
+            loaded_channels: HashMap::new(),
             modal: None,
             last_search: HashMap::new(),
         }
@@ -281,7 +281,13 @@ pub fn group_view(
         .unwrap_or(g.default_chat_id);
     ui_state.chat_id = Some(active_chat_id);
 
-    if active_chat_id != 0 && ui_state.loaded_channels.insert((group_id, active_chat_id)) {
+    let channel = (group_id, active_chat_id);
+    if active_chat_id != 0
+        && (ui_state.loaded_channels.get(&channel).is_none_or(|at| {
+            state.group_messages.get(&channel).is_none() && at.elapsed() > std::time::Duration::from_secs(15)
+        }))
+    {
+        ui_state.loaded_channels.insert(channel, std::time::Instant::now());
         client.send(Command::LoadGroupHistory { group_id, chat_id: active_chat_id, before: None });
     }
     if g.channel(active_chat_id).is_some_and(|ch| ch.has_unread()) {
@@ -784,7 +790,7 @@ fn member_list(
                     || m.steam_id.to_string().contains(&q)
             })
             .collect();
-        entries.sort_by_key(|(m, p)| (std::cmp::Reverse(m.rank), p.state == PersonaState::Offline, !p.in_game(), p.display_name().to_lowercase()));
+        entries.sort_by_cached_key(|(m, p)| (std::cmp::Reverse(m.rank), p.state == PersonaState::Offline, !p.in_game(), p.display_name().to_lowercase()));
 
         let staff: Vec<_> = entries.iter().filter(|(m, _)| m.rank >= 30).cloned().collect();
         let in_game: Vec<_> = entries.iter().filter(|(m, p)| m.rank < 30 && p.in_game()).cloned().collect();

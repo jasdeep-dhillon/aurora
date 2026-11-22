@@ -10,6 +10,59 @@ use base64::Engine;
 type CbcDec = cbc::Decryptor<Aes256>;
 type EcbDec = ecb::Decryptor<Aes256>;
 
+/// Pre-expanded AES-256 key schedule for decrypting many filenames or chunks
+/// under the same depot key without re-running key expansion every time.
+pub struct DepotKey {
+    ecb: EcbDec,
+    key: [u8; 32],
+}
+
+impl DepotKey {
+    pub fn new(key: &[u8]) -> Result<Self> {
+        let key: [u8; 32] = key
+            .try_into()
+            .map_err(|_| Error::Crypto("depot key must be 32 bytes".into()))?;
+        let ecb = EcbDec::new_from_slice(&key).map_err(|e| Error::Crypto(e.to_string()))?;
+        Ok(Self { ecb, key })
+    }
+
+    /// Decrypt `data` into `out` (reusing `out`'s allocation).
+    pub fn decrypt_into(&self, data: &[u8], out: &mut Vec<u8>) -> Result<()> {
+        if data.len() < 32 || data.len() % 16 != 0 {
+            return Err(Error::Crypto("ciphertext has a bad length".into()));
+        }
+        let mut iv = GenericArray::clone_from_slice(&data[..16]);
+        self.ecb.clone().decrypt_block_mut(&mut iv);
+        out.clear();
+        out.extend_from_slice(&data[16..]);
+        let plain_len = CbcDec::new_from_slices(&self.key, &iv)
+            .map_err(|e| Error::Crypto(e.to_string()))?
+            .decrypt_padded_mut::<Pkcs7>(out)
+            .map_err(|e| Error::Crypto(e.to_string()))?
+            .len();
+        out.truncate(plain_len);
+        Ok(())
+    }
+
+    pub fn decrypt_filename_with(&self, b64: &str, raw_buf: &mut Vec<u8>, plain_buf: &mut Vec<u8>) -> Result<String> {
+        let trimmed = b64.trim();
+        raw_buf.clear();
+        if trimmed.as_bytes().contains(&b'\n') || trimmed.as_bytes().contains(&b'\r') {
+            let cleaned: Vec<u8> = trimmed.bytes().filter(|&b| b != b'\n' && b != b'\r').collect();
+            base64::engine::general_purpose::STANDARD
+                .decode_vec(&cleaned, raw_buf)
+                .map_err(|e| Error::Crypto(e.to_string()))?;
+        } else {
+            base64::engine::general_purpose::STANDARD
+                .decode_vec(trimmed.as_bytes(), raw_buf)
+                .map_err(|e| Error::Crypto(e.to_string()))?;
+        }
+        self.decrypt_into(raw_buf, plain_buf)?;
+        let end = plain_buf.iter().position(|b| *b == 0).unwrap_or(plain_buf.len());
+        Ok(String::from_utf8_lossy(&plain_buf[..end]).into_owned())
+    }
+}
+
 pub fn symmetric_decrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     if key.len() != 32 {
         return Err(Error::Crypto("depot key must be 32 bytes".into()));
@@ -22,22 +75,20 @@ pub fn symmetric_decrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| Error::Crypto(e.to_string()))?
         .decrypt_block_mut(&mut iv);
     let mut body = data[16..].to_vec();
-    let plain = CbcDec::new_from_slices(key, &iv)
+    let plain_len = CbcDec::new_from_slices(key, &iv)
         .map_err(|e| Error::Crypto(e.to_string()))?
         .decrypt_padded_mut::<Pkcs7>(&mut body)
         .map_err(|e| Error::Crypto(e.to_string()))?
-        .to_vec();
-    Ok(plain)
+        .len();
+    body.truncate(plain_len);
+    Ok(body)
 }
 
 /// Filenames in CDN manifests are base64 of encrypted, NUL-terminated text.
 pub fn decrypt_filename(b64: &str, key: &[u8]) -> Result<String> {
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(b64.trim().replace('\n', ""))
-        .map_err(|e| Error::Crypto(e.to_string()))?;
-    let plain = symmetric_decrypt(&raw, key)?;
-    let end = plain.iter().position(|b| *b == 0).unwrap_or(plain.len());
-    Ok(String::from_utf8_lossy(&plain[..end]).into_owned())
+    let dk = DepotKey::new(key)?;
+    let (mut raw, mut plain) = (Vec::new(), Vec::new());
+    dk.decrypt_filename_with(b64, &mut raw, &mut plain)
 }
 
 #[cfg(test)]

@@ -349,7 +349,7 @@ fn friends_chat(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
         ui.ctx().copy_text(code);
         ctx.toast(t!("Friend code copied"));
     }
-    if info_row(ui, t, t!("Friends"), &ctx.state.friend_list().len().to_string(), Some(t!("Open friends list"))) {
+    if info_row(ui, t, t!("Friends"), &ctx.state.friend_count().to_string(), Some(t!("Open friends list"))) {
         ctx.navigate("community", None);
     }
     if info_row(ui, t, t!("Who can see your status and send invites"), "", Some(t!("Privacy settings"))) {

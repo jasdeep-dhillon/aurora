@@ -24,7 +24,7 @@ tracing.workspace = true
 depot.workspace = true
 futures-util.workspace = true
 sha1 = "0.10"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip.workspace = true
 fs4 = "1"
 # Saved sign-ins: the refresh token and Steam Guard data live in the OS
 # credential store (Secret Service on Linux, Credential Manager on Windows,

@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 pub const APP_EXE: &str = "aurora.exe";
 pub const UNINSTALL_EXE: &str = "uninstall.exe";
 const UNINSTALL_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Aurora";
+const APP_PATHS_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\aurora.exe";
 /// Names from before the rename to Aurora (0.7.2 and older): an update
 /// moves an install over from them.
 const OLD_EXE: &str = "steam-rs.exe";
 const OLD_UNINSTALL_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\SteamInRust";
+const OLD_APP_PATHS_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\steam-rs.exe";
 const OLD_LINK: &str = "SteamInRust.lnk";
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const STEAM_LINK_KEY: &str = r"HKCU\Software\Classes\steam\shell\open\command";
@@ -125,13 +127,27 @@ pub fn install(opts: &Options, p: &Shared, wait: Duration) -> Result<(), String>
     if !opts.update {
         let _ = remove_shortcuts();
         if opts.start_menu {
-            shortcut(&start_menu_link(), &exe)?;
-            log(p, format!("Create shortcut: {}", start_menu_link().display()));
+            let link = start_menu_link();
+            shortcut(&link, &exe)?;
+            log(p, format!("Create shortcut: {}", link.display()));
         }
         if opts.desktop {
             let link = desktop_dir()?.join("Aurora.lnk");
             shortcut(&link, &exe)?;
             log(p, format!("Create shortcut: {}", link.display()));
+        }
+    } else {
+        // Ensure the Start Menu shortcut exists and points to the updated exe
+        // (repairs earlier installs where PowerShell shortcut creation silently failed).
+        let link = start_menu_link();
+        if shortcut(&link, &exe).is_ok() {
+            log(p, format!("Create shortcut: {}", link.display()));
+        }
+        if let Ok(desktop) = desktop_dir() {
+            let link = desktop.join("Aurora.lnk");
+            if link.exists() && shortcut(&link, &exe).is_ok() {
+                log(p, format!("Update shortcut: {}", link.display()));
+            }
         }
     }
     register(&opts.dir)?;
@@ -156,6 +172,8 @@ pub fn uninstall(dir: &Path, data: bool, p: &Shared) -> Result<(), String> {
     restore_steam_links(dir);
     let _ = reg(&["delete", UNINSTALL_KEY, "/f"]);
     let _ = reg(&["delete", OLD_UNINSTALL_KEY, "/f"]);
+    let _ = reg(&["delete", APP_PATHS_KEY, "/f"]);
+    let _ = reg(&["delete", OLD_APP_PATHS_KEY, "/f"]);
     // Startup entry, if the app added one (under either name).
     for name in ["Aurora", "SteamInRust"] {
         let _ = reg(&["delete", RUN_KEY, "/v", name, "/f"]);
@@ -258,6 +276,9 @@ fn register(dir: &Path) -> Result<(), String> {
     for (name, kind, value) in values {
         reg(&["add", UNINSTALL_KEY, "/v", name, "/t", kind, "/d", &value, "/f"]).ok_or_else(|| i18n::tr_dyn("Windows refused the change"))?;
     }
+    let dir_str = dir.display().to_string();
+    let _ = reg(&["add", APP_PATHS_KEY, "/ve", "/t", "REG_SZ", "/d", &exe, "/f"]);
+    let _ = reg(&["add", APP_PATHS_KEY, "/v", "Path", "/t", "REG_SZ", "/d", &dir_str, "/f"]);
     Ok(())
 }
 
@@ -279,22 +300,58 @@ fn restore_steam_links(dir: &Path) {
     }
 }
 
-fn start_menu_link() -> PathBuf {
+fn start_menu_dir() -> PathBuf {
+    #[cfg(windows)]
+    if let Some(dir) = win_shell::known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Programs) {
+        return dir;
+    }
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
-    base.join(r"Microsoft\Windows\Start Menu\Programs\Aurora.lnk")
+    base.join(r"Microsoft\Windows\Start Menu\Programs")
+}
+
+fn start_menu_link() -> PathBuf {
+    start_menu_dir().join("Aurora.lnk")
 }
 
 fn desktop_dir() -> Result<PathBuf, String> {
-    let out = powershell("[Environment]::GetFolderPath('Desktop')")?;
-    Ok(PathBuf::from(out.trim()))
+    #[cfg(windows)]
+    {
+        if let Some(dir) = win_shell::known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Desktop) {
+            return Ok(dir);
+        }
+        if let Ok(out) = powershell("[Environment]::GetFolderPath('Desktop')") {
+            let trimmed = out.trim();
+            if !trimmed.is_empty() {
+                return Ok(PathBuf::from(trimmed));
+            }
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            return Ok(PathBuf::from(profile).join("Desktop"));
+        }
+        return Err("could not locate Desktop folder".into());
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Desktop")).ok_or_else(|| "could not locate Desktop folder".into())
+    }
 }
 
 fn remove_shortcuts() -> Result<(), String> {
-    let _ = std::fs::remove_file(start_menu_link());
-    let _ = std::fs::remove_file(start_menu_link().with_file_name(OLD_LINK));
-    let desktop = desktop_dir()?;
-    let _ = std::fs::remove_file(desktop.join("Aurora.lnk"));
-    let _ = std::fs::remove_file(desktop.join(OLD_LINK));
+    let sm = start_menu_dir();
+    let sm_link = sm.join("Aurora.lnk");
+    let _ = std::fs::remove_file(&sm_link);
+    let _ = std::fs::remove_file(sm.join(OLD_LINK));
+    let sub = sm.join("Aurora");
+    let _ = std::fs::remove_file(sub.join("Aurora.lnk"));
+    let _ = std::fs::remove_dir(&sub);
+    #[cfg(windows)]
+    win_shell::notify_dir(&sm);
+    if let Ok(desktop) = desktop_dir() {
+        let _ = std::fs::remove_file(desktop.join("Aurora.lnk"));
+        let _ = std::fs::remove_file(desktop.join(OLD_LINK));
+        #[cfg(windows)]
+        win_shell::notify_dir(&desktop);
+    }
     Ok(())
 }
 
@@ -307,11 +364,13 @@ fn migrate_old_names(dir: &Path, exe: &Path, p: &Shared) {
         log(p, format!("Delete file: {}", old.display()));
     }
     let _ = reg(&["delete", OLD_UNINSTALL_KEY, "/f"]);
+    let _ = reg(&["delete", OLD_APP_PATHS_KEY, "/f"]);
     let start_old = start_menu_link().with_file_name(OLD_LINK);
     if start_old.exists() {
         let _ = std::fs::remove_file(&start_old);
-        let _ = shortcut(&start_menu_link(), exe);
-        log(p, format!("Create shortcut: {}", start_menu_link().display()));
+        let sm = start_menu_link();
+        let _ = shortcut(&sm, exe);
+        log(p, format!("Create shortcut: {}", sm.display()));
     }
     if let Ok(desktop) = desktop_dir() {
         let old_link = desktop.join(OLD_LINK);
@@ -334,6 +393,35 @@ fn migrate_old_names(dir: &Path, exe: &Path, p: &Shared) {
 }
 
 fn shortcut(link: &Path, target: &Path) -> Result<(), String> {
+    if let Some(parent) = link.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Prefer native Win32 COM (IShellLinkW + IPersistFile): no PowerShell
+        // subprocess, works under Constrained Language Mode / Defender ASR,
+        // and handles Unicode paths natively.
+        if let Err(com_err) = win_shell::create_shortcut(link, target) {
+            // Fallback to hardened PowerShell if COM somehow failed.
+            if let Err(ps_err) = shortcut_powershell(link, target) {
+                return Err(format!("could not create shortcut {}: COM: {com_err}; PowerShell: {ps_err}", link.display()));
+            }
+        }
+        if !link.is_file() {
+            return Err(format!("shortcut was not created: {}", link.display()));
+        }
+        win_shell::notify_created(link);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        shortcut_powershell(link, target)
+    }
+}
+
+fn shortcut_powershell(link: &Path, target: &Path) -> Result<(), String> {
     let q = |p: &Path| p.display().to_string().replace('\'', "''");
     let dir = target.parent().unwrap_or(target);
     let script = format!(
@@ -378,6 +466,12 @@ pub fn payload_size() -> u64 {
 
 /// Free space on the drive of `dir` (for "Space available").
 pub fn free_space(dir: &Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        if let Some(bytes) = win_shell::free_space(dir) {
+            return Some(bytes);
+        }
+    }
     let drive = dir.components().next()?.as_os_str().to_string_lossy().trim_end_matches(':').to_string();
     let out = powershell(&format!("(Get-PSDrive -Name '{}').Free", drive.replace('\'', ""))).ok()?;
     out.trim().parse().ok()
@@ -403,13 +497,210 @@ fn reg(args: &[&str]) -> Option<String> {
 }
 
 fn powershell(script: &str) -> Result<String, String> {
-    // UTF-8 output: paths like a OneDrive "Рабочий стол" desktop came back
-    // garbled in the console's code page.
-    let script = format!("[Console]::OutputEncoding = [Text.Encoding]::UTF8; {script}");
+    // Fail on any cmdlet/COM error (default Continue exits 0!) and ignore
+    // invalid console handles in GUI builds with CREATE_NO_WINDOW.
+    let script = format!("$ErrorActionPreference = 'Stop'; try {{ [Console]::OutputEncoding = [Text.Encoding]::UTF8 }} catch {{}}; {script}");
     let out = hidden(std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script])).output().map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+#[cfg(windows)]
+mod win_shell {
+    use std::ffi::{OsStr, OsString, c_void};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::{Path, PathBuf};
+    use windows_sys::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE, S_OK};
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    use windows_sys::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize};
+    use windows_sys::Win32::UI::Shell::{SHCNE_CREATE, SHCNE_UPDATEDIR, SHCNF_PATHW, SHChangeNotify, SHGetKnownFolderPath};
+    use windows_sys::core::{GUID, HRESULT, PCWSTR, PWSTR};
+
+    const CLSID_SHELL_LINK: GUID = GUID::from_u128(0x00021401_0000_0000_c000_000000000046);
+    const IID_ISHELL_LINK_W: GUID = GUID::from_u128(0x000214f9_0000_0000_c000_000000000046);
+    const IID_IPERSIST_FILE: GUID = GUID::from_u128(0x0000010b_0000_0000_c000_000000000046);
+
+    fn wide_os(s: &OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    fn wide_str(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    pub fn known_folder(id: &GUID) -> Option<PathBuf> {
+        let mut raw: PWSTR = std::ptr::null_mut();
+        let hr = unsafe { SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut raw) };
+        if hr < 0 || raw.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        unsafe {
+            while *raw.add(len) != 0 {
+                len += 1;
+            }
+            let slice = std::slice::from_raw_parts(raw, len);
+            let path = PathBuf::from(OsString::from_wide(slice));
+            CoTaskMemFree(raw.cast());
+            (!path.as_os_str().is_empty()).then_some(path)
+        }
+    }
+
+    pub fn free_space(dir: &Path) -> Option<u64> {
+        // Walk up to the nearest existing ancestor (the target folder may not
+        // exist yet during setup), or fall back to the drive prefix (e.g. C:\).
+        let probe: PathBuf = dir
+            .ancestors()
+            .find(|a| !a.as_os_str().is_empty() && a.exists())
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                let first = dir.components().next()?.as_os_str().to_string_lossy();
+                Some(PathBuf::from(format!("{}\\", first.trim_end_matches(['\\', '/']))))
+            })?;
+        let w = wide_os(probe.as_os_str());
+        let mut avail = 0u64;
+        let ok = unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut avail, std::ptr::null_mut(), std::ptr::null_mut()) };
+        (ok != 0).then_some(avail)
+    }
+
+    pub fn notify_created(link: &Path) {
+        let lw = wide_os(link.as_os_str());
+        unsafe {
+            SHChangeNotify(SHCNE_CREATE as i32, SHCNF_PATHW, lw.as_ptr().cast(), std::ptr::null());
+        }
+        if let Some(parent) = link.parent() {
+            notify_dir(parent);
+        }
+    }
+
+    pub fn notify_dir(dir: &Path) {
+        let dw = wide_os(dir.as_os_str());
+        unsafe {
+            SHChangeNotify(SHCNE_UPDATEDIR as i32, SHCNF_PATHW, dw.as_ptr().cast(), std::ptr::null());
+        }
+    }
+
+    #[repr(C)]
+    struct IShellLinkW {
+        vtbl: *const IShellLinkWVtbl,
+    }
+
+    #[repr(C)]
+    struct IShellLinkWVtbl {
+        query_interface: unsafe extern "system" fn(*mut IShellLinkW, *const GUID, *mut *mut c_void) -> HRESULT,
+        add_ref: unsafe extern "system" fn(*mut IShellLinkW) -> u32,
+        release: unsafe extern "system" fn(*mut IShellLinkW) -> u32,
+        get_path: *const c_void,
+        get_id_list: *const c_void,
+        set_id_list: *const c_void,
+        get_description: *const c_void,
+        set_description: unsafe extern "system" fn(*mut IShellLinkW, PCWSTR) -> HRESULT,
+        get_working_directory: *const c_void,
+        set_working_directory: unsafe extern "system" fn(*mut IShellLinkW, PCWSTR) -> HRESULT,
+        get_arguments: *const c_void,
+        set_arguments: *const c_void,
+        get_hotkey: *const c_void,
+        set_hotkey: *const c_void,
+        get_show_cmd: *const c_void,
+        set_show_cmd: *const c_void,
+        get_icon_location: *const c_void,
+        set_icon_location: unsafe extern "system" fn(*mut IShellLinkW, PCWSTR, i32) -> HRESULT,
+        set_relative_path: *const c_void,
+        resolve: *const c_void,
+        set_path: unsafe extern "system" fn(*mut IShellLinkW, PCWSTR) -> HRESULT,
+    }
+
+    #[repr(C)]
+    struct IPersistFile {
+        vtbl: *const IPersistFileVtbl,
+    }
+
+    #[repr(C)]
+    struct IPersistFileVtbl {
+        query_interface: unsafe extern "system" fn(*mut IPersistFile, *const GUID, *mut *mut c_void) -> HRESULT,
+        add_ref: unsafe extern "system" fn(*mut IPersistFile) -> u32,
+        release: unsafe extern "system" fn(*mut IPersistFile) -> u32,
+        get_class_id: *const c_void,
+        is_dirty: *const c_void,
+        load: *const c_void,
+        save: unsafe extern "system" fn(*mut IPersistFile, PCWSTR, i32) -> HRESULT,
+        save_completed: *const c_void,
+        get_cur_file: *const c_void,
+    }
+
+    struct ComInit(bool);
+    impl Drop for ComInit {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    struct ShellLinkGuard(*mut IShellLinkW);
+    impl Drop for ShellLinkGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { ((*(*self.0).vtbl).release)(self.0) };
+            }
+        }
+    }
+
+    struct PersistFileGuard(*mut IPersistFile);
+    impl Drop for PersistFileGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { ((*(*self.0).vtbl).release)(self.0) };
+            }
+        }
+    }
+
+    fn check(step: &str, hr: HRESULT) -> Result<(), String> {
+        if hr >= 0 {
+            Ok(())
+        } else {
+            Err(format!("{step} failed (0x{:08x})", hr as u32))
+        }
+    }
+
+    pub fn create_shortcut(link: &Path, target: &Path) -> Result<(), String> {
+        let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+        let _com = if hr == S_OK || hr == S_FALSE {
+            ComInit(true)
+        } else if hr == RPC_E_CHANGED_MODE {
+            ComInit(false)
+        } else {
+            return check("CoInitializeEx", hr);
+        };
+
+        let mut sl_raw: *mut c_void = std::ptr::null_mut();
+        check(
+            "CoCreateInstance(CLSID_ShellLink)",
+            unsafe { CoCreateInstance(&CLSID_SHELL_LINK, std::ptr::null_mut(), CLSCTX_INPROC_SERVER, &IID_ISHELL_LINK_W, &mut sl_raw) },
+        )?;
+        let sl = ShellLinkGuard(sl_raw.cast());
+
+        let target_w = wide_os(target.as_os_str());
+        let dir_w = wide_os(target.parent().unwrap_or(target).as_os_str());
+        let desc_w = wide_str("Aurora");
+        let link_w = wide_os(link.as_os_str());
+
+        unsafe {
+            let vtbl = &*(*sl.0).vtbl;
+            check("IShellLinkW::SetPath", (vtbl.set_path)(sl.0, target_w.as_ptr()))?;
+            check("IShellLinkW::SetWorkingDirectory", (vtbl.set_working_directory)(sl.0, dir_w.as_ptr()))?;
+            check("IShellLinkW::SetIconLocation", (vtbl.set_icon_location)(sl.0, target_w.as_ptr(), 0))?;
+            check("IShellLinkW::SetDescription", (vtbl.set_description)(sl.0, desc_w.as_ptr()))?;
+
+            let mut pf_raw: *mut c_void = std::ptr::null_mut();
+            check("QueryInterface(IPersistFile)", (vtbl.query_interface)(sl.0, &IID_IPERSIST_FILE, &mut pf_raw))?;
+            let pf = PersistFileGuard(pf_raw.cast());
+            let pf_vtbl = &*(*pf.0).vtbl;
+            check("IPersistFile::Save", (pf_vtbl.save)(pf.0, link_w.as_ptr(), 1))?;
+        }
+        Ok(())
     }
 }

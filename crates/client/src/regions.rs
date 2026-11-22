@@ -99,7 +99,10 @@ async fn speed(http: &reqwest::Client, host: &str, chunk: &(u32, Vec<u8>, u32)) 
 /// Look up every region, time a connection to one server in each, then
 /// measure download speed from the closest ones.
 pub async fn probe(steam_root: Option<std::path::PathBuf>) -> Vec<model::DownloadRegion> {
-    let http = reqwest::Client::builder().user_agent("Valve/Steam HTTP Client 1.0").timeout(Duration::from_secs(10)).build().unwrap_or_default();
+    static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder().user_agent("Valve/Steam HTTP Client 1.0").timeout(Duration::from_secs(10)).build().unwrap_or_default()
+    });
+    let http = HTTP.clone();
     // 1) Which regions exist.
     let mut found: BTreeMap<u32, (String, u32)> = BTreeMap::new(); // cell -> (host, load)
     let mut cdns: BTreeMap<String, u32> = BTreeMap::new(); // partner CDN host -> load

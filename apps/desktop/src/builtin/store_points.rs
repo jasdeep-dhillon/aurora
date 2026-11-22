@@ -82,7 +82,7 @@ fn fmt_points(n: u64) -> String {
 #[derive(Default)]
 pub(super) struct Points {
     pub shelf: Shelf,
-    pages: Vec<Shared<RewardPage>>,
+    pages: Vec<Shared<std::sync::Arc<RewardPage>>>,
     key: Option<(Shelf, Vec<AppId>)>,
     balance_asked: bool,
 }
@@ -101,7 +101,7 @@ impl Store {
             _ => Vec::new(),
         };
         let api = self.api.clone();
-        let slot = self.fetch(async move { api.reward_items(&classes, &apps, cursor.as_deref(), PAGE).await });
+        let slot = self.fetch(async move { api.reward_items(&classes, &apps, cursor.as_deref(), PAGE).await.map(std::sync::Arc::new) });
         self.points.pages.push(slot);
     }
 
@@ -187,7 +187,7 @@ impl Store {
                     w::empty(ui, t, icons::GIFT, t!("No games found"), t!("Sign in to browse Points Shop items from games you own."));
                     return;
                 }
-                let pages: Vec<Option<Result<RewardPage, String>>> = self
+                let pages: Vec<Option<Result<std::sync::Arc<RewardPage>, String>>> = self
                     .points
                     .pages
                     .iter()
@@ -207,7 +207,7 @@ impl Store {
                     return;
                 }
 
-                let items: Vec<RewardItem> = pages.iter().filter_map(|p| p.as_ref()?.as_ref().ok()).flat_map(|p| p.items.clone()).collect();
+                let items: Vec<_> = pages.iter().filter_map(|p| p.as_ref()?.as_ref().ok()).flat_map(|p| p.items.iter()).collect();
                 if items.is_empty() {
                     if pages.iter().any(|p| p.is_none()) {
                         w::loading(ui, t, t!("Loading…"));
@@ -222,6 +222,10 @@ impl Store {
                 let per = (((width + gap) / (210.0 + gap)).floor() as usize).max(1);
                 let cw = ((width - gap * (per as f32 - 1.0)) / per as f32).floor();
                 for row in items.chunks(per) {
+                    if w::skip_offscreen_row(ui, (cw - 20.0).max(60.0) + 96.0) {
+                        ui.add_space(gap);
+                        continue;
+                    }
                     ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing.x = gap;
                         for it in row {

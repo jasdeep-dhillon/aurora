@@ -219,6 +219,7 @@ pub struct SteamApp {
     pub library_layout: SharedLibraryLayout,
     resolved_snapshot: Option<themes::ResolvedTheme>,
     synced_revision: u64,
+    preferences_revision: Option<u64>,
     applied_fonts_key: Option<String>,
     bg_tex: Option<(PathBuf, egui::TextureHandle)>,
     logo_tex: Option<(PathBuf, egui::TextureHandle)>,
@@ -395,6 +396,7 @@ impl SteamApp {
             library_layout,
             resolved_snapshot: initial_snapshot,
             synced_revision: 0,
+            preferences_revision: None,
             applied_fonts_key: Some(format!("{:?}", ui::theme::WeightPreset::Heavy)),
             bg_tex: None,
             logo_tex: None,
@@ -711,16 +713,40 @@ impl SteamApp {
 }
 
 impl SteamApp {
+    fn sync_client_preferences(&mut self, force: bool) {
+        let revision = client::preferences_revision();
+        if !force && self.preferences_revision == Some(revision) {
+            return;
+        }
+        self.prefs.proton_override = client::proton_override();
+        self.prefs.proton_per_app = client::app_protons();
+        self.prefs.anti_cheat_headless = client::anti_cheat_headless();
+        self.prefs.gameplay_downloads = client::gameplay_downloads();
+        self.prefs.controller = client::controller_settings();
+        self.prefs.controller_bindings = client::app_bindings();
+        self.preferences_revision = Some(revision);
+    }
+
     fn sync_theme_state(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         let (active_theme, fonts_key, custom_fonts, bg_path, logo_path, new_snapshot, new_lib_nodes, rev) = {
             let mut st = self.themes.lock().unwrap();
+            let native = st.manager.uses_native_appearance();
+            if !st.dirty && st.revision == self.synced_revision && !native && !st.hot_reload
+                && !self.prefs.hot_reload_themes && self.applied_theme.as_ref() == Some(&self.prefs.theme)
+                && st.manager.resolved.as_ref().is_none_or(|theme| {
+                    (theme.background_path.is_none() || self.bg_tex.is_some())
+                        && (theme.logo_path.is_none() || self.logo_tex.is_some())
+                })
+            {
+                return;
+            }
             self.prefs.hot_reload_themes = st.hot_reload;
             self.prefs.active_theme_id = st.manager.active_id.clone();
 
             // The watcher reads desktop settings off the UI thread. Keep it
             // alive only for opted-in themes, independently of file hot reload.
-            if st.manager.uses_native_appearance() {
+            if native {
                 let watcher = self.native_appearance.get_or_insert_with(themes::native::NativeAppearanceWatcher::new);
                 if let Some(appearance) = watcher.latest() {
                     if st.manager.set_native_appearance(appearance) {
@@ -808,6 +834,7 @@ impl SteamApp {
     /// raises it again with an activation token. Without a tray icon nothing
     /// could bring a hidden window back, so it only minimizes too.
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        ctx.forget_all_images();
         crate::release_memory();
         if self.tray.available() && !self.tray.wayland() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -996,12 +1023,6 @@ impl eframe::App for SteamApp {
             self.prefs.overlay_enabled = f.overlay_enabled;
             self.prefs.fps_counter = f.fps_counter;
             self.prefs.fps_high_contrast = f.fps_high_contrast;
-            self.prefs.proton_override = client::proton_override();
-            self.prefs.proton_per_app = client::app_protons();
-            self.prefs.anti_cheat_headless = client::anti_cheat_headless();
-            self.prefs.gameplay_downloads = client::gameplay_downloads();
-            self.prefs.controller = client::controller_settings();
-            self.prefs.controller_bindings = client::app_bindings();
             #[cfg(not(windows))]
             {
                 self.prefs.precompile_shaders = client::shaders::precompile();
@@ -1011,6 +1032,7 @@ impl eframe::App for SteamApp {
                 self.client.send(Command::CloudSettings { steam_root: Some(self.local.steam_root.clone()), disabled: if f.cloud { vec![] } else { self.state.apps.as_ref().map(|a| a.keys().copied().collect()).unwrap_or_default() } });
             }
         }
+        self.sync_client_preferences(false);
         self.drain_events(&ctx, &mut actions);
         self.taskbar.update(&self.state.downloads);
         self.handle_tray(&ctx, &mut actions);
@@ -1156,7 +1178,6 @@ impl eframe::App for SteamApp {
             let bg_tex = self.bg_tex.as_ref().map(|(_, h)| h.clone());
             let logo_tex = self.logo_tex.as_ref().map(|(_, h)| h.clone());
             let now = ctx.input(|i| i.time);
-            let active_theme = self.prefs.theme.clone();
             let (has_bg_script, has_chrome_script) = {
                 let st = self.themes.lock().unwrap();
                 match st.manager.resolved.as_ref().and_then(|r| r.script.as_ref()) {
@@ -1164,26 +1185,26 @@ impl eframe::App for SteamApp {
                     None => (false, false),
                 }
             };
-            let themes_bg = self.themes.clone();
-            let theme_for_bg = active_theme.clone();
+            let bg_script = has_bg_script.then(|| (self.themes.clone(), self.prefs.theme.clone()));
             let mut bg_hook = move |painter: &egui::Painter, rect: egui::Rect| {
                 let cmds = {
-                    let mut st = themes_bg.lock().unwrap();
+                    let Some((themes, theme)) = &bg_script else { return };
+                    let mut st = themes.lock().unwrap();
                     if let Some(script) = st.manager.resolved.as_mut().and_then(|r| r.script.as_mut()) {
-                        script.paint_background(rect.width(), rect.height(), now, &theme_for_bg)
+                        script.paint_background(rect.width(), rect.height(), now, theme)
                     } else {
                         Vec::new()
                     }
                 };
                 themes::paint_draw_cmds(painter, rect, &cmds);
             };
-            let themes_chrome = self.themes.clone();
-            let theme_for_chrome = active_theme;
+            let chrome_script = has_chrome_script.then(|| (self.themes.clone(), self.prefs.theme.clone()));
             let mut chrome_hook = move |painter: &egui::Painter, rect: egui::Rect| {
                 let cmds = {
-                    let mut st = themes_chrome.lock().unwrap();
+                    let Some((themes, theme)) = &chrome_script else { return };
+                    let mut st = themes.lock().unwrap();
                     if let Some(script) = st.manager.resolved.as_mut().and_then(|r| r.script.as_mut()) {
-                        script.paint_chrome(rect.width(), rect.height(), now, &theme_for_chrome)
+                        script.paint_chrome(rect.width(), rect.height(), now, theme)
                     } else {
                         Vec::new()
                     }
@@ -1230,6 +1251,7 @@ impl eframe::App for SteamApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.sync_client_preferences(true);
         self.prefs.ext_data = self.registry.save_all().into_iter().collect();
         eframe::set_value(storage, "prefs", &self.prefs);
         // eframe restores its own "window" entry even with persist_window

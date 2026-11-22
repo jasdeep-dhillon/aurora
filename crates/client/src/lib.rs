@@ -12,6 +12,7 @@ pub mod download;
 pub mod feed;
 pub mod workshop;
 pub mod hub;
+pub mod read_cache;
 pub mod ingame;
 pub mod ipc;
 mod launch;
@@ -750,4 +751,17 @@ pub enum Error {
     Auth(#[from] auth::Error),
     #[error("{0}")]
     Other(String),
+}
+
+// Setters publish their new value before advancing this revision. The desktop
+// reads the revision before copying preferences, so concurrent writes get
+// picked up again on its next pass.
+static PREFERENCES_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn preferences_revision() -> u64 {
+    PREFERENCES_REVISION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+fn preferences_changed() {
+    PREFERENCES_REVISION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 }

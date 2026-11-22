@@ -56,15 +56,15 @@ pub struct Entry<'a> {
 
 /// Merge owned apps (from Steam) with games found on disk.
 pub fn entries<'a>(state: &'a client::State, local: &'a local::LocalState) -> Vec<Entry<'a>> {
-    let installed: std::collections::HashMap<_, _> = local.games.iter().map(|g| (g.app_id, g)).collect();
-    let mut out: Vec<Entry> = Vec::new();
+    let mut installed: std::collections::HashMap<_, _> = local.games.iter().map(|g| (g.app_id, g)).collect();
+    let mut out = Vec::with_capacity(state.apps.as_ref().map_or(0, |apps| apps.len()) + installed.len());
     if let Some(apps) = &state.apps {
         for a in apps.values().filter(|a| !a.is_dlc()) {
-            out.push(Entry { app_id: a.app_id, name: &a.name, installed: installed.get(&a.app_id).copied(), owned: Some(a) });
+            out.push(Entry { app_id: a.app_id, name: &a.name, installed: installed.remove(&a.app_id), owned: Some(a) });
         }
     }
     for g in &local.games {
-        if !out.iter().any(|e| e.app_id == g.app_id) {
+        if installed.remove(&g.app_id).is_some() {
             out.push(Entry { app_id: g.app_id, name: &g.name, installed: Some(g), owned: None });
         }
     }

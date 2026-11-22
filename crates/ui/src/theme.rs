@@ -502,6 +502,7 @@ fn map_font(path: &std::path::Path) -> Option<&'static [u8]> {
 }
 
 /// Basic header check before handing a system font to epaint (which panics on corrupt files).
+#[cfg(target_os = "linux")]
 fn valid_font_header(bytes: &[u8], index: u32) -> bool {
     if bytes.len() < 12 {
         return false;
@@ -532,11 +533,15 @@ mod linux_fonts {
         pub is_emoji: bool,
     }
 
-    pub fn discover() -> Vec<DiscoveredFont> {
-        let mut fonts = Vec::new();
-        fonts.extend(query_fc_match());
-        fonts.extend(discover_fonts_in_dirs(&standard_font_dirs(), MAX_FALLBACK_FONTS));
-        dedup_and_cap(fonts, MAX_FALLBACK_FONTS)
+    pub fn discover() -> &'static [DiscoveredFont] {
+        static FONTS: std::sync::OnceLock<Vec<DiscoveredFont>> = std::sync::OnceLock::new();
+        FONTS.get_or_init(|| {
+            let mut fonts = dedup_and_cap(query_fc_match(), MAX_FALLBACK_FONTS);
+            if fonts.len() < MAX_FALLBACK_FONTS {
+                fonts.extend(discover_fonts_in_dirs(&standard_font_dirs(), MAX_FALLBACK_FONTS));
+            }
+            dedup_and_cap(fonts, MAX_FALLBACK_FONTS)
+        })
     }
 
     pub fn standard_font_dirs() -> Vec<PathBuf> {
@@ -896,6 +901,7 @@ pub fn install_fonts_for_theme(
     // System fonts for scripts Geist and Inter don't cover, so game names in Chinese,
     // Japanese, Korean, Thai, Arabic, Hindi… show instead of empty boxes.
     let mut system: Vec<String> = Vec::new();
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut system_emoji: Vec<String> = Vec::new();
     #[cfg(windows)]
     if let Some(dir) = std::env::var_os("WINDIR").map(|w| std::path::PathBuf::from(w).join("Fonts")) {
@@ -908,7 +914,7 @@ pub fn install_fonts_for_theme(
         }
     }
     #[cfg(target_os = "linux")]
-    for (i, f) in linux_fonts::discover().into_iter().enumerate() {
+    for (i, f) in linux_fonts::discover().iter().enumerate() {
         if let Some(bytes) = map_font(&f.path) {
             if !valid_font_header(bytes, f.index) {
                 continue;

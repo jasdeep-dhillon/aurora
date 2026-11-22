@@ -181,6 +181,9 @@ pub(crate) struct St {
     pub cache: HashMap<String, Arc<Vec<u8>>>,
 
     pub frames: VecDeque<Frame>,
+    /// Recycled RGBA frame buffers returned after GPU upload to avoid 8 MiB
+    /// `mmap`/page-fault cycles every frame (above Linux's 128 KiB mmap threshold).
+    pub free_px: Vec<Vec<egui::Color32>>,
     /// A frame was decoded since the last restart.
     pub has_frame: bool,
     pub video_eos: bool,
@@ -211,6 +214,7 @@ impl St {
             self.target = self.target.min((self.duration - 0.05).max(0.0));
         }
         self.frames.clear();
+        self.free_px.clear();
         self.has_frame = false;
         self.video_eos = false;
         self.audio_eos = false;
@@ -302,6 +306,7 @@ impl Player {
             width: opts.width,
             cache: HashMap::new(),
             frames: VecDeque::new(),
+            free_px: Vec::new(),
             has_frame: false,
             video_eos: false,
             audio: Audio::Pending,
@@ -378,10 +383,15 @@ impl Player {
 
         // The frame for this moment: the newest one that is due. Right after a
         // restart show the first one at once (a preview while paused/buffering).
-        let mut pick = None;
+        let mut pick: Option<Frame> = None;
         let fresh = self.shown_epoch != st.epoch;
         while let Some(f) = st.frames.front() {
             if fresh && pick.is_none() || f.pts <= clock + 0.004 {
+                if let Some(prev) = pick.take() {
+                    if st.free_px.len() < 4 {
+                        st.free_px.push(prev.image.pixels);
+                    }
+                }
                 pick = st.frames.pop_front();
                 if fresh {
                     break;
@@ -874,6 +884,7 @@ mod tests {
             width: 1280,
             cache: HashMap::new(),
             frames: VecDeque::new(),
+            free_px: Vec::new(),
             has_frame: false,
             video_eos: false,
             audio: Audio::Pending,

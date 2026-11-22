@@ -547,8 +547,10 @@ const MAX_INSTANCES: usize = 256;
 
 /// The game's D3D11 state we change, so it can be put back.
 struct Saved {
-    scissors: Vec<RECT>,
-    viewports: Vec<D3D11_VIEWPORT>,
+    scissors: [RECT; MAX_RECTS],
+    scissors_len: usize,
+    viewports: [D3D11_VIEWPORT; MAX_RECTS],
+    viewports_len: usize,
     raster: Option<ID3D11RasterizerState>,
     blend: Option<ID3D11BlendState>,
     blend_factor: [f32; 4],
@@ -558,10 +560,12 @@ struct Saved {
     ps_srv: [Option<ID3D11ShaderResourceView>; 1],
     ps_sampler: [Option<ID3D11SamplerState>; 1],
     ps: Option<ID3D11PixelShader>,
-    ps_inst: Vec<Option<ID3D11ClassInstance>>,
+    ps_inst: [Option<ID3D11ClassInstance>; MAX_INSTANCES],
+    ps_inst_len: usize,
     ps_cb: [Option<ID3D11Buffer>; 1],
     vs: Option<ID3D11VertexShader>,
-    vs_inst: Vec<Option<ID3D11ClassInstance>>,
+    vs_inst: [Option<ID3D11ClassInstance>; MAX_INSTANCES],
+    vs_inst_len: usize,
     vs_cb: [Option<ID3D11Buffer>; 1],
     gs: Option<ID3D11GeometryShader>,
     hs: Option<ID3D11HullShader>,
@@ -582,8 +586,10 @@ impl Saved {
     unsafe fn take(c: &ID3D11DeviceContext) -> Saved {
         unsafe {
             let mut s = Saved {
-                scissors: vec![RECT::default(); MAX_RECTS],
-                viewports: vec![D3D11_VIEWPORT::default(); MAX_RECTS],
+                scissors: std::array::from_fn(|_| RECT::default()),
+                scissors_len: 0,
+                viewports: std::array::from_fn(|_| D3D11_VIEWPORT::default()),
+                viewports_len: 0,
                 raster: c.RSGetState().ok(),
                 blend: None,
                 blend_factor: [0.0; 4],
@@ -593,10 +599,12 @@ impl Saved {
                 ps_srv: [None],
                 ps_sampler: [None],
                 ps: None,
-                ps_inst: vec![None; MAX_INSTANCES],
+                ps_inst: std::array::from_fn(|_| None),
+                ps_inst_len: 0,
                 ps_cb: [None],
                 vs: None,
-                vs_inst: vec![None; MAX_INSTANCES],
+                vs_inst: std::array::from_fn(|_| None),
+                vs_inst_len: 0,
                 vs_cb: [None],
                 gs: None,
                 hs: None,
@@ -614,21 +622,21 @@ impl Saved {
             };
             let mut n = MAX_RECTS as u32;
             c.RSGetScissorRects(&mut n, Some(s.scissors.as_mut_ptr()));
-            s.scissors.truncate(n as usize);
+            s.scissors_len = (n as usize).min(MAX_RECTS);
             let mut n = MAX_RECTS as u32;
             c.RSGetViewports(&mut n, Some(s.viewports.as_mut_ptr()));
-            s.viewports.truncate(n as usize);
+            s.viewports_len = (n as usize).min(MAX_RECTS);
             c.OMGetBlendState(Some(&mut s.blend), Some(&mut s.blend_factor), Some(&mut s.sample_mask));
             c.OMGetDepthStencilState(Some(&mut s.depth), Some(&mut s.stencil_ref));
             c.PSGetShaderResources(0, Some(&mut s.ps_srv));
             c.PSGetSamplers(0, Some(&mut s.ps_sampler));
             let mut n = MAX_INSTANCES as u32;
             c.PSGetShader(&mut s.ps, Some(s.ps_inst.as_mut_ptr()), Some(&mut n));
-            s.ps_inst.truncate(n as usize);
+            s.ps_inst_len = (n as usize).min(MAX_INSTANCES);
             c.PSGetConstantBuffers(0, Some(&mut s.ps_cb));
             let mut n = MAX_INSTANCES as u32;
             c.VSGetShader(&mut s.vs, Some(s.vs_inst.as_mut_ptr()), Some(&mut n));
-            s.vs_inst.truncate(n as usize);
+            s.vs_inst_len = (n as usize).min(MAX_INSTANCES);
             c.VSGetConstantBuffers(0, Some(&mut s.vs_cb));
             c.GSGetShader(&mut s.gs, None, None);
             c.HSGetShader(&mut s.hs, None, None);
@@ -642,16 +650,16 @@ impl Saved {
 
     unsafe fn restore(self, c: &ID3D11DeviceContext) {
         unsafe {
-            c.RSSetScissorRects(Some(&self.scissors));
-            c.RSSetViewports(Some(&self.viewports));
+            c.RSSetScissorRects(Some(&self.scissors[..self.scissors_len]));
+            c.RSSetViewports(Some(&self.viewports[..self.viewports_len]));
             c.RSSetState(self.raster.as_ref());
             c.OMSetBlendState(self.blend.as_ref(), Some(&self.blend_factor), self.sample_mask);
             c.OMSetDepthStencilState(self.depth.as_ref(), self.stencil_ref);
             c.PSSetShaderResources(0, Some(&self.ps_srv));
             c.PSSetSamplers(0, Some(&self.ps_sampler));
-            c.PSSetShader(self.ps.as_ref(), Some(&self.ps_inst));
+            c.PSSetShader(self.ps.as_ref(), Some(&self.ps_inst[..self.ps_inst_len]));
             c.PSSetConstantBuffers(0, Some(&self.ps_cb));
-            c.VSSetShader(self.vs.as_ref(), Some(&self.vs_inst));
+            c.VSSetShader(self.vs.as_ref(), Some(&self.vs_inst[..self.vs_inst_len]));
             c.VSSetConstantBuffers(0, Some(&self.vs_cb));
             c.GSSetShader(self.gs.as_ref(), None);
             c.HSSetShader(self.hs.as_ref(), None);

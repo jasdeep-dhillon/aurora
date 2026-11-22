@@ -173,10 +173,13 @@ impl Manifest {
         if !self.encrypted_names {
             return Ok(());
         }
+        let dk = crypto::DepotKey::new(key)?;
+        let mut raw_buf = Vec::with_capacity(256);
+        let mut plain_buf = Vec::with_capacity(256);
         for f in &mut self.files {
-            f.name = crypto::decrypt_filename(&f.name, key)?.replace('\\', "/");
+            f.name = dk.decrypt_filename_with(&f.name, &mut raw_buf, &mut plain_buf)?.replace('\\', "/");
             if let Some(l) = &f.link {
-                f.link = Some(crypto::decrypt_filename(l, key)?);
+                f.link = Some(dk.decrypt_filename_with(l, &mut raw_buf, &mut plain_buf)?);
             }
         }
         self.encrypted_names = false;

@@ -33,17 +33,57 @@ pub fn text(s: &str) -> String {
         .join(" ")
 }
 
-fn decode(s: &str) -> String {
-    s.replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&nbsp;", " ")
-        .replace("&reg;", "®")
-        .replace("&trade;", "™")
-        .replace("&copy;", "©")
-        .replace("&amp;", "&")
+fn decode(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains('&') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp..];
+        let matched = if let Some(r) = after.strip_prefix("&quot;") {
+            out.push('"');
+            Some(r)
+        } else if let Some(r) = after.strip_prefix("&#39;") {
+            out.push('\'');
+            Some(r)
+        } else if let Some(r) = after.strip_prefix("&apos;") {
+            out.push('\'');
+            Some(r)
+        } else if let Some(r) = after.strip_prefix("&lt;") {
+            out.push('<');
+            Some(r)
+        } else if let Some(r) = after.strip_prefix("&gt;") {
+            out.push('>');
+            Some(r)
+        } else if let Some(r) = after.strip_prefix("&nbsp;") {
+            out.push(' ');
+            Some(r)
+        } else if let Some(r) = after.strip_prefix("&reg;") {
+            out.push('®');
+            Some(r)
+        } else if let Some(r) = after.strip_prefix("&trade;") {
+            out.push('™');
+            Some(r)
+        } else if let Some(r) = after.strip_prefix("&copy;") {
+            out.push('©');
+            Some(r)
+        } else if let Some(r) = after.strip_prefix("&amp;") {
+            out.push('&');
+            Some(r)
+        } else {
+            None
+        };
+        if let Some(next) = matched {
+            rest = next;
+        } else {
+            out.push('&');
+            rest = &after[1..];
+        }
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
 }
 
 fn attr(tag: &str, name: &str) -> Option<String> {
@@ -92,12 +132,24 @@ pub fn parse(html: &str) -> Vec<Block> {
     let mut buf = String::new();
 
     fn push_text(runs: &mut Vec<(String, bool)>, buf: &mut String, bold: bool) {
-        let t = decode(buf);
-        buf.clear();
-        if t.trim().is_empty() && runs.is_empty() {
+        if buf.is_empty() {
             return;
         }
-        let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+        let decoded = decode(buf);
+        if decoded.trim().is_empty() && runs.is_empty() {
+            drop(decoded);
+            buf.clear();
+            return;
+        }
+        let mut t = String::with_capacity(decoded.len());
+        for word in decoded.split_whitespace() {
+            if !t.is_empty() {
+                t.push(' ');
+            }
+            t.push_str(word);
+        }
+        drop(decoded);
+        buf.clear();
         if t.is_empty() {
             return;
         }
@@ -159,7 +211,7 @@ pub fn parse(html: &str) -> Vec<Block> {
                 "img" => {
                     push_text(&mut runs, &mut buf, bold > 0);
                     flush(&mut blocks, &mut runs, in_li);
-                    if let Some(src) = attr(tag, "src").map(|s| decode(&s)).and_then(|s| valid_http_url(&s)) {
+                    if let Some(src) = attr(tag, "src").and_then(|s| valid_http_url(&decode(&s))) {
                         blocks.push(Block::Image(src));
                     }
                 }
