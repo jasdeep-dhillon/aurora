@@ -230,18 +230,61 @@ pub async fn save_privacy(web: &Web, p: &ProfilePrivacy) -> Result<(), String> {
     }
 }
 
-/// Read an avatar file safely before uploading.
+/// Read an avatar file safely before uploading (refuses symlinks/non-regular
+/// files, never blocks on FIFOs, and enforces `MAX_AVATAR_BYTES` on the open fd).
 pub fn read_avatar_file(path: &std::path::Path) -> Result<(Vec<u8>, String), String> {
-    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    use std::io::Read;
+    let pre = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if pre.file_type().is_symlink() || !pre.is_file() {
+        return Err("Avatar path must be a regular image file".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if (pre.file_attributes() & 0x0400) != 0 {
+            return Err("Avatar path must be a regular image file".into());
+        }
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = opts.open(path).map_err(|e| e.to_string())?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("Avatar path must be a regular image file".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if (meta.file_attributes() & 0x0400) != 0 {
+            return Err("Avatar path must be a regular image file".into());
+        }
+    }
     if meta.len() > MAX_AVATAR_BYTES as u64 {
         return Err("Avatar file is too large (max 16 MB)".into());
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_AVATAR_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_AVATAR_BYTES {
+        return Err("Avatar file is too large (max 16 MB)".into());
+    }
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "avatar.jpg".into());
     Ok((bytes, name))
 }
 
-fn avatar_mime(bytes: &[u8], file_name: &str) -> Result<&'static str, String> {
+fn avatar_mime(bytes: &[u8]) -> Result<&'static str, String> {
     if bytes.is_empty() {
         return Err("Avatar file is empty".into());
     }
@@ -254,18 +297,12 @@ fn avatar_mime(bytes: &[u8], file_name: &str) -> Result<&'static str, String> {
     if bytes.starts_with(b"\xff\xd8\xff") {
         return Ok("image/jpeg");
     }
-    if file_name.to_lowercase().ends_with(".png") {
-        Ok("image/png")
-    } else if file_name.to_lowercase().ends_with(".jpg") || file_name.to_lowercase().ends_with(".jpeg") {
-        Ok("image/jpeg")
-    } else {
-        Err("Choose a JPEG or PNG image".into())
-    }
+    Err("Choose a valid JPEG or PNG image".into())
 }
 
 /// Upload a picture as your avatar (JPEG or PNG).
 pub async fn upload_avatar(web: &Web, bytes: Vec<u8>, file_name: &str) -> Result<(), String> {
-    let mime = avatar_mime(&bytes, file_name)?;
+    let mime = avatar_mime(&bytes)?;
     let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_string()).mime_str(mime).map_err(|e| e.to_string())?;
     let form = reqwest::multipart::Form::new()
         .part("avatar", part)
@@ -395,9 +432,11 @@ mod tests {
 
     #[test]
     fn validates_avatar_upload_inputs() {
-        assert!(super::avatar_mime(&[], "a.png").is_err());
-        assert_eq!(super::avatar_mime(b"\x89PNG\r\n\x1a\nrest", "avatar.bin").unwrap(), "image/png");
-        assert_eq!(super::avatar_mime(b"\xff\xd8\xff\xe0rest", "avatar.bin").unwrap(), "image/jpeg");
-        assert!(super::avatar_mime(b"not an image", "notes.txt").is_err());
+        assert!(super::avatar_mime(&[]).is_err());
+        assert_eq!(super::avatar_mime(b"\x89PNG\r\n\x1a\nrest").unwrap(), "image/png");
+        assert_eq!(super::avatar_mime(b"\xff\xd8\xff\xe0rest").unwrap(), "image/jpeg");
+        assert!(super::avatar_mime(b"not an image").is_err());
+        // Renamed non-image payload must not pass via extension fallback.
+        assert!(super::avatar_mime(b"<html>not png</html>").is_err());
     }
 }

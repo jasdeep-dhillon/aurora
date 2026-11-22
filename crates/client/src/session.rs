@@ -3036,9 +3036,15 @@ impl Online {
             crate::LaunchMode::Aurora => {
                 let token = self.ipc.register(app_id);
                 let is64 = launch::exe_is_64bit(app, dir).unwrap_or(true);
-                let dll = launch::steamclient_dll(is64);
+                let dll64 = launch::steamclient_dll(true);
+                let dll32 = launch::steamclient_dll(false);
+                let primary_ok = if is64 { dll64.is_some() } else { dll32.is_some() };
                 let account_id = model::account_id(self.me);
-                let swapped = dll.as_deref().ok_or_else(|| "steamclient DLL missing".to_string()).and_then(|d| launch::swap_begin(&token, d, is64, account_id));
+                let swapped = if primary_ok {
+                    launch::swap_begin_both(&token, dll64.as_deref(), dll32.as_deref(), account_id)
+                } else {
+                    Err("steamclient DLL missing".to_string())
+                };
                 let ctrl_override = crate::pads::effective_controller_override(app_id, args.controller);
                 let input_decision = crate::pads::resolve_steam_input(ctrl_override, &crate::pads::settings().families);
                 let pads = (swapped.is_ok() && input_decision.enabled && input_decision.use_shm_bridge)
@@ -3128,8 +3134,9 @@ impl Online {
         }
         sink(Event::GameStarted { app_id });
         let tx = exit_tx.clone();
+        let dir_owned = dir.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            let _ = tx.send(launch::wait(app_id, child));
+            let _ = tx.send(launch::wait_in_dir(app_id, &dir_owned, child));
         });
         Ok(())
     }
@@ -3139,10 +3146,24 @@ impl Online {
         use crate::ipc::protocol::{Reply, Request};
         let crate::ipc::Call { app_id, token, pid, req, reply } = call;
         let (conn, me) = (self.conn.clone(), self.me);
+        let mark_swap_loaded = |tok: String| {
+            #[cfg(windows)]
+            {
+                // Keep our steamclient registered briefly after the first Hello
+                // so a launcher that spawns the actual gameplay child process
+                // (possibly of a different bitness) still loads Aurora's DLL.
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    launch::swap_loaded(&tok);
+                });
+            }
+            #[cfg(not(windows))]
+            launch::swap_loaded(&tok);
+        };
         match req {
             Request::Hello if self.link != Link::Online => {
                 tracing::info!("game {app_id} (pid {pid}) connected to Aurora's steamclient (offline)");
-                launch::swap_loaded(&token);
+                mark_swap_loaded(token);
                 let mut session = self.ipc_session(app_id);
                 session.stats = offline::offline_view(&offline::load_stats(me, app_id));
                 let _ = reply.send(Reply::Hello(Box::new(session)));
@@ -3159,7 +3180,7 @@ impl Online {
             }
             Request::Hello => {
                 tracing::info!("game {app_id} (pid {pid}) connected to Aurora's steamclient");
-                launch::swap_loaded(&token);
+                mark_swap_loaded(token);
                 let session = self.ipc_session(app_id);
                 let language = session.game_language.clone();
                 tokio::spawn(async move {

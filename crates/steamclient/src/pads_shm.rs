@@ -524,31 +524,61 @@ mod win_shm {
         }
     }
 
-    pub fn open_shm(name: &str) -> Option<&'static Shared> {
+    #[derive(Clone, Copy)]
+    pub struct MappedShm {
+        pub shared: &'static Shared,
+        pub writable: bool,
+    }
+
+    pub fn open_shm_with_error(name: &str) -> Result<MappedShm, u32> {
         if !valid_mapping_name(name) {
-            return None;
+            return Err(87); // ERROR_INVALID_PARAMETER
         }
-        let access = FILE_MAP_READ | FILE_MAP_WRITE;
         let wide_name = wide(name);
-        let h = unsafe { OpenFileMappingW(access, 0, wide_name.as_ptr()) };
-        if h.is_null() {
-            return None;
-        }
-        let view = unsafe { MapViewOfFile(h, access, 0, 0, std::mem::size_of::<Shared>()) } as *const Shared;
-        if view.is_null() {
+        let mut last_err = 0u32;
+        for (access, writable) in [(FILE_MAP_READ | FILE_MAP_WRITE, true), (FILE_MAP_READ, false)] {
+            let h = unsafe { OpenFileMappingW(access, 0, wide_name.as_ptr()) };
+            if h.is_null() {
+                last_err = unsafe { GetLastError() };
+                continue;
+            }
+            let view = unsafe { MapViewOfFile(h, access, 0, 0, std::mem::size_of::<Shared>()) } as *const Shared;
+            if view.is_null() {
+                last_err = unsafe { GetLastError() };
+                unsafe { CloseHandle(h) };
+                continue;
+            }
+            // The mapped view keeps its own kernel reference to the section object.
             unsafe { CloseHandle(h) };
-            return None;
+            let shared = unsafe { view.as_ref() }.ok_or(last_err)?;
+            return Ok(MappedShm { shared, writable });
         }
-        unsafe { view.as_ref() }
+        Err(last_err)
+    }
+
+    pub fn open_shm(name: &str) -> Option<&'static Shared> {
+        open_shm_with_error(name).ok().map(|m| m.shared)
     }
 }
 
 #[cfg(windows)]
-pub use win_shm::{Shm, open_shm};
+pub use win_shm::{MappedShm, Shm, open_shm, open_shm_with_error};
+
+#[cfg(not(windows))]
+#[derive(Clone, Copy)]
+pub struct MappedShm {
+    pub shared: &'static Shared,
+    pub writable: bool,
+}
 
 #[cfg(not(windows))]
 pub fn open_shm(_name: &str) -> Option<&'static Shared> {
     None
+}
+
+#[cfg(not(windows))]
+pub fn open_shm_with_error(_name: &str) -> Result<MappedShm, u32> {
+    Err(0)
 }
 
 #[cfg(test)]

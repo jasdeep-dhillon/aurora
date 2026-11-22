@@ -189,8 +189,32 @@ pub fn resolve_steam_input(app_override: u8, global: &FamilyToggles) -> SteamInp
     SteamInputDecision {
         enabled: mask != 0,
         families_mask: mask,
-        use_shm_bridge: global.any_non_xbox(),
+        use_shm_bridge: mask != 0,
     }
+}
+
+/// Decide whether an SDL-detected controller should be published into Windows
+/// shared memory. Non-Xbox families are always published when enabled; Xbox-
+/// classified controllers backed by native XInput (no HID path) are skipped up
+/// to the number of connected native XInput slots, while third-party HID/BT
+/// controllers that SDL classifies as Xbox (but native XInput misses) still
+/// reach the game without duplicating genuine XInput pads.
+#[cfg(any(windows, test))]
+pub(crate) fn should_publish_to_shm(
+    family: ControllerFamily,
+    has_hid_path: bool,
+    families: &FamilyToggles,
+    real_xinput_count: usize,
+    xbox_skipped: &mut usize,
+) -> bool {
+    if !families.is_enabled(family) {
+        return false;
+    }
+    if family == ControllerFamily::Xbox && !has_hid_path && *xbox_skipped < real_xinput_count {
+        *xbox_skipped += 1;
+        return false;
+    }
+    true
 }
 
 static SETTINGS: OnceLock<Mutex<ControllerSettings>> = OnceLock::new();
@@ -390,6 +414,7 @@ mod sdl_dyn {
         pub get_sensor_data: Option<unsafe extern "C" fn(Gp, i32, *mut f32, i32) -> bool>,
         pub connection_state: Option<unsafe extern "C" fn(Gp) -> i32>,
         pub power_info: Option<unsafe extern "C" fn(Gp, *mut i32) -> i32>,
+        pub get_path: Option<unsafe extern "C" fn(Gp) -> *const c_char>,
     }
 
     unsafe impl Send for Sdl {}
@@ -503,6 +528,7 @@ mod sdl_dyn {
             get_sensor_data: opt!("SDL_GetGamepadSensorData"),
             connection_state: opt!("SDL_GetGamepadConnectionState"),
             power_info: opt!("SDL_GetGamepadPowerInfo"),
+            get_path: opt!("SDL_GetGamepadPath"),
         })
     }
 
@@ -708,6 +734,7 @@ mod platform {
         gp: Gp,
         name: String,
         family: ControllerFamily,
+        has_hid_path: bool,
         vendor: u16,
         product: u16,
         has_gyro: bool,
@@ -725,6 +752,44 @@ mod platform {
         } else {
             run_xinput_ui_loop();
         }
+    }
+
+    /// Count how many real native XInput slots (0..4) are currently connected.
+    fn count_real_xinput_slots() -> usize {
+        type GetState = unsafe extern "system" fn(u32, *mut [u8; 16]) -> u32;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LoadLibraryW(name: *const u16) -> *mut c_void;
+            fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+        }
+        static GET_STATE: OnceLock<Option<GetState>> = OnceLock::new();
+        let Some(&get) = GET_STATE
+            .get_or_init(|| {
+                for dll in ["xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"] {
+                    let wide: Vec<u16> = dll.encode_utf16().chain([0]).collect();
+                    let m = unsafe { LoadLibraryW(wide.as_ptr()) };
+                    if m.is_null() {
+                        continue;
+                    }
+                    let g = unsafe { GetProcAddress(m, c"XInputGetState".as_ptr()) };
+                    if !g.is_null() {
+                        return Some(unsafe { std::mem::transmute::<*mut c_void, GetState>(g) });
+                    }
+                }
+                None
+            })
+            .as_ref()
+        else {
+            return 0;
+        };
+        let mut count = 0usize;
+        for i in 0..4u32 {
+            let mut buf = [0u8; 16];
+            if unsafe { get(i, &mut buf) } == 0 {
+                count += 1;
+            }
+        }
+        count
     }
 
     fn run_sdl_loop(sdl: &'static Sdl, shared: Option<&'static Shared>) {
@@ -746,6 +811,7 @@ mod platform {
         tracing::info!("controllers: SDL3 pad reader active");
         let mut pads: Vec<OpenPad> = Vec::new();
         let mut scanned: Option<Instant> = None;
+        let mut real_xinput_count = 0usize;
         loop {
             if USERS.load(Ordering::Acquire) == 0 && !ui_active() {
                 let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
@@ -768,6 +834,7 @@ mod platform {
             let force = FORCE_RESCAN.swap(false, Ordering::AcqRel);
             if force || scanned.is_none_or(|t| t.elapsed() > Duration::from_millis(500)) {
                 scanned = Some(Instant::now());
+                real_xinput_count = count_real_xinput_slots();
                 let mut n = 0;
                 let ids = unsafe { (sdl.get_gamepads)(&mut n) };
                 if !ids.is_null() {
@@ -786,13 +853,18 @@ mod platform {
                         let vendor = unsafe { (sdl.vendor_for_id)(id) };
                         let product = sdl.product_for_id.map_or(0, |f| unsafe { f(id) });
                         let family = ControllerFamily::classify(kind, vendor, &name);
+                        let has_hid_path = sdl.get_path.is_some_and(|f| {
+                            let s = sdl_dyn::cstr_lossy(unsafe { f(gp) }).to_ascii_lowercase();
+                            s.contains("hid#") || s.contains("usb#") || s.contains("bthenum#")
+                        });
                         let has_gyro = sdl_dyn::enable_sensors(sdl, gp);
-                        tracing::info!("controllers: detected {} ({})", name, family.label());
+                        tracing::info!("controllers: detected {} ({}, hid_path={})", name, family.label(), has_hid_path);
                         pads.push(OpenPad {
                             id,
                             gp,
                             name,
                             family,
+                            has_hid_path,
                             vendor,
                             product,
                             has_gyro,
@@ -810,6 +882,7 @@ mod platform {
             let game_active = USERS.load(Ordering::Acquire) > 0;
             let mut ui_list = Vec::with_capacity(pads.len());
             let mut shm_idx = 0usize;
+            let mut xbox_skipped = 0usize;
 
             pads.retain_mut(|o| {
                 if !unsafe { (sdl.connected)(o.gp) } {
@@ -843,9 +916,12 @@ mod platform {
                     unsafe { (sdl.rumble)(o.gp, 0xFFFF, 0xFFFF, 400) };
                 }
 
-                // Publish enabled non-Xbox controllers to shared memory when a game is running.
+                // Publish enabled controllers not already backed by a native XInput slot.
                 let mut assigned_slot = None;
-                if game_active && o.family != ControllerFamily::Xbox && cfg.families.is_enabled(o.family) && shm_idx < shm::SLOTS {
+                if game_active
+                    && shm_idx < shm::SLOTS
+                    && super::should_publish_to_shm(o.family, o.has_hid_path, &cfg.families, real_xinput_count, &mut xbox_skipped)
+                {
                     if let Some(s) = shared {
                         let mut calibrated = cal.apply_to_state(raw_state);
                         calibrated.packet = o.last_shm.packet;
@@ -1723,15 +1799,16 @@ mod tests {
             SteamInputDecision { enabled: false, families_mask: 0, use_shm_bridge: false }
         );
 
-        // Only Xbox enabled globally -> SHM bridge is unnecessary even for Default/Enable.
+        // Only Xbox enabled globally -> SHM bridge stays active so Xbox-classified
+        // third-party pads that native XInput misses can still reach the game.
         let xbox_only = FamilyToggles { xbox: true, playstation: false, switch_pro: false, generic: false };
         assert_eq!(
             resolve_steam_input(0, &xbox_only),
-            SteamInputDecision { enabled: true, families_mask: FAMILY_XBOX, use_shm_bridge: false }
+            SteamInputDecision { enabled: true, families_mask: FAMILY_XBOX, use_shm_bridge: true }
         );
         assert_eq!(
             resolve_steam_input(1, &xbox_only),
-            SteamInputDecision { enabled: true, families_mask: FAMILY_XBOX, use_shm_bridge: false }
+            SteamInputDecision { enabled: true, families_mask: FAMILY_XBOX, use_shm_bridge: true }
         );
 
         // All global families disabled -> Default and Enable both stay disabled.
@@ -1867,5 +1944,30 @@ mod tests {
         assert_eq!(pads[0].id, "linux-event0");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shm_publish_gate_publishes_unbacked_xbox_pads_without_duplicating_real_xinput() {
+        let all = FamilyToggles::default();
+        // 1 real native XInput pad + 1 HID Xbox-classified pad enumerated FIRST:
+        // the HID pad must be published and must NOT consume the native XInput skip!
+        let mut skipped = 0;
+        assert!(should_publish_to_shm(ControllerFamily::Xbox, true, &all, 1, &mut skipped));
+        assert_eq!(skipped, 0);
+        assert!(!should_publish_to_shm(ControllerFamily::Xbox, false, &all, 1, &mut skipped));
+        assert_eq!(skipped, 1);
+        assert!(should_publish_to_shm(ControllerFamily::Xbox, false, &all, 1, &mut skipped));
+        assert!(should_publish_to_shm(ControllerFamily::PlayStation, true, &all, 1, &mut skipped));
+
+        // 0 real native XInput pads connected: Xbox-classified pad is published.
+        let mut skipped_zero = 0;
+        assert!(should_publish_to_shm(ControllerFamily::Xbox, false, &all, 0, &mut skipped_zero));
+        assert_eq!(skipped_zero, 0);
+
+        // Disabled family stays blocked.
+        let no_xbox = FamilyToggles { xbox: false, ..all };
+        let mut skipped_off = 0;
+        assert!(!should_publish_to_shm(ControllerFamily::Xbox, true, &no_xbox, 0, &mut skipped_off));
+        assert!(should_publish_to_shm(ControllerFamily::SwitchPro, true, &no_xbox, 0, &mut skipped_off));
     }
 }

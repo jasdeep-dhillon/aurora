@@ -173,6 +173,66 @@ pub fn vk_format_is_linear_out(vk_format: i32) -> bool {
     matches!(vk_format, 43 | 50 | 57 | 97)
 }
 
+/// Validate RGBA texture upload dimensions and buffer length using checked
+/// arithmetic. Returns `Some((row_bytes, total_bytes))` when valid.
+pub fn validate_tex_rgba(size: [u32; 2], rgba_len: usize) -> Option<(usize, usize)> {
+    let [w, h] = size;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let row_bytes = (w as usize).checked_mul(4)?;
+    let total_bytes = row_bytes.checked_mul(h as usize)?;
+    if rgba_len < total_bytes {
+        return None;
+    }
+    Some((row_bytes, total_bytes))
+}
+
+/// Validate a texture sub-rectangle update without `u32` addition overflow.
+pub fn validate_tex_subrect(pos: [u32; 2], size: [u32; 2], target_size: [u32; 2]) -> bool {
+    let ([px, py], [w, h], [tw, th]) = (pos, size, target_size);
+    px.checked_add(w).is_some_and(|r| r <= tw) && py.checked_add(h).is_some_and(|b| b <= th)
+}
+
+/// Safely grow a GPU upload buffer capacity to the next power of two without
+/// overflowing `usize`.
+pub fn checked_grow_capacity(need: usize, min_cap: usize) -> Option<usize> {
+    need.max(min_cap).checked_next_power_of_two()
+}
+
+/// Validate vertex alignment and checked byte/element totals for a list of
+/// overlay meshes before copying into mapped GPU buffers.
+/// Returns `Some((total_vbytes, total_ibytes))` if every mesh is well-formed.
+pub fn validate_mesh_totals(meshes: &[super::wire::Mesh], vertex_size: usize) -> Option<(usize, usize)> {
+    if vertex_size == 0 {
+        return None;
+    }
+    let mut total_vbytes = 0usize;
+    let mut total_ibytes = 0usize;
+    let mut total_verts = 0usize;
+    let mut total_indices = 0usize;
+    for m in meshes {
+        if m.vertices.len() % vertex_size != 0 {
+            return None;
+        }
+        let vcount = m.vertices.len() / vertex_size;
+        let vcount_u32 = u32::try_from(vcount).ok()?;
+        if m.indices.iter().any(|&idx| idx >= vcount_u32) {
+            return None;
+        }
+        let ib = m.indices.len().checked_mul(4)?;
+        total_vbytes = total_vbytes.checked_add(m.vertices.len())?;
+        total_ibytes = total_ibytes.checked_add(ib)?;
+        total_verts = total_verts.checked_add(vcount)?;
+        total_indices = total_indices.checked_add(m.indices.len())?;
+    }
+    u32::try_from(total_vbytes).ok()?;
+    u32::try_from(total_ibytes).ok()?;
+    i32::try_from(total_verts).ok()?;
+    u32::try_from(total_indices).ok()?;
+    Some((total_vbytes, total_ibytes))
+}
+
 /// Basic SPIR-V binary validation (magic number `0x07230203`, minimum 5-word
 /// header, non-zero bound).
 pub fn validate_spirv(words: &[u32]) -> bool {
@@ -579,5 +639,38 @@ impl FpsCounter {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod sec_validation_tests {
+    use super::*;
+    use super::super::wire::Mesh;
+
+    #[test]
+    fn tex_rgba_and_subrect_reject_overflow_and_short_buffers() {
+        assert_eq!(validate_tex_rgba([4, 4], 64), Some((16, 64)));
+        assert_eq!(validate_tex_rgba([4, 4], 63), None);
+        assert_eq!(validate_tex_rgba([0, 4], 64), None);
+        assert_eq!(validate_tex_rgba([u32::MAX, u32::MAX], 64), None);
+
+        assert!(validate_tex_subrect([4, 4], [4, 4], [8, 8]));
+        assert!(!validate_tex_subrect([5, 4], [4, 4], [8, 8]));
+        assert!(!validate_tex_subrect([u32::MAX, 0], [1, 1], [8, 8]));
+    }
+
+    #[test]
+    fn mesh_totals_reject_misaligned_vertices_and_overflow() {
+        let good = Mesh { texture: 1, clip: [0.0; 4], vertices: vec![0u8; 60], indices: vec![0, 1, 2] };
+        assert_eq!(validate_mesh_totals(&[good], 20), Some((60, 12)));
+
+        let bad_align = Mesh { texture: 1, clip: [0.0; 4], vertices: vec![0u8; 21], indices: vec![0, 1, 2] };
+        assert_eq!(validate_mesh_totals(&[bad_align], 20), None);
+
+        let bad_index = Mesh { texture: 1, clip: [0.0; 4], vertices: vec![0u8; 40], indices: vec![0, 1, 2] };
+        assert_eq!(validate_mesh_totals(&[bad_index], 20), None);
+
+        assert_eq!(checked_grow_capacity(100, 64 * 1024), Some(64 * 1024));
+        assert_eq!(checked_grow_capacity(usize::MAX, 64 * 1024), None);
     }
 }

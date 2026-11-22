@@ -148,12 +148,48 @@ fn jmp_abs(out: &mut Vec<u8>, to: usize) {
     }
 }
 
+/// Follow up to 4 jump stubs starting at `target`, stopping immediately if
+/// `stop(addr)` returns `true` (used to avoid chasing already-installed hooks).
+/// Returns `(resolved_addr, visited_hops)`.
+#[cfg(windows)]
+pub unsafe fn resolve_until(target: *const c_void, mut stop: impl FnMut(usize) -> bool) -> (usize, Vec<usize>) {
+    if target.is_null() {
+        return (0, Vec::new());
+    }
+    let mut p = target as *const u8;
+    let mut hops = Vec::with_capacity(5);
+    for _ in 0..4 {
+        let addr = p as usize;
+        hops.push(addr);
+        if stop(addr) {
+            return (addr, hops);
+        }
+        let b = unsafe { std::slice::from_raw_parts(p, 6) };
+        if b[0] == 0xE9 {
+            let rel = i32::from_le_bytes([b[1], b[2], b[3], b[4]]);
+            p = unsafe { p.add(5).offset(rel as isize) };
+        } else if b[0] == 0xFF && b[1] == 0x25 {
+            let disp = i32::from_le_bytes([b[2], b[3], b[4], b[5]]);
+            let slot = if IS64 { (unsafe { p.add(6).offset(disp as isize) }) as *const usize } else { disp as u32 as usize as *const usize };
+            p = unsafe { slot.read_unaligned() } as *const u8;
+        } else {
+            break;
+        }
+    }
+    let final_addr = p as usize;
+    if hops.last().copied() != Some(final_addr) {
+        hops.push(final_addr);
+    }
+    (final_addr, hops)
+}
+
 /// Point `target` at `detour`. `original` gets the address to call for the
 /// original function before the jump goes live.
 #[cfg(windows)]
 pub unsafe fn install(target: *const c_void, detour: usize, original: impl FnOnce(usize)) -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use windows::Win32::System::Diagnostics::Debug::FlushInstructionCache;
-    use windows::Win32::System::Memory::{PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS, VirtualProtect};
+    use windows::Win32::System::Memory::{MEM_RELEASE, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS, VirtualFree, VirtualProtect};
     use windows::Win32::System::Threading::GetCurrentProcess;
     if target.is_null() {
         return false;
@@ -175,7 +211,6 @@ pub unsafe fn install(target: *const c_void, detour: usize, original: impl FnOnc
         jmp_abs(&mut tramp, detour);
     }
     unsafe { std::ptr::copy_nonoverlapping(tramp.as_ptr(), mem, tramp.len()) };
-    original(mem as usize);
     let jump_to = if IS64 { mem as usize + relay_at } else { detour };
     let rel = (jump_to as isize - (target as isize + 5)) as i32;
     let mut patch = vec![0xE9];
@@ -184,9 +219,20 @@ pub unsafe fn install(target: *const c_void, detour: usize, original: impl FnOnc
     unsafe {
         let mut old = PAGE_PROTECTION_FLAGS(0);
         if VirtualProtect(target as *const c_void, n, PAGE_EXECUTE_READWRITE, &mut old).is_err() {
+            let _ = VirtualFree(mem as *mut c_void, 0, MEM_RELEASE);
             return false;
         }
-        std::ptr::copy_nonoverlapping(patch.as_ptr(), target, n);
+        // Publish trampoline only after VirtualProtect succeeded so callers
+        // never observe a freed trampoline on error.
+        original(mem as usize);
+        if n <= 8 && (target as usize) % 8 == 0 {
+            // Single atomic 8-byte store avoids torn jump writes on concurrent threads.
+            let mut word = (target as *const [u8; 8]).read();
+            word[..n].copy_from_slice(&patch[..n]);
+            (*(target as *const AtomicU64)).store(u64::from_ne_bytes(word), Ordering::SeqCst);
+        } else {
+            std::ptr::copy_nonoverlapping(patch.as_ptr(), target, n);
+        }
         let _ = VirtualProtect(target as *const c_void, n, old, &mut old);
         let _ = FlushInstructionCache(GetCurrentProcess(), Some(target as *const c_void), n);
     }

@@ -157,6 +157,7 @@ pub trait App {
     ///
     /// While the window is hidden, `eframe` runs no egui pass at all (so that no ui state is
     /// disturbed), and calls this via [`egui::Context::run_logic`] instead.
+    /// A detached Wayland root still runs a full egui pass for auxiliary viewports.
     /// You can then still tell that the window is hidden with
     /// [`egui::InputState::viewport`], but the rest of [`egui::Context::input`]
     /// (events, time, …) is that of the last shown frame.
@@ -183,6 +184,13 @@ pub trait App {
     /// Use [`egui::Context::show_viewport_deferred`] to spawn additional viewports (windows).
     /// (A "viewport" in egui means an native OS window).
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut Frame);
+
+    /// Called by the native backend after a full frame has applied its texture updates and frees.
+    ///
+    /// This also runs for a detached root viewport and after child viewport frames.
+    fn post_frame(&mut self, ctx: &egui::Context, frame: &mut Frame) {
+        let _ = (ctx, frame);
+    }
 
     /// Get a handle to the app.
     ///
@@ -735,6 +743,10 @@ pub struct Frame {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) raw_display_handle: Result<RawDisplayHandle, HandleError>,
 
+    /// A single-use token for the next native root window creation.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) window_activation_token: Option<String>,
+
     /// The activation token the windowing system last handed us, waiting to be
     /// taken by the app. See [`Frame::request_activation_token`].
     #[cfg(not(target_arch = "wasm32"))]
@@ -781,6 +793,8 @@ impl Frame {
             window: None,
             #[cfg(not(target_arch = "wasm32"))]
             activation_token: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            window_activation_token: None,
             storage: None,
             #[cfg(feature = "wgpu_no_default_features")]
             wgpu_render_state: None,
@@ -861,6 +875,21 @@ impl Frame {
                 let _ = (self, egui_ctx, title_bar_y, left_margin);
             }
         }
+    }
+
+    /// Whether the native root window is currently attached.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn is_window_attached(&self) -> bool {
+        self.window.is_some()
+    }
+
+    /// Supply a one-shot token when restoring a detached Wayland root window.
+    ///
+    /// Pair this with `ViewportCommand::Visible(true)` for the root viewport.
+    /// Glow consumes the token on its next window creation attempt.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_window_activation_token(&mut self, token: String) {
+        self.window_activation_token = Some(token);
     }
 
     /// Ask the windowing system for a fresh activation token (Linux only).
@@ -1124,3 +1153,21 @@ pub fn set_value<T: serde::Serialize>(storage: &mut dyn Storage, key: &str, valu
 
 /// [`Storage`] key used for app
 pub const APP_KEY: &str = "app";
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incoming_activation_token_is_consumed_once() {
+        let mut frame = Frame::_new_kittest();
+        frame.set_window_activation_token("first".to_owned());
+        frame.set_window_activation_token("latest".to_owned());
+        assert_eq!(
+            frame.window_activation_token.take().as_deref(),
+            Some("latest")
+        );
+        assert!(frame.window_activation_token.take().is_none());
+        assert!(frame.take_activation_token().is_none());
+    }
+}

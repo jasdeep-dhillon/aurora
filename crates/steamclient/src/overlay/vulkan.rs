@@ -739,6 +739,8 @@ mod win_impl {
         vb: Option<VkBuf>,
         ib: Option<VkBuf>,
         staging: Vec<(VkBuffer, VkDeviceMemory)>,
+        last_submit_gen: u64,
+        fence_pending: bool,
     }
 
     struct VkSwapchainRenderer {
@@ -758,6 +760,8 @@ mod win_impl {
         cmd_pool: VkCommandPool,
         slots: Vec<VkFrameSlot>,
         textures: HashMap<u64, VkTex>,
+        submit_gen: u64,
+        retired_tex: Vec<(u64, VkTex)>,
     }
 
     unsafe impl Send for VkSwapchainRenderer {}
@@ -1450,7 +1454,18 @@ mod win_impl {
                     if (fns.create_semaphore)(device, &s_ci, std::ptr::null(), &mut done_sem) != VK_SUCCESS {
                         return None;
                     }
-                    slots.push(VkFrameSlot { view, fb, cmd, fence, done_sem, vb: None, ib: None, staging: Vec::new() });
+                    slots.push(VkFrameSlot {
+                        view,
+                        fb,
+                        cmd,
+                        fence,
+                        done_sem,
+                        vb: None,
+                        ib: None,
+                        staging: Vec::new(),
+                        last_submit_gen: 0,
+                        fence_pending: false,
+                    });
                 }
 
                 Some(Self {
@@ -1470,6 +1485,8 @@ mod win_impl {
                     cmd_pool,
                     slots,
                     textures: HashMap::new(),
+                    submit_gen: 0,
+                    retired_tex: Vec::new(),
                 })
             }
         }
@@ -1492,7 +1509,10 @@ mod win_impl {
                 }
                 let mut req = VkMemoryRequirements::default();
                 (self.fns.get_buffer_memory_requirements)(self.device, buf, &mut req);
-                let mem_type = self.find_mem_type(req.memory_type_bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)?;
+                let Some(mem_type) = self.find_mem_type(req.memory_type_bits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) else {
+                    (self.fns.destroy_buffer)(self.device, buf, std::ptr::null());
+                    return None;
+                };
                 let ai = VkMemoryAllocateInfo {
                     s_type: VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
                     p_next: std::ptr::null(),
@@ -1519,49 +1539,80 @@ mod win_impl {
             }
         }
 
+        unsafe fn destroy_tex(&self, t: VkTex) {
+            unsafe {
+                let _ = (self.fns.free_descriptor_sets)(self.device, self.ds_pool, 1, &t.set);
+                (self.fns.destroy_image_view)(self.device, t.view, std::ptr::null());
+                (self.fns.destroy_image)(self.device, t.image, std::ptr::null());
+                (self.fns.free_memory)(self.device, t.mem, std::ptr::null());
+            }
+        }
+
+        /// Reclaim retired textures once every pending swapchain slot that could
+        /// reference them has finished executing on the GPU.
+        unsafe fn reclaim_retired_textures(&mut self) {
+            let min_pending = self
+                .slots
+                .iter()
+                .filter(|s| s.fence_pending)
+                .map(|s| s.last_submit_gen)
+                .min_by(|a, b| (a.wrapping_sub(*b) as i64).cmp(&0));
+            let mut i = 0;
+            while i < self.retired_tex.len() {
+                let safe = match min_pending {
+                    None => true,
+                    Some(min_gen) => (min_gen.wrapping_sub(self.retired_tex[i].0) as i64) > 0,
+                };
+                if safe {
+                    let (_, t) = self.retired_tex.swap_remove(i);
+                    unsafe { self.destroy_tex(t) };
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
         unsafe fn apply_tex_op(&mut self, cmd: VkCommandBuffer, op: TexOp, staging: &mut Vec<(VkBuffer, VkDeviceMemory)>) {
+            // Tag retirements with the generation of the batch currently being
+            // recorded (submit_gen + 1) so an upload and free/replace in the
+            // same batch cannot be reclaimed while this batch is still pending.
+            let retire_gen = self.submit_gen.wrapping_add(1);
             match op {
                 TexOp::Free(id) => {
                     if let Some(t) = self.textures.remove(&id) {
-                        unsafe {
-                            let _ = (self.fns.free_descriptor_sets)(self.device, self.ds_pool, 1, &t.set);
-                            (self.fns.destroy_image_view)(self.device, t.view, std::ptr::null());
-                            (self.fns.destroy_image)(self.device, t.image, std::ptr::null());
-                            (self.fns.free_memory)(self.device, t.mem, std::ptr::null());
-                        }
+                        self.retired_tex.push((retire_gen, t));
                     }
                 }
                 TexOp::Set(t) => unsafe {
                     let [w, h] = t.size;
-                    if w == 0 || h == 0 {
+                    let Some((_, needed)) = util::validate_tex_rgba(t.size, t.rgba.len()) else {
                         return;
+                    };
+                    if let Some([px, py]) = t.pos {
+                        let Some(tex) = self.textures.get(&t.id) else { return };
+                        if !util::validate_tex_subrect([px, py], t.size, tex.size) {
+                            return;
+                        }
                     }
-                    let Some(sb) = self.create_host_buffer(t.rgba.len(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT) else { return };
-                    std::ptr::copy_nonoverlapping(t.rgba.as_ptr(), sb.mapped, t.rgba.len());
+                    let Some(sb) = self.create_host_buffer(needed, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) else { return };
+                    std::ptr::copy_nonoverlapping(t.rgba.as_ptr(), sb.mapped, needed);
                     (self.fns.unmap_memory)(self.device, sb.mem);
+
+                    let free_sb = |fns: &VkDevFns, dev: VkDevice, sb: &VkBuf| {
+                        (fns.destroy_buffer)(dev, sb.buf, std::ptr::null());
+                        (fns.free_memory)(dev, sb.mem, std::ptr::null());
+                    };
 
                     let (dst_img, dx, dy, old_layout) = match t.pos {
                         Some([px, py]) => {
                             let Some(tex) = self.textures.get_mut(&t.id) else {
-                                (self.fns.destroy_buffer)(self.device, sb.buf, std::ptr::null());
-                                (self.fns.free_memory)(self.device, sb.mem, std::ptr::null());
+                                free_sb(&self.fns, self.device, &sb);
                                 return;
                             };
-                            if px + w > tex.size[0] || py + h > tex.size[1] {
-                                (self.fns.destroy_buffer)(self.device, sb.buf, std::ptr::null());
-                                (self.fns.free_memory)(self.device, sb.mem, std::ptr::null());
-                                return;
-                            }
                             tex.linear = t.linear;
                             (tex.image, px as i32, py as i32, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
                         }
                         None => {
-                            if let Some(old) = self.textures.remove(&t.id) {
-                                let _ = (self.fns.free_descriptor_sets)(self.device, self.ds_pool, 1, &old.set);
-                                (self.fns.destroy_image_view)(self.device, old.view, std::ptr::null());
-                                (self.fns.destroy_image)(self.device, old.image, std::ptr::null());
-                                (self.fns.free_memory)(self.device, old.mem, std::ptr::null());
-                            }
                             let ic = VkImageCreateInfo {
                                 s_type: VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
                                 p_next: std::ptr::null(),
@@ -1581,11 +1632,16 @@ mod win_impl {
                             };
                             let mut image = 0;
                             if (self.fns.create_image)(self.device, &ic, std::ptr::null(), &mut image) != VK_SUCCESS {
+                                free_sb(&self.fns, self.device, &sb);
                                 return;
                             }
                             let mut req = VkMemoryRequirements::default();
                             (self.fns.get_image_memory_requirements)(self.device, image, &mut req);
-                            let Some(mem_type) = self.find_mem_type(req.memory_type_bits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) else { return };
+                            let Some(mem_type) = self.find_mem_type(req.memory_type_bits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) else {
+                                (self.fns.destroy_image)(self.device, image, std::ptr::null());
+                                free_sb(&self.fns, self.device, &sb);
+                                return;
+                            };
                             let ai = VkMemoryAllocateInfo {
                                 s_type: VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
                                 p_next: std::ptr::null(),
@@ -1594,9 +1650,14 @@ mod win_impl {
                             };
                             let mut mem = 0;
                             if (self.fns.allocate_memory)(self.device, &ai, std::ptr::null(), &mut mem) != VK_SUCCESS {
+                                (self.fns.destroy_image)(self.device, image, std::ptr::null());
+                                free_sb(&self.fns, self.device, &sb);
                                 return;
                             }
                             if (self.fns.bind_image_memory)(self.device, image, mem, 0) != VK_SUCCESS {
+                                (self.fns.free_memory)(self.device, mem, std::ptr::null());
+                                (self.fns.destroy_image)(self.device, image, std::ptr::null());
+                                free_sb(&self.fns, self.device, &sb);
                                 return;
                             }
                             let iv_ci = VkImageViewCreateInfo {
@@ -1617,6 +1678,9 @@ mod win_impl {
                             };
                             let mut view = 0;
                             if (self.fns.create_image_view)(self.device, &iv_ci, std::ptr::null(), &mut view) != VK_SUCCESS {
+                                (self.fns.free_memory)(self.device, mem, std::ptr::null());
+                                (self.fns.destroy_image)(self.device, image, std::ptr::null());
+                                free_sb(&self.fns, self.device, &sb);
                                 return;
                             }
                             let ds_ai = VkDescriptorSetAllocateInfo {
@@ -1628,6 +1692,10 @@ mod win_impl {
                             };
                             let mut set = 0;
                             if (self.fns.allocate_descriptor_sets)(self.device, &ds_ai, &mut set) != VK_SUCCESS {
+                                (self.fns.destroy_image_view)(self.device, view, std::ptr::null());
+                                (self.fns.free_memory)(self.device, mem, std::ptr::null());
+                                (self.fns.destroy_image)(self.device, image, std::ptr::null());
+                                free_sb(&self.fns, self.device, &sb);
                                 return;
                             }
                             let di = VkDescriptorImageInfo {
@@ -1648,7 +1716,9 @@ mod win_impl {
                                 p_texel_buffer_view: std::ptr::null(),
                             };
                             (self.fns.update_descriptor_sets)(self.device, 1, &wds, 0, std::ptr::null());
-                            self.textures.insert(t.id, VkTex { image, mem, view, set, size: t.size, linear: t.linear });
+                            if let Some(old) = self.textures.insert(t.id, VkTex { image, mem, view, set, size: t.size, linear: t.linear }) {
+                                self.retired_tex.push((retire_gen, old));
+                            }
                             (image, 0, 0, VK_IMAGE_LAYOUT_UNDEFINED)
                         }
                     };
@@ -1727,8 +1797,13 @@ mod win_impl {
                 let fb = self.slots[img_idx].fb;
                 let done_sem = self.slots[img_idx].done_sem;
 
-                (self.fns.wait_for_fences)(self.device, 1, &fence, VK_TRUE, u64::MAX);
-                (self.fns.reset_fences)(self.device, 1, &fence);
+                if self.slots[img_idx].fence_pending {
+                    if (self.fns.wait_for_fences)(self.device, 1, &fence, VK_TRUE, u64::MAX) != VK_SUCCESS {
+                        return None;
+                    }
+                    self.slots[img_idx].fence_pending = false;
+                }
+                self.reclaim_retired_textures();
                 for (b, m) in self.slots[img_idx].staging.drain(..) {
                     (self.fns.destroy_buffer)(self.device, b, std::ptr::null());
                     (self.fns.free_memory)(self.device, m, std::ptr::null());
@@ -1749,92 +1824,93 @@ mod win_impl {
                     self.apply_tex_op(cmd, op, &mut staging);
                 }
 
-                if let Some(frame) = frame.filter(|f| !f.meshes.is_empty()) {
-                    let vbytes: usize = frame.meshes.iter().map(|m| m.vertices.len()).sum();
-                    let ibytes: usize = frame.meshes.iter().map(|m| m.indices.len() * 4).sum();
-                    if vbytes > 0 && ibytes > 0 {
-                        let mut vb_opt = self.slots[img_idx].vb.take();
-                        let mut ib_opt = self.slots[img_idx].ib.take();
-                        let ensure_buf = |slot: &mut Option<VkBuf>, need: usize, usage: VkFlags| -> Option<(VkBuffer, *mut u8)> {
-                            if let Some(b) = slot.as_ref().filter(|b| b.cap >= need) {
-                                return Some((b.buf, b.mapped));
-                            }
-                            if let Some(old) = slot.take() {
-                                (self.fns.unmap_memory)(self.device, old.mem);
-                                (self.fns.destroy_buffer)(self.device, old.buf, std::ptr::null());
-                                (self.fns.free_memory)(self.device, old.mem, std::ptr::null());
-                            }
-                            let b = self.create_host_buffer(need.next_power_of_two().max(64 * 1024), usage)?;
-                            let res = (b.buf, b.mapped);
-                            *slot = Some(b);
-                            Some(res)
-                        };
-                        let vb_pair = ensure_buf(&mut vb_opt, vbytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-                        let ib_pair = ensure_buf(&mut ib_opt, ibytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-                        self.slots[img_idx].vb = vb_opt;
-                        self.slots[img_idx].ib = ib_opt;
-
-                        if let (Some((vb, vptr)), Some((ib, iptr))) = (vb_pair, ib_pair) {
-                            let (mut vat, mut iat) = (vptr, iptr);
-                            for m in &frame.meshes {
-                                std::ptr::copy_nonoverlapping(m.vertices.as_ptr(), vat, m.vertices.len());
-                                vat = vat.add(m.vertices.len());
-                                let ilen = m.indices.len() * 4;
-                                std::ptr::copy_nonoverlapping(m.indices.as_ptr() as *const u8, iat, ilen);
-                                iat = iat.add(ilen);
-                            }
-
-                            let rp_bi = VkRenderPassBeginInfo {
-                                s_type: VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-                                p_next: std::ptr::null(),
-                                render_pass: self.render_pass,
-                                framebuffer: fb,
-                                render_area: VkRect2D {
-                                    offset: VkOffset2D { x: 0, y: 0 },
-                                    extent: VkExtent2D { width: self.size.0, height: self.size.1 },
-                                },
-                                clear_value_count: 0,
-                                p_clear_values: std::ptr::null(),
-                            };
-                            (self.fns.cmd_begin_render_pass)(cmd, &rp_bi, 0);
-                            (self.fns.cmd_bind_pipeline)(cmd, 0, self.pipeline);
-                            let vp = VkViewport { x: 0.0, y: 0.0, width: self.size.0 as f32, height: self.size.1 as f32, min_depth: 0.0, max_depth: 1.0 };
-                            (self.fns.cmd_set_viewport)(cmd, 0, 1, &vp);
-                            let zero_off: VkDeviceSize = 0;
-                            (self.fns.cmd_bind_vertex_buffers)(cmd, 0, 1, &vb, &zero_off);
-                            (self.fns.cmd_bind_index_buffer)(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
-
-                            let ppp = frame.pixels_per_point.max(0.1);
-                            let push = [self.size.0 as f32 / ppp, self.size.1 as f32 / ppp, if self.linear_out { 1.0 } else { 0.0 }, 0.0f32];
-                            (self.fns.cmd_push_constants)(
-                                cmd,
-                                self.pipe_layout,
-                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                0,
-                                16,
-                                push.as_ptr().cast(),
-                            );
-
-                            let (mut first_index, mut base_vertex) = (0u32, 0i32);
-                            for m in &frame.meshes {
-                                let count = m.indices.len() as u32;
-                                let verts = (m.vertices.len() / VERTEX_SIZE) as i32;
-                                if let Some([left, top, right, bottom]) = util::clip_rect_pixels(m.clip, ppp, self.size.0, self.size.1) {
-                                    if let Some(tex) = self.textures.get(&m.texture).filter(|_| count > 0) {
-                                        let sc = VkRect2D {
-                                            offset: VkOffset2D { x: left, y: top },
-                                            extent: VkExtent2D { width: (right - left) as u32, height: (bottom - top) as u32 },
-                                        };
-                                        (self.fns.cmd_set_scissor)(cmd, 0, 1, &sc);
-                                        (self.fns.cmd_bind_descriptor_sets)(cmd, 0, self.pipe_layout, 0, 1, &tex.set, 0, std::ptr::null());
-                                        (self.fns.cmd_draw_indexed)(cmd, count, 1, first_index, base_vertex, 0);
-                                    }
-                                }
-                                first_index += count;
-                                base_vertex += verts;
-                            }
-                            (self.fns.cmd_end_render_pass)(cmd);
+                if let Some(frame) = frame.filter(|f| !f.meshes.is_empty())
+                    && let Some((vbytes, ibytes)) = util::validate_mesh_totals(&frame.meshes, VERTEX_SIZE)
+                    && vbytes > 0
+                    && ibytes > 0
+                {
+                    let mut vb_opt = self.slots[img_idx].vb.take();
+                    let mut ib_opt = self.slots[img_idx].ib.take();
+                    let ensure_buf = |slot: &mut Option<VkBuf>, need: usize, usage: VkFlags| -> Option<(VkBuffer, *mut u8)> {
+                        if let Some(b) = slot.as_ref().filter(|b| b.cap >= need) {
+                            return Some((b.buf, b.mapped));
                         }
+                        let cap = util::checked_grow_capacity(need, 64 * 1024)?;
+                        if let Some(old) = slot.take() {
+                            (self.fns.unmap_memory)(self.device, old.mem);
+                            (self.fns.destroy_buffer)(self.device, old.buf, std::ptr::null());
+                            (self.fns.free_memory)(self.device, old.mem, std::ptr::null());
+                        }
+                        let b = self.create_host_buffer(cap, usage)?;
+                        let res = (b.buf, b.mapped);
+                        *slot = Some(b);
+                        Some(res)
+                    };
+                    let vb_pair = ensure_buf(&mut vb_opt, vbytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+                    let ib_pair = ensure_buf(&mut ib_opt, ibytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+                    self.slots[img_idx].vb = vb_opt;
+                    self.slots[img_idx].ib = ib_opt;
+
+                    if let (Some((vb, vptr)), Some((ib, iptr))) = (vb_pair, ib_pair) {
+                        let (mut vat, mut iat) = (vptr, iptr);
+                        for m in &frame.meshes {
+                            std::ptr::copy_nonoverlapping(m.vertices.as_ptr(), vat, m.vertices.len());
+                            vat = vat.add(m.vertices.len());
+                            let ilen = m.indices.len() * 4;
+                            std::ptr::copy_nonoverlapping(m.indices.as_ptr() as *const u8, iat, ilen);
+                            iat = iat.add(ilen);
+                        }
+
+                        let rp_bi = VkRenderPassBeginInfo {
+                            s_type: VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                            p_next: std::ptr::null(),
+                            render_pass: self.render_pass,
+                            framebuffer: fb,
+                            render_area: VkRect2D {
+                                offset: VkOffset2D { x: 0, y: 0 },
+                                extent: VkExtent2D { width: self.size.0, height: self.size.1 },
+                            },
+                            clear_value_count: 0,
+                            p_clear_values: std::ptr::null(),
+                        };
+                        (self.fns.cmd_begin_render_pass)(cmd, &rp_bi, 0);
+                        (self.fns.cmd_bind_pipeline)(cmd, 0, self.pipeline);
+                        let vp = VkViewport { x: 0.0, y: 0.0, width: self.size.0 as f32, height: self.size.1 as f32, min_depth: 0.0, max_depth: 1.0 };
+                        (self.fns.cmd_set_viewport)(cmd, 0, 1, &vp);
+                        let zero_off: VkDeviceSize = 0;
+                        (self.fns.cmd_bind_vertex_buffers)(cmd, 0, 1, &vb, &zero_off);
+                        (self.fns.cmd_bind_index_buffer)(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
+
+                        let ppp = frame.pixels_per_point.max(0.1);
+                        let push = [self.size.0 as f32 / ppp, self.size.1 as f32 / ppp, if self.linear_out { 1.0 } else { 0.0 }, 0.0f32];
+                        (self.fns.cmd_push_constants)(
+                            cmd,
+                            self.pipe_layout,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                            0,
+                            16,
+                            push.as_ptr().cast(),
+                        );
+
+                        let (mut first_index, mut base_vertex) = (0u32, 0i32);
+                        for m in &frame.meshes {
+                            let count = m.indices.len() as u32;
+                            let verts = (m.vertices.len() / VERTEX_SIZE) as i32;
+                            if let Some([left, top, right, bottom]) = util::clip_rect_pixels(m.clip, ppp, self.size.0, self.size.1) {
+                                if let Some(tex) = self.textures.get(&m.texture).filter(|_| count > 0) {
+                                    let sc = VkRect2D {
+                                        offset: VkOffset2D { x: left, y: top },
+                                        extent: VkExtent2D { width: (right - left) as u32, height: (bottom - top) as u32 },
+                                    };
+                                    (self.fns.cmd_set_scissor)(cmd, 0, 1, &sc);
+                                    (self.fns.cmd_bind_descriptor_sets)(cmd, 0, self.pipe_layout, 0, 1, &tex.set, 0, std::ptr::null());
+                                    (self.fns.cmd_draw_indexed)(cmd, count, 1, first_index, base_vertex, 0);
+                                }
+                            }
+                            first_index += count;
+                            base_vertex += verts;
+                        }
+                        (self.fns.cmd_end_render_pass)(cmd);
                     }
                 }
 
@@ -1862,9 +1938,15 @@ mod win_impl {
                     signal_semaphore_count: 1,
                     p_signal_semaphores: &done_sem,
                 };
+                if (self.fns.reset_fences)(self.device, 1, &fence) != VK_SUCCESS {
+                    return None;
+                }
                 if (self.fns.queue_submit)(queue, 1, &si, fence) != VK_SUCCESS {
                     return None;
                 }
+                self.submit_gen = self.submit_gen.wrapping_add(1);
+                self.slots[img_idx].last_submit_gen = self.submit_gen;
+                self.slots[img_idx].fence_pending = true;
                 Some(done_sem)
             }
         }
@@ -1872,11 +1954,13 @@ mod win_impl {
         unsafe fn destroy(&mut self) {
             unsafe {
                 let _ = (self.fns.device_wait_idle)(self.device);
-                for (_, t) in self.textures.drain() {
-                    let _ = (self.fns.free_descriptor_sets)(self.device, self.ds_pool, 1, &t.set);
-                    (self.fns.destroy_image_view)(self.device, t.view, std::ptr::null());
-                    (self.fns.destroy_image)(self.device, t.image, std::ptr::null());
-                    (self.fns.free_memory)(self.device, t.mem, std::ptr::null());
+                let textures = std::mem::take(&mut self.textures);
+                for (_, t) in textures {
+                    self.destroy_tex(t);
+                }
+                let retired = std::mem::take(&mut self.retired_tex);
+                for (_, t) in retired {
+                    self.destroy_tex(t);
                 }
                 for s in self.slots.drain(..) {
                     for (b, m) in s.staging {

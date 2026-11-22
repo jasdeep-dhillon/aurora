@@ -4,8 +4,8 @@
 //! only raises a window for an XDG activation token, and the tray host (GNOME's
 //! AppIndicator extension, KDE) hands one over with each click. This sends
 //! `xdg_activation_v1.activate(token, surface)` for winit's own surface, on
-//! winit's Wayland connection but with an event queue of its own, so it works
-//! from the tray thread even while the window isn't painting.
+//! winit's Wayland connection with an event queue of its own. The surface is
+//! resolved from the current frame each time so remapping can replace it.
 
 use std::ffi::c_void;
 use wayland_backend::client::{Backend, ObjectId};
@@ -16,7 +16,6 @@ use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActiva
 
 pub struct Activator {
     conn: Connection,
-    surface: WlSurface,
     activation: XdgActivationV1,
     _queue: EventQueue<State>,
 }
@@ -32,33 +31,43 @@ impl Dispatch<XdgActivationV1, ()> for State {
 }
 
 impl Activator {
-    /// The main window's Wayland handles, or `None` on X11 (or when the
-    /// compositor has no xdg-activation).
-    pub fn new(window: &impl raw_window_handle::HasWindowHandle, display: &impl raw_window_handle::HasDisplayHandle) -> Option<Self> {
-        use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+    /// Bind xdg-activation on the display connection shared with winit.
+    pub fn new(display: &impl raw_window_handle::HasDisplayHandle) -> Option<Self> {
+        use raw_window_handle::RawDisplayHandle;
         let RawDisplayHandle::Wayland(d) = display.display_handle().ok()?.as_raw() else {
             return None;
         };
-        let RawWindowHandle::Wayland(w) = window.window_handle().ok()?.as_raw() else {
-            return None;
-        };
-        // SAFETY: both come from the root window, which lives as long as the app.
-        unsafe { Self::from_ptrs(d.display.as_ptr(), w.surface.as_ptr()) }.map_err(|e| tracing::warn!("Wayland activation unavailable: {e}")).ok()
+        // SAFETY: winit owns the display for the lifetime of the app, including
+        // while its root window is detached. This backend does not own the display.
+        unsafe { Self::from_display(d.display.as_ptr()) }.map_err(|e| tracing::warn!("Wayland activation unavailable: {e}")).ok()
     }
 
-    unsafe fn from_ptrs(display: *mut c_void, surface: *mut c_void) -> Result<Self, String> {
+    unsafe fn from_display(display: *mut c_void) -> Result<Self, String> {
         let backend = unsafe { Backend::from_foreign_display(display.cast()) };
         let conn = Connection::from_backend(backend);
         let (globals, queue) = registry_queue_init::<State>(&conn).map_err(|e| e.to_string())?;
         let activation: XdgActivationV1 = globals.bind(&queue.handle(), 1..=1, ()).map_err(|e| e.to_string())?;
-        let id = unsafe { ObjectId::from_ptr(WlSurface::interface(), surface.cast()) }.map_err(|e| e.to_string())?;
-        let surface = WlSurface::from_id(&conn, id).map_err(|e| e.to_string())?;
-        Ok(Self { conn, surface, activation, _queue: queue })
+        Ok(Self { conn, activation, _queue: queue })
     }
 
     /// Ask the compositor to raise (and un-minimize) the window.
-    pub fn activate(&self, token: &str) {
-        self.activation.activate(token.to_owned(), &self.surface);
+    pub fn activate(&self, frame: &eframe::Frame, token: &str) {
+        use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+
+        let Ok(handle) = frame.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::Wayland(handle) = handle.as_raw() else {
+            return;
+        };
+        // SAFETY: the borrowed frame keeps the current Wayland window alive.
+        let Ok(id) = (unsafe { ObjectId::from_ptr(WlSurface::interface(), handle.surface.as_ptr().cast()) }) else {
+            return;
+        };
+        let Ok(surface) = WlSurface::from_id(&self.conn, id) else {
+            return;
+        };
+        self.activation.activate(token.to_owned(), &surface);
         if let Err(e) = self.conn.flush() {
             tracing::warn!("Wayland activation failed: {e}");
         }

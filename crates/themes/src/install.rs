@@ -13,6 +13,12 @@ use crate::tree::LayoutTree;
 pub const MAX_UNCOMPRESSED_BYTES: u64 = 50 * 1024 * 1024;
 /// Maximum number of files allowed in a theme package.
 pub const MAX_FILE_COUNT: usize = 500;
+/// Maximum total visited entries (files, dirs, skipped symlinks) during folder import.
+pub const MAX_ENTRY_COUNT: usize = 2_000;
+/// Maximum directory nesting depth when copying a local theme folder.
+pub const MAX_COPY_DEPTH: usize = 32;
+/// Maximum size of a `theme.toml` or `layout.toml` document (1 MiB).
+pub const MAX_TOML_BYTES: u64 = crate::tree::MAX_LAYOUT_TOML_BYTES as u64;
 
 /// Safely validate (`theme.toml` + `layout.toml` if present) and atomically
 /// install a `.zip` theme package into `themes_dir`.
@@ -136,6 +142,7 @@ pub fn install_zip(zip_path: &Path, themes_dir: &Path) -> Result<ThemeMeta, Erro
 
     let extract_res = (|| -> Result<(), Error> {
         let mut total_written = 0u64;
+        let mut seen_rel_lower: HashSet<String> = HashSet::new();
         for (idx, enclosed, is_dir) in &entry_paths {
             let rel = match &strip_prefix {
                 Some(prefix) => match enclosed.strip_prefix(prefix) {
@@ -152,6 +159,13 @@ pub fn install_zip(zip_path: &Path, themes_dir: &Path) -> Result<ThemeMeta, Erro
                 fs::create_dir_all(&out_path)?;
                 continue;
             }
+            let norm_key = rel.to_string_lossy().replace('\\', "/").to_lowercase();
+            if !seen_rel_lower.insert(norm_key) {
+                return Err(Error::UnsafePath(format!(
+                    "duplicate or case-colliding archive entry '{}'",
+                    rel.display()
+                )));
+            }
             if let Some(parent) = out_path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -166,6 +180,19 @@ pub fn install_zip(zip_path: &Path, themes_dir: &Path) -> Result<ThemeMeta, Erro
                     MAX_UNCOMPRESSED_BYTES / (1024 * 1024)
                 )));
             }
+        }
+        // Re-validate the extracted staged manifest and layout before publishing.
+        let staged_manifest_text = crate::read_bounded_text(&tmp_dir.join("theme.toml"), MAX_TOML_BYTES)?;
+        let staged_manifest = ThemeManifest::parse(&staged_manifest_text)?;
+        if staged_manifest.meta.id != manifest.meta.id {
+            return Err(Error::InvalidManifest("staged theme id mismatch".into()));
+        }
+        let staged_layout_rel = staged_manifest.layout_file.as_deref().unwrap_or("layout.toml");
+        if let Some(staged_layout_path) = crate::manifest::safe_rel_path(&tmp_dir, staged_layout_rel)
+            && staged_layout_path.is_file()
+        {
+            let staged_layout_text = crate::read_bounded_text(&staged_layout_path, MAX_TOML_BYTES)?;
+            LayoutTree::parse(&staged_layout_text).map_err(Error::InvalidLayout)?;
         }
         Ok(())
     })();
@@ -182,18 +209,22 @@ pub fn install_zip(zip_path: &Path, themes_dir: &Path) -> Result<ThemeMeta, Erro
 /// Validate a local theme folder (`theme.toml` + `layout.toml` if present) and
 /// copy it atomically into `themes_dir/<id>`.
 pub fn install_folder(src_dir: &Path, themes_dir: &Path) -> Result<ThemeMeta, Error> {
+    let src_meta = fs::symlink_metadata(src_dir)?;
+    if src_meta.file_type().is_symlink() || !src_meta.is_dir() {
+        return Err(Error::UnsafePath(src_dir.display().to_string()));
+    }
     let manifest_path = src_dir.join("theme.toml");
     if !manifest_path.is_file() {
         return Err(Error::MissingManifest);
     }
-    let manifest_text = fs::read_to_string(&manifest_path)?;
+    let manifest_text = crate::read_bounded_text(&manifest_path, MAX_TOML_BYTES)?;
     let manifest = ThemeManifest::parse(&manifest_text)?;
 
     let layout_rel = manifest.layout_file.as_deref().unwrap_or("layout.toml");
     let layout_path = crate::manifest::safe_rel_path(src_dir, layout_rel)
         .ok_or_else(|| Error::UnsafePath(layout_rel.to_string()))?;
     if layout_path.is_file() {
-        let layout_text = fs::read_to_string(&layout_path)?;
+        let layout_text = crate::read_bounded_text(&layout_path, MAX_TOML_BYTES)?;
         LayoutTree::parse(&layout_text).map_err(Error::InvalidLayout)?;
     }
 
@@ -204,9 +235,10 @@ pub fn install_folder(src_dir: &Path, themes_dir: &Path) -> Result<ThemeMeta, Er
     }
     fs::create_dir_all(&tmp_dir)?;
 
+    let mut entry_count = 0usize;
     let mut file_count = 0usize;
     let mut total_bytes = 0u64;
-    if let Err(e) = copy_dir_safe(src_dir, &tmp_dir, &mut file_count, &mut total_bytes) {
+    if let Err(e) = copy_dir_safe(src_dir, &tmp_dir, 0, &mut entry_count, &mut file_count, &mut total_bytes) {
         let _ = fs::remove_dir_all(&tmp_dir);
         return Err(e);
     }
@@ -227,12 +259,18 @@ pub fn uninstall_theme(themes_dir: &Path, id: &str) -> Result<(), Error> {
 
 fn read_zip_string(archive: &mut zip::ZipArchive<File>, idx: usize) -> Result<String, Error> {
     let mut entry = archive.by_index(idx)?;
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     entry
         .by_ref()
-        .take(2 * 1024 * 1024)
-        .read_to_string(&mut buf)?;
-    Ok(buf)
+        .take(MAX_TOML_BYTES + 1)
+        .read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_TOML_BYTES {
+        return Err(Error::PackageLimit(format!(
+            "theme document exceeds maximum size of {} bytes",
+            MAX_TOML_BYTES
+        )));
+    }
+    String::from_utf8(buf).map_err(|e| Error::Io(io::Error::new(io::ErrorKind::InvalidData, e)))
 }
 
 fn commit_tmp_dir(tmp_dir: &Path, final_dir: &Path) -> Result<(), Error> {
@@ -250,10 +288,23 @@ fn is_unix_symlink(entry: &zip::read::ZipFile<'_, File>) -> bool {
 fn copy_dir_safe(
     src: &Path,
     dst: &Path,
+    depth: usize,
+    entry_count: &mut usize,
     file_count: &mut usize,
     total_bytes: &mut u64,
 ) -> Result<(), Error> {
+    if depth > MAX_COPY_DEPTH {
+        return Err(Error::PackageLimit(format!(
+            "package exceeds maximum directory nesting depth of {MAX_COPY_DEPTH}"
+        )));
+    }
     for entry in fs::read_dir(src)? {
+        *entry_count += 1;
+        if *entry_count > MAX_ENTRY_COUNT {
+            return Err(Error::PackageLimit(format!(
+                "package exceeds maximum of {MAX_ENTRY_COUNT} entries"
+            )));
+        }
         let entry = entry?;
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
@@ -261,12 +312,35 @@ fn copy_dir_safe(
         }
         let target = dst.join(entry.file_name());
         if file_type.is_dir() {
-            fs::create_dir_all(&target)?;
-            copy_dir_safe(&entry.path(), &target, file_count, total_bytes)?;
-        } else if file_type.is_file() {
             let meta = fs::symlink_metadata(entry.path())?;
-            if meta.file_type().is_symlink() || !meta.is_file() {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
                 continue;
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if (meta.file_attributes() & 0x0400) != 0 {
+                    continue;
+                }
+            }
+            fs::create_dir_all(&target)?;
+            copy_dir_safe(&entry.path(), &target, depth + 1, entry_count, file_count, total_bytes)?;
+        } else if file_type.is_file() {
+            let src_file = match crate::open_regular_no_symlinks(&entry.path()) {
+                Ok(f) => f,
+                Err(Error::UnsafePath(_)) => continue,
+                Err(e) => return Err(e),
+            };
+            let fmeta = src_file.metadata()?;
+            if !fmeta.is_file() {
+                continue;
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if (fmeta.file_attributes() & 0x0400) != 0 {
+                    continue;
+                }
             }
             *file_count += 1;
             if *file_count > MAX_FILE_COUNT {
@@ -274,14 +348,16 @@ fn copy_dir_safe(
                     "package exceeds maximum of {MAX_FILE_COUNT} files"
                 )));
             }
-            *total_bytes = total_bytes.saturating_add(meta.len());
+            let mut out = File::create(&target)?;
+            let remaining = MAX_UNCOMPRESSED_BYTES.saturating_sub(*total_bytes);
+            let copied = io::copy(&mut src_file.take(remaining + 1), &mut out)?;
+            *total_bytes = total_bytes.saturating_add(copied);
             if *total_bytes > MAX_UNCOMPRESSED_BYTES {
                 return Err(Error::PackageLimit(format!(
                     "package exceeds maximum uncompressed size of {} MiB",
                     MAX_UNCOMPRESSED_BYTES / (1024 * 1024)
                 )));
             }
-            fs::copy(entry.path(), &target)?;
         }
     }
     Ok(())

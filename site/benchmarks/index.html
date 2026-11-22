@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Aurora vs Steam Benchmarks on Linux — RAM, CPU &amp; Startup | Aurora Steam Client</title>
+<meta name="description" content="Linux benchmarks comparing Aurora Steam Client against the official Chromium-based Steam client: 166 MB vs 1,408 MB idle RAM, 0.2% vs 18% idle CPU, 1 vs 16 processes, and 0.14 s first window.">
+<meta name="theme-color" content="#161D25">
+<link rel="canonical" href="https://mollie2999.github.io/Aurora/benchmarks/">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Aurora Steam Client">
+<meta property="og:title" content="Aurora vs Official Steam Benchmarks on Linux (RAM, CPU &amp; Startup)">
+<meta property="og:description" content="Measured on the same Linux PC and account: 166 MB vs 1,408 MB idle RAM, 0.2% vs 18% idle CPU, 1 process vs 16, and 46 MB vs 2,129 MB install size.">
+<meta property="og:image" content="https://mollie2999.github.io/Aurora/assets/img/social.png">
+<meta property="og:url" content="https://mollie2999.github.io/Aurora/benchmarks/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="../assets/fonts/Geist.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../assets/subpage.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Aurora vs Official Steam Client Benchmarks on Linux",
+  "description": "Reproducible Linux benchmarks comparing Aurora Steam Client and the official Steam desktop client for idle RAM (PSS), idle CPU, startup time, process count, and disk footprint.",
+  "url": "https://mollie2999.github.io/Aurora/benchmarks/",
+  "datePublished": "2026-11-16",
+  "dateModified": "2026-11-22",
+  "about": {
+    "@type": "SoftwareApplication",
+    "name": "Aurora Steam Client",
+    "url": "https://mollie2999.github.io/Aurora/"
+  }
+}
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="logo-fade" gradientUnits="userSpaceOnUse" x1="0" y1="50" x2="0" y2="8">
+      <stop offset="0" stop-color="#DFE3E6" stop-opacity=".85"/>
+      <stop offset="1" stop-color="#DFE3E6" stop-opacity="0"/>
+    </linearGradient>
+    <symbol id="logo" viewBox="0 0 64 64">
+      <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30 L54 8 C49 9 45 12 40 17 C31 26 21 30 11 25 Z" fill="url(#logo-fade)"/>
+      <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30" fill="none" stroke="#DFE3E6" stroke-width="5" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="../"><svg aria-hidden="true"><use href="#logo"/></svg>Aurora</a>
+    <nav class="tabs" aria-label="Site">
+      <a class="pill" href="../">Home</a>
+      <a class="pill" href="../linux/">Linux &amp; Proton</a>
+      <a class="pill" href="./" aria-current="page">Benchmarks</a>
+      <a class="pill" href="../install/">Install</a>
+      <a class="pill" href="../faq/">FAQ</a>
+    </nav>
+    <span class="spacer"></span>
+    <a class="pill gh" href="https://github.com/mollie2999/Aurora"><span>GitHub</span></a>
+    <a class="btn btn-brand" href="../install/">Get Aurora</a>
+  </div>
+</header>
+
+<main id="main" class="wrap">
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <a href="../">Aurora Steam Client</a>
+    <span aria-hidden="true">/</span>
+    <span>Benchmarks</span>
+  </nav>
+
+  <section class="page-hero">
+    <p class="eyebrow">Linux performance · Reproducible measurements</p>
+    <h1>Aurora vs official Steam <span>benchmarks on Linux</span></h1>
+    <p class="lede">The official Steam client embeds Chromium and spawns a dozen <code>steamwebhelper</code> processes just to show your library. Aurora draws the entire interface natively in Rust with <code>egui</code> in one process—cutting idle RAM by 8.5× and idle CPU by 90×.</p>
+    <div class="hero-actions">
+      <a class="btn btn-brand" href="../install/">Download Aurora</a>
+      <a class="pill" href="https://github.com/mollie2999/Aurora/blob/main/docs/benchmarks-linux.md">View full raw report on GitHub</a>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="summary-h">
+    <h2 id="summary-h">Headline comparison (median of 3 runs)</h2>
+    <p>Measured on 16 November 2026 on the same Linux PC and Steam account: AMD Ryzen 7 5700X, 16 GB RAM, GeForce RTX 5070, CachyOS (GNOME on Wayland), comparing Aurora 0.7.2 against Steam client build 1792618285.</p>
+    <div class="card bars">
+      <div class="metric">
+        <div class="metric-top"><h3>Start → first window</h3><span class="x">20× sooner</span></div>
+        <div class="bar"><span class="who">Steam</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="v">2.77 s</span></div>
+        <div class="bar us"><span class="who">Aurora</span><div class="track"><div class="fill" style="width:5.1%"></div></div><span class="v">0.14 s</span></div>
+      </div>
+      <div class="metric">
+        <div class="metric-top"><h3>Start → main window, signed in</h3><span class="x">2.3× sooner</span></div>
+        <div class="bar"><span class="who">Steam</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="v">4.90 s</span></div>
+        <div class="bar us"><span class="who">Aurora</span><div class="track"><div class="fill" style="width:44.1%"></div></div><span class="v">2.16 s</span></div>
+      </div>
+      <div class="metric">
+        <div class="metric-top"><h3>Idle memory (PSS across all processes)</h3><span class="x">8.5× less RAM</span></div>
+        <div class="bar"><span class="who">Steam</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="v">1,408 MB</span></div>
+        <div class="bar us"><span class="who">Aurora</span><div class="track"><div class="fill" style="width:11.8%"></div></div><span class="v">166 MB</span></div>
+      </div>
+      <div class="metric">
+        <div class="metric-top"><h3>Idle CPU (% of a single core)</h3><span class="x">90× less CPU</span></div>
+        <div class="bar"><span class="who">Steam</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="v">18.0 %</span></div>
+        <div class="bar us"><span class="who">Aurora</span><div class="track"><div class="fill" style="width:1.1%"></div></div><span class="v">0.2 %</span></div>
+      </div>
+      <div class="metric">
+        <div class="metric-top"><h3>Running processes</h3><span class="x">16 → 1</span></div>
+        <div class="bar"><span class="who">Steam</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="v">16</span></div>
+        <div class="bar us"><span class="who">Aurora</span><div class="track"><div class="fill" style="width:6.25%"></div></div><span class="v">1</span></div>
+      </div>
+      <div class="metric">
+        <div class="metric-top"><h3>Installed program size (excluding games)</h3><span class="x">46× smaller</span></div>
+        <div class="bar"><span class="who">Steam</span><div class="track"><div class="fill" style="width:100%"></div></div><span class="v">2,129 MB</span></div>
+        <div class="bar us"><span class="who">Aurora</span><div class="track"><div class="fill" style="width:2.2%"></div></div><span class="v">46 MB</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="runs-h">
+    <h2 id="runs-h">Every individual run</h2>
+    <p>Each client ran 4 times sequentially (never simultaneously). Run 0 is a warm-up run excluded from the median. Memory is total PSS from <code>/proc/&lt;pid&gt;/smaps_rollup</code> 45 seconds after the main window opened; CPU is user + system time over the following 30 seconds.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Client</th>
+            <th>Run</th>
+            <th class="num">First window (s)</th>
+            <th class="num">Main window (s)</th>
+            <th class="num">Idle PSS (MB)</th>
+            <th class="num">Processes</th>
+            <th class="num">Idle CPU (% core)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Steam</td><td>0 (warm-up)</td><td class="num">2.86</td><td class="num">5.45</td><td class="num">1,408</td><td class="num">16</td><td class="num">18.53%</td></tr>
+          <tr><td>Steam</td><td>1</td><td class="num">2.77</td><td class="num">4.89</td><td class="num">1,408</td><td class="num">16</td><td class="num">18.27%</td></tr>
+          <tr><td>Steam</td><td>2</td><td class="num">2.77</td><td class="num">4.90</td><td class="num">1,412</td><td class="num">16</td><td class="num">8.93%</td></tr>
+          <tr><td>Steam</td><td>3</td><td class="num">2.93</td><td class="num">5.06</td><td class="num">1,407</td><td class="num">16</td><td class="num">32.50%</td></tr>
+          <tr><td><b>Aurora</b></td><td>0 (warm-up)</td><td class="num win">0.14</td><td class="num">14.08</td><td class="num win">161</td><td class="num win">1</td><td class="num win">0.10%</td></tr>
+          <tr><td><b>Aurora</b></td><td>1</td><td class="num win">0.14</td><td class="num win">0.99</td><td class="num win">169</td><td class="num win">1</td><td class="num win">0.07%</td></tr>
+          <tr><td><b>Aurora</b></td><td>2</td><td class="num win">0.14</td><td class="num win">2.35</td><td class="num win">166</td><td class="num win">1</td><td class="num win">0.20%</td></tr>
+          <tr><td><b>Aurora</b></td><td>3</td><td class="num win">0.15</td><td class="num win">2.16</td><td class="num win">162</td><td class="num win">1</td><td class="num win">0.40%</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="why-h">
+    <h2 id="why-h">Why does Aurora use so much less RAM and CPU?</h2>
+    <div class="grid-2">
+      <div class="card">
+        <h3>No embedded Chromium (<code>steamwebhelper</code>)</h3>
+        <p>Official Steam renders its library, store, chat, and overlays inside Chromium Embedded Framework processes. Even idle in the background, those browser processes hold over 1 GB of memory and continuously wake the CPU.</p>
+        <p>Aurora talks to Steam's servers directly over Steam's protobuf protocol and draws native widgets on the GPU with <code>egui</code>.</p>
+      </div>
+      <div class="card">
+        <h3>Post-0.7.2 memory &amp; download optimizations</h3>
+        <p>Newer Aurora releases (0.8.x through 1.0.0-rc2) reduced memory further: images decode at display size with a 96 MiB offscreen texture budget, library refreshes fetch only changed apps, minimizing or hiding to tray purges cached textures/heap, and depot downloads use parallel server ranking with SIMD decompression.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="caveats-h">
+    <h2 id="caveats-h">Methodology &amp; caveats</h2>
+    <div class="card">
+      <p><b>What is not measured here:</b> in-game memory while running native Linux or SteamStub DRM games (which start Aurora's windowless <code>steamhost</code>), and native Wayland mode (Aurora ran under XWayland during the benchmark so <code>xdotool</code> could detect window appearance consistently). You can inspect and re-run the exact benchmark script at <a class="link" href="https://github.com/mollie2999/Aurora/blob/main/docs/benchmarks-linux.sh">docs/benchmarks-linux.sh</a>.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap credits">
+    <p>Aurora Steam Client is open source (MIT), built on <a href="https://github.com/madonchik123/SteamInRust">SteamInRust</a>. Unofficial and not affiliated with Valve. Steam is a trademark of Valve Corporation.</p>
+  </div>
+  <div class="statusbar">
+    <div class="wrap">
+      <span>Aurora Steam Client</span>
+      <nav aria-label="Footer navigation">
+        <a href="../">Home</a>
+        <a href="../linux/">Linux &amp; Proton</a>
+        <a href="./">Benchmarks</a>
+        <a href="../install/">Install</a>
+        <a href="../faq/">FAQ</a>
+        <a href="https://github.com/mollie2999/Aurora">GitHub</a>
+      </nav>
+    </div>
+  </div>
+</footer>
+</body>
+</html>

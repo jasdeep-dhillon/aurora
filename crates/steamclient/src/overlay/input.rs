@@ -590,55 +590,156 @@ fn patch_imports() {
     });
 }
 
-/// Rewrite matching import slots of one loaded module. Returns how many.
+/// Rewrite matching import and delay-load import slots of one loaded module.
+/// Returns how many slots were patched.
 pub(crate) unsafe fn patch_module(base: *mut u8, table: &[(usize, usize)]) -> usize {
-    use windows::Win32::System::Memory::{PAGE_PROTECTION_FLAGS, PAGE_READWRITE, VirtualProtect};
+    use windows::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
+        PAGE_GUARD, PAGE_NOACCESS, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
+        VirtualProtect, VirtualQuery,
+    };
+    if base.is_null() || table.is_empty() {
+        return 0;
+    }
+    let is_readable = |ptr: *const u8, len: usize| -> bool {
+        let mut mbi = MEMORY_BASIC_INFORMATION::default();
+        if unsafe { VirtualQuery(Some(ptr.cast()), &mut mbi, size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+            return false;
+        }
+        if mbi.State != MEM_COMMIT {
+            return false;
+        }
+        let prot = mbi.Protect;
+        if (prot.0 & (PAGE_NOACCESS.0 | PAGE_GUARD.0)) != 0 {
+            return false;
+        }
+        let ok_prot = matches!(
+            PAGE_PROTECTION_FLAGS(prot.0 & 0xFF),
+            PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
+        );
+        if !ok_prot {
+            return false;
+        }
+        let start = ptr as usize;
+        let region_end = (mbi.BaseAddress as usize).saturating_add(mbi.RegionSize);
+        start.checked_add(len).is_some_and(|end| end <= region_end)
+    };
     unsafe {
+        if !is_readable(base, 0x40) {
+            return 0;
+        }
+        let rd16 = |off: usize| (base.add(off) as *const u16).read_unaligned() as usize;
         let rd32 = |off: usize| (base.add(off) as *const u32).read_unaligned() as usize;
-        if (base as *const u16).read_unaligned() != 0x5A4D {
+        if rd16(0) != 0x5A4D {
             return 0;
         }
         let nt = rd32(0x3C);
-        if rd32(nt) != 0x4550 {
+        if nt == 0 || nt > 0x10_0000 || !is_readable(base.add(nt), 24) || rd32(nt) != 0x4550 {
             return 0;
         }
+        let opt_size = rd16(nt + 20);
         let opt = nt + 24;
-        let magic = (base.add(opt) as *const u16).read_unaligned();
-        let dirs = match magic {
-            0x10b => opt + 96,
-            0x20b => opt + 112,
+        if opt_size < 112 || !is_readable(base.add(opt), opt_size) {
+            return 0;
+        }
+        let opt_end = opt.saturating_add(opt_size);
+        let magic = rd16(opt);
+        let (dirs, num_dirs_off) = match magic {
+            0x10b => (opt + 96, opt + 92),
+            0x20b => (opt + 112, opt + 108),
             _ => return 0,
         };
         // Our own pointer size must match the module's.
         if (magic == 0x20b) != cfg!(target_pointer_width = "64") {
             return 0;
         }
-        let (import_rva, import_size) = (rd32(dirs + 8), rd32(dirs + 12));
-        if import_rva == 0 || import_size == 0 {
+        if num_dirs_off + 4 > opt_end {
             return 0;
         }
-        let mut count = 0;
-        let mut desc = import_rva;
-        loop {
-            let (name, first_thunk) = (rd32(desc + 12), rd32(desc + 16));
-            if name == 0 && first_thunk == 0 {
-                break;
+        let image_size = rd32(opt + 56);
+        if image_size < opt_end {
+            return 0;
+        }
+        let num_dirs = rd32(num_dirs_off).min(16);
+        let in_image = |rva: usize, len: usize| rva != 0 && rva.checked_add(len).is_some_and(|end| end <= image_size);
+        let dir_entry = |idx: usize| -> Option<(usize, usize)> {
+            if idx >= num_dirs {
+                return None;
             }
-            if first_thunk != 0 {
-                let mut slot = base.add(first_thunk) as *mut usize;
-                while *slot != 0 {
-                    if let Some(&(_, ours)) = table.iter().find(|(real, _)| *real == *slot) {
-                        let mut old = PAGE_PROTECTION_FLAGS(0);
-                        if VirtualProtect(slot as *const c_void, size_of::<usize>(), PAGE_READWRITE, &mut old).is_ok() {
-                            *slot = ours;
-                            let _ = VirtualProtect(slot as *const c_void, size_of::<usize>(), old, &mut old);
-                            count += 1;
-                        }
-                    }
-                    slot = slot.add(1);
+            let off = dirs.checked_add(idx.checked_mul(8)?)?;
+            if off.checked_add(8)? > opt_end {
+                return None;
+            }
+            Some((rd32(off), rd32(off + 4)))
+        };
+        let patch_iat_at = |first_thunk: usize| -> usize {
+            if !in_image(first_thunk, size_of::<usize>()) {
+                return 0;
+            }
+            let mut patched = 0;
+            let mut off = first_thunk;
+            for _ in 0..8192 {
+                if !in_image(off, size_of::<usize>()) || !is_readable(base.add(off), size_of::<usize>()) {
+                    break;
                 }
+                let slot = base.add(off) as *mut usize;
+                let cur = slot.read_unaligned();
+                if cur == 0 {
+                    break;
+                }
+                if let Some(&(_, ours)) = table.iter().find(|(real, _)| *real == cur) {
+                    let mut old = PAGE_PROTECTION_FLAGS(0);
+                    if VirtualProtect(slot as *const c_void, size_of::<usize>(), PAGE_READWRITE, &mut old).is_ok() {
+                        slot.write_unaligned(ours);
+                        let _ = VirtualProtect(slot as *const c_void, size_of::<usize>(), old, &mut old);
+                        patched += 1;
+                    }
+                }
+                off += size_of::<usize>();
             }
-            desc += 20;
+            patched
+        };
+
+        let mut count = 0;
+        // Ordinary import directory (index 1).
+        if let Some((import_rva, import_size)) = dir_entry(1)
+            && in_image(import_rva, 20)
+            && import_size >= 20
+        {
+            let mut desc = import_rva;
+            let max_end = import_rva.saturating_add(import_size).min(image_size);
+            while desc.checked_add(20).is_some_and(|e| e <= max_end) && is_readable(base.add(desc), 20) {
+                let (name, first_thunk) = (rd32(desc + 12), rd32(desc + 16));
+                if name == 0 && first_thunk == 0 {
+                    break;
+                }
+                count += patch_iat_at(first_thunk);
+                desc += 20;
+            }
+        }
+
+        // Delay-load import directory (index 13): ImgDelayDescr is 32 bytes.
+        // grAttrs bit 0 (1) means RVA-based; 0 means VA-based (legacy VC6).
+        if let Some((delay_rva, delay_size)) = dir_entry(13)
+            && in_image(delay_rva, 32)
+            && delay_size >= 32
+        {
+            let mut desc = delay_rva;
+            let max_end = delay_rva.saturating_add(delay_size).min(image_size);
+            while desc.checked_add(32).is_some_and(|e| e <= max_end) && is_readable(base.add(desc), 32) {
+                let attrs = rd32(desc);
+                let name = rd32(desc + 4);
+                let iat = rd32(desc + 12);
+                if name == 0 && iat == 0 {
+                    break;
+                }
+                if attrs & 1 != 0 {
+                    count += patch_iat_at(iat);
+                } else if iat >= base as usize {
+                    count += patch_iat_at(iat - base as usize);
+                }
+                desc += 32;
+            }
         }
         count
     }

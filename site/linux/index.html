@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lightweight Native Steam Client for Linux (Wayland, X11 &amp; Proton) | Aurora Steam Client</title>
+<meta name="description" content="How Aurora Steam Client runs native Linux games, Windows games through Proton, SteamStub DRM, Vulkan Shift+Tab overlay, and anti-cheat titles on Linux without Chromium or steamwebhelper.">
+<meta name="theme-color" content="#161D25">
+<link rel="canonical" href="https://mollie2999.github.io/Aurora/linux/">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Aurora Steam Client">
+<meta property="og:title" content="Lightweight Native Steam Client for Linux — Wayland, X11, Proton &amp; Vulkan Overlay">
+<meta property="og:description" content="Launch native Linux games, Proton titles, and Steam DRM games in a 166 MB native Rust Steam client with no Chromium or steamwebhelper.">
+<meta property="og:image" content="https://mollie2999.github.io/Aurora/assets/img/social.png">
+<meta property="og:url" content="https://mollie2999.github.io/Aurora/linux/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="../assets/fonts/Geist.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../assets/subpage.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="logo-fade" gradientUnits="userSpaceOnUse" x1="0" y1="50" x2="0" y2="8">
+      <stop offset="0" stop-color="#DFE3E6" stop-opacity=".85"/>
+      <stop offset="1" stop-color="#DFE3E6" stop-opacity="0"/>
+    </linearGradient>
+    <symbol id="logo" viewBox="0 0 64 64">
+      <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30 L54 8 C49 9 45 12 40 17 C31 26 21 30 11 25 Z" fill="url(#logo-fade)"/>
+      <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30" fill="none" stroke="#DFE3E6" stroke-width="5" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="../"><svg aria-hidden="true"><use href="#logo"/></svg>Aurora</a>
+    <nav class="tabs" aria-label="Site">
+      <a class="pill" href="../">Home</a>
+      <a class="pill" href="./" aria-current="page">Linux &amp; Proton</a>
+      <a class="pill" href="../benchmarks/">Benchmarks</a>
+      <a class="pill" href="../install/">Install</a>
+      <a class="pill" href="../faq/">FAQ</a>
+    </nav>
+    <span class="spacer"></span>
+    <a class="pill gh" href="https://github.com/mollie2999/Aurora"><span>GitHub</span></a>
+    <a class="btn btn-brand" href="../install/">Get Aurora</a>
+  </div>
+</header>
+
+<main id="main" class="wrap">
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <a href="../">Aurora Steam Client</a>
+    <span aria-hidden="true">/</span>
+    <span>Linux &amp; Proton</span>
+  </nav>
+
+  <section class="page-hero">
+    <p class="eyebrow">Linux gaming · Wayland &amp; X11 · No Chromium</p>
+    <h1>A native Steam client for Linux <span>without steamwebhelper</span></h1>
+    <p class="lede">Aurora brings a single-process Rust desktop client to Wayland and X11—launching native Linux builds, Windows games through Proton, SteamStub DRM titles, and anti-cheat games while keeping your system lean.</p>
+    <div class="hero-actions">
+      <a class="btn btn-brand" href="../install/">Install on Arch, Debian, Fedora</a>
+      <a class="pill" href="../benchmarks/">See 166 MB vs 1.4 GB benchmarks</a>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="launch-h">
+    <h2 id="launch-h">How every type of Steam game launches on Linux</h2>
+    <p>Aurora inspects each game and picks the right launch path automatically. Games with both a Linux and Windows build run natively by default, and <b>Manage › Compatibility</b> lets you switch any game to a specific Proton version.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Game type</th>
+            <th>Launch path</th>
+            <th>Steam APIs &amp; DRM</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><b>Native Linux games</b></td>
+            <td>Launched directly</td>
+            <td>Uses your installed Steam's <code>steamclient.so</code> through Aurora's windowless Steam host (no Chromium UI).</td>
+          </tr>
+          <tr>
+            <td><b>Windows games (Proton)</b></td>
+            <td>Proton (Steam's default, or your per-game choice)</td>
+            <td>Aurora's Rust <code>steamclient</code> handles achievements, stats, Steam Cloud, lobbies, Workshop, and P2P.</td>
+          </tr>
+          <tr>
+            <td><b>Steam DRM (SteamStub)</b></td>
+            <td>Proton + windowless Steam host</td>
+            <td>Valve's own engine answers the DRM and ownership check fail-closed—no bypasses or cracks.</td>
+          </tr>
+          <tr>
+            <td><b>Anti-cheat (VAC, EAC, BattlEye)</b></td>
+            <td>Official Steam client by default</td>
+            <td>Handed off to Valve's official client so anti-cheat runs in a fully supported environment.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="features-h">
+    <h2 id="features-h">Built for modern Linux desktops</h2>
+    <div class="grid-2">
+      <div class="card">
+        <h3>Wayland, X11 &amp; Hide-to-Tray</h3>
+        <p>Aurora runs natively on Wayland and X11 without requiring GTK. Hiding to the system tray unmaps the window and trims cached textures and heap memory so Aurora stays almost invisible in the background.</p>
+      </div>
+      <div class="card">
+        <h3>Linux Vulkan Shift+Tab Overlay</h3>
+        <p>Aurora includes a Vulkan implicit layer for native Vulkan and fullscreen DXVK/VKD3D Proton games—giving you Shift+Tab friends, chat, achievements, persistent per-game notes, F12 screenshots, and an FPS counter HUD.</p>
+      </div>
+      <div class="card">
+        <h3>Per-Game Proton &amp; Shader Cache</h3>
+        <p>Pick any installed Proton or Proton-GE version per game in <b>Manage › Compatibility</b>. Aurora uses Steam's shader cache and pre-compiles Fossilize shaders before launch to reduce in-game stutter.</p>
+      </div>
+      <div class="card">
+        <h3>Declarative Themes &amp; Native Adwaita</h3>
+        <p>Ship with built-in presets including <b>NEVKO</b>, <b>Native Adwaita</b> (for GNOME desktops), <b>Steam Desktop Replica</b>, OLED, and Daylight—or install custom <code>.aurora-theme</code> packages.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="deps-h">
+    <h2 id="deps-h">Linux requirements</h2>
+    <div class="card">
+      <ul class="bullets">
+        <li><b>Steam installed on disk:</b> Aurora reuses your existing Proton installations and Valve's engine for the windowless Steam host (and launches anti-cheat titles through the official client).</li>
+        <li><b>Store trailers &amp; Steam Broadcasts:</b> Install <code>ffmpeg</code> and <code>libpulse</code> (PulseAudio or PipeWire's Pulse compatibility layer) for hardware-friendly video and audio playback.</li>
+        <li><b>Packages available:</b> Native packages for Arch Linux (<code>.pkg.tar.zst</code>), Debian/Ubuntu/Mint (<code>.deb</code>), Fedora (<code>.rpm</code>), and a portable <code>.tar.gz</code> tarball. See the <a class="link" href="../install/">Install Guide</a>.</li>
+      </ul>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap credits">
+    <p>Aurora Steam Client is open source (MIT), built on <a href="https://github.com/madonchik123/SteamInRust">SteamInRust</a>. Unofficial and not affiliated with Valve. Steam is a trademark of Valve Corporation.</p>
+  </div>
+  <div class="statusbar">
+    <div class="wrap">
+      <span>Aurora Steam Client</span>
+      <nav aria-label="Footer navigation">
+        <a href="../">Home</a>
+        <a href="./">Linux &amp; Proton</a>
+        <a href="../benchmarks/">Benchmarks</a>
+        <a href="../install/">Install</a>
+        <a href="../faq/">FAQ</a>
+        <a href="https://github.com/mollie2999/Aurora">GitHub</a>
+      </nav>
+    </div>
+  </div>
+</footer>
+</body>
+</html>

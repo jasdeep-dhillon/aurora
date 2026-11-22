@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FAQ: Safety, Anti-Cheat, VAC &amp; Aurora vs SteamInRust | Aurora Steam Client</title>
+<meta name="description" content="Frequently asked questions about Aurora Steam Client: account security, VAC and anti-cheat safety, differences from SteamInRust, disambiguation from Aurora Linux and Cheat Happens Aurora, and DRM handling.">
+<meta name="theme-color" content="#161D25">
+<link rel="canonical" href="https://mollie2999.github.io/Aurora/faq/">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Aurora Steam Client">
+<meta property="og:title" content="Aurora Steam Client FAQ — Safety, VAC Anti-Cheat &amp; SteamInRust Comparison">
+<meta property="og:description" content="Answers on Steam account safety, VAC/EAC/BattlEye handling, Aurora vs SteamInRust, and why Aurora Steam Client is separate from Aurora Linux or Cheat Happens Aurora.">
+<meta property="og:image" content="https://mollie2999.github.io/Aurora/assets/img/social.png">
+<meta property="og:url" content="https://mollie2999.github.io/Aurora/faq/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="../assets/fonts/Geist.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../assets/subpage.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Is Aurora Steam Client safe to use with my Steam account?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Aurora signs in using the same Steam authentication protocol as the official desktop client and Steam Mobile app (password, Steam Guard, or QR code). Credentials stay locally on your PC in private 0600/0700 storage and are only sent to Steam. Aurora is MIT open-source with zero telemetry."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can Aurora Steam Client get me banned in VAC, Easy Anti-Cheat, or BattlEye games?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "By default, Aurora never touches anti-cheat. Games using VAC, Easy Anti-Cheat, or BattlEye always launch through Valve's official Steam client so their anti-cheat runs in a standard supported environment. An optional experimental setting on Linux allows launching them through the windowless Steam host, which is clearly marked experimental and carries ban risk."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How is Aurora Steam Client different from SteamInRust?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Aurora started as a fork of SteamInRust by madonchik123 focused on full Linux support (Wayland and X11, Proton launching, windowless Steam host for native/DRM games, Linux Vulkan Shift+Tab overlay, system tray, and Arch/Debian/Fedora packages) along with declarative themes, live Steam Broadcasts, Steam Input controller settings, and security hardening."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is Aurora Steam Client related to Aurora Linux, Cheat Happens Aurora, or Daturaxoxo/Aurora?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. Aurora Steam Client (mollie2999/Aurora) is an independent open-source Rust desktop client for Steam. It is unrelated to Aurora Linux (Universal Blue OS), Cheat Happens Aurora (a game trainer app), Daturaxoxo/Aurora (a mod launcher), or Steam games titled Aurora."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Do I still need official Steam installed on Linux?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes, on Linux Aurora needs Steam installed on disk so it can reuse Proton and Valve's engine for the windowless Steam host, and hand off anti-cheat games to Valve's client. You do not need to keep the official Chromium-based Steam interface running."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does Aurora bypass Steam DRM or allow playing unowned games?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. Aurora is strictly fail-closed on ownership and DRM. SteamStub DRM and native Linux games authenticate through Valve's own engine on the windowless Steam host, which verifies ownership on your Steam account."
+      }
+    }
+  ]
+}
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="logo-fade" gradientUnits="userSpaceOnUse" x1="0" y1="50" x2="0" y2="8">
+      <stop offset="0" stop-color="#DFE3E6" stop-opacity=".85"/>
+      <stop offset="1" stop-color="#DFE3E6" stop-opacity="0"/>
+    </linearGradient>
+    <symbol id="logo" viewBox="0 0 64 64">
+      <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30 L54 8 C49 9 45 12 40 17 C31 26 21 30 11 25 Z" fill="url(#logo-fade)"/>
+      <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30" fill="none" stroke="#DFE3E6" stroke-width="5" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="../"><svg aria-hidden="true"><use href="#logo"/></svg>Aurora</a>
+    <nav class="tabs" aria-label="Site">
+      <a class="pill" href="../">Home</a>
+      <a class="pill" href="../linux/">Linux &amp; Proton</a>
+      <a class="pill" href="../benchmarks/">Benchmarks</a>
+      <a class="pill" href="../install/">Install</a>
+      <a class="pill" href="./" aria-current="page">FAQ</a>
+    </nav>
+    <span class="spacer"></span>
+    <a class="pill gh" href="https://github.com/mollie2999/Aurora"><span>GitHub</span></a>
+    <a class="btn btn-brand" href="../install/">Get Aurora</a>
+  </div>
+</header>
+
+<main id="main" class="wrap">
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <a href="../">Aurora Steam Client</a>
+    <span aria-hidden="true">/</span>
+    <span>FAQ</span>
+  </nav>
+
+  <section class="page-hero">
+    <p class="eyebrow">Frequently asked questions</p>
+    <h1>Safety, anti-cheat &amp; <span>how Aurora works</span></h1>
+    <p class="lede">Straight answers about Steam account security, VAC/EAC/BattlEye handling, how Aurora compares to SteamInRust, and what Aurora Steam Client is (and isn't).</p>
+  </section>
+
+  <section class="faq-list" aria-label="Questions and answers">
+    <article class="faq-item">
+      <h2>Is Aurora Steam Client safe to use with my Steam account?</h2>
+      <p>Aurora signs in using the same Steam authentication protocol as the official desktop client and Steam Mobile app (password, Steam Guard, or QR code). Your credentials stay on your machine in private user storage and are only sent directly to Steam. The entire codebase is MIT-licensed on <a class="link" href="https://github.com/mollie2999/Aurora">GitHub</a> with zero telemetry—outside of Steam, Aurora only contacts GitHub for updates, an exchange-rate API when checking gift regions, and optionally IsThereAnyDeal if you add your own API key.</p>
+    </article>
+
+    <article class="faq-item">
+      <h2>Can Aurora get me banned in VAC, Easy Anti-Cheat, or BattlEye games?</h2>
+      <p><b>By default, no:</b> Aurora never injects into or modifies anti-cheat games. Any game using VAC, Easy Anti-Cheat, or BattlEye automatically launches through Valve's official Steam client so its anti-cheat runs in a normal supported environment.</p>
+      <p>On Linux, there is an opt-in experimental toggle in <b>Settings › Library</b> to run anti-cheat titles via the windowless Steam host; it is off by default and carries a warning because anti-cheat vendors may treat non-standard hosts as unsupported.</p>
+    </article>
+
+    <article class="faq-item">
+      <h2>How is Aurora Steam Client different from SteamInRust?</h2>
+      <p>Aurora began as a fork of <a class="link" href="https://github.com/madonchik123/SteamInRust">SteamInRust</a> by madonchik123 and expanded it into a cross-platform Linux + Windows client. Aurora adds native Wayland and X11 support, Proton launching with per-game compatibility selection and shader cache pre-compilation, a windowless Steam host for native Linux and SteamStub DRM games, a Linux Vulkan Shift+Tab overlay, Wayland/X11 hide-to-tray, native Arch/Debian/Fedora packages, a declarative custom theme engine (including Native Adwaita and Steam Desktop Replica), live Steam Broadcasts, Steam Input controller calibration, and extensive security hardening.</p>
+    </article>
+
+    <article class="faq-item">
+      <h2>Is Aurora Steam Client related to Aurora Linux, Cheat Happens Aurora, or Daturaxoxo/Aurora?</h2>
+      <p><b>No.</b> Several unrelated projects share the word "Aurora":</p>
+      <ul class="bullets">
+        <li><b>Aurora Steam Client</b> (this project, <code>mollie2999/Aurora</code>): an open-source Rust desktop client for Steam on Linux and Windows.</li>
+        <li><b>Aurora Linux</b> (Universal Blue): a Linux desktop operating system image.</li>
+        <li><b>Cheat Happens Aurora</b>: a commercial PC game trainer utility.</li>
+        <li><b>Daturaxoxo/Aurora</b>: an Unreal Engine mod manager and launcher.</li>
+      </ul>
+    </article>
+
+    <article class="faq-item">
+      <h2>Do I still need official Steam installed on Linux?</h2>
+      <p>Yes, you keep Steam installed on disk so Aurora can reuse Proton, Steam's shader cache, and Valve's engine for the windowless Steam host (and hand off anti-cheat games). You don't need to launch or leave the heavy Chromium Steam desktop interface running.</p>
+    </article>
+
+    <article class="faq-item">
+      <h2>Does Aurora bypass Steam DRM or let people run unowned games?</h2>
+      <p>No. Aurora's ownership and DRM handling is strictly fail-closed. SteamStub DRM and native Linux games authenticate through Valve's own engine on the windowless Steam host, which verifies that your signed-in account owns the game.</p>
+    </article>
+
+    <article class="faq-item">
+      <h2>What features are still missing?</h2>
+      <p>Big Picture mode, Remote Play, and voice chat are not implemented yet. Store checkout opens Steam's official website as Valve requires. Everything else—store, search, Discovery Queue, Points Shop, library, downloads, friends, chat, community, live broadcasts, Workshop, inventory, Market, trading, Cloud saves, Shift+Tab overlay, themes, and plugins—works natively.</p>
+    </article>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap credits">
+    <p>Aurora Steam Client is open source (MIT), built on <a href="https://github.com/madonchik123/SteamInRust">SteamInRust</a>. Unofficial and not affiliated with Valve. Steam is a trademark of Valve Corporation.</p>
+  </div>
+  <div class="statusbar">
+    <div class="wrap">
+      <span>Aurora Steam Client</span>
+      <nav aria-label="Footer navigation">
+        <a href="../">Home</a>
+        <a href="../linux/">Linux &amp; Proton</a>
+        <a href="../benchmarks/">Benchmarks</a>
+        <a href="../install/">Install</a>
+        <a href="./">FAQ</a>
+        <a href="https://github.com/mollie2999/Aurora">GitHub</a>
+      </nav>
+    </div>
+  </div>
+</footer>
+</body>
+</html>

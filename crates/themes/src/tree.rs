@@ -699,14 +699,246 @@ pub struct LayoutTree {
     pub library: Vec<Node>,
 }
 
+/// Maximum declarative layout source size (1 MiB).
+pub const MAX_LAYOUT_TOML_BYTES: usize = 1024 * 1024;
+/// Maximum nesting depth for a declarative layout tree.
+pub const MAX_TREE_DEPTH: usize = 32;
+/// Maximum total number of nodes across `shell` and `library`.
+pub const MAX_TREE_NODES: usize = 2_000;
+/// Maximum menu items inside a single `Node::Menu`.
+pub const MAX_MENU_ITEMS: usize = 128;
+
+fn check_finite(val: f32, name: &str, min: f32, max: f32) -> Result<f32, String> {
+    if !val.is_finite() {
+        return Err(format!("non-finite numeric value for '{name}'"));
+    }
+    Ok(val.clamp(min, max))
+}
+
+fn sanitize_opt_f32(slot: &mut Option<f32>, name: &str, min: f32, max: f32) -> Result<(), String> {
+    if let Some(v) = slot.as_mut() {
+        *v = check_finite(*v, name, min, max)?;
+    }
+    Ok(())
+}
+
+fn sanitize_edges(e: &mut Edges, name: &str) -> Result<(), String> {
+    e.top = check_finite(e.top, name, -256.0, 512.0)?;
+    e.right = check_finite(e.right, name, -256.0, 512.0)?;
+    e.bottom = check_finite(e.bottom, name, -256.0, 512.0)?;
+    e.left = check_finite(e.left, name, -256.0, 512.0)?;
+    Ok(())
+}
+
+fn sanitize_size_val(slot: &mut Option<SizeVal>, name: &str) -> Result<(), String> {
+    if let Some(SizeVal::Px(v)) = slot.as_mut() {
+        *v = check_finite(*v, name, 0.0, 8192.0)?;
+    }
+    Ok(())
+}
+
+fn sanitize_border(slot: &mut Option<BorderEdge>, name: &str) -> Result<(), String> {
+    if let Some(b) = slot.as_mut() {
+        b.width = check_finite(b.width, name, 0.0, 64.0)?;
+    }
+    Ok(())
+}
+
+fn sanitize_style(s: &mut NodeStyle) -> Result<(), String> {
+    sanitize_size_val(&mut s.width, "style.width")?;
+    sanitize_size_val(&mut s.height, "style.height")?;
+    sanitize_opt_f32(&mut s.min_width, "style.min_width", 0.0, 8192.0)?;
+    sanitize_opt_f32(&mut s.max_width, "style.max_width", 0.0, 8192.0)?;
+    sanitize_opt_f32(&mut s.min_height, "style.min_height", 0.0, 8192.0)?;
+    if let Some(p) = s.padding.as_mut() {
+        sanitize_edges(p, "style.padding")?;
+    }
+    if let Some(m) = s.margin.as_mut() {
+        sanitize_edges(m, "style.margin")?;
+    }
+    sanitize_opt_f32(&mut s.gap, "style.gap", 0.0, 512.0)?;
+    sanitize_border(&mut s.border, "style.border.width")?;
+    sanitize_border(&mut s.border_top, "style.border_top.width")?;
+    sanitize_border(&mut s.border_bottom, "style.border_bottom.width")?;
+    sanitize_border(&mut s.border_left, "style.border_left.width")?;
+    sanitize_border(&mut s.border_right, "style.border_right.width")?;
+    sanitize_opt_f32(&mut s.font_size, "style.font_size", 4.0, 128.0)?;
+    Ok(())
+}
+
+fn validate_nodes(nodes: &mut [Node], depth: usize, total: &mut usize) -> Result<(), String> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(format!("layout tree exceeds maximum nesting depth of {MAX_TREE_DEPTH}"));
+    }
+    for node in nodes {
+        *total += 1;
+        if *total > MAX_TREE_NODES {
+            return Err(format!("layout tree exceeds maximum of {MAX_TREE_NODES} nodes"));
+        }
+        match node {
+            Node::Panel { size, style, children, .. } => {
+                sanitize_opt_f32(size, "panel.size", 0.0, 4096.0)?;
+                sanitize_style(style)?;
+                validate_nodes(children, depth + 1, total)?;
+            }
+            Node::Row { style, children, .. }
+            | Node::Col { style, children, .. }
+            | Node::Box { style, children }
+            | Node::Scroll { style, children, .. }
+            | Node::LibraryHomeOrDetail { style, children } => {
+                sanitize_style(style)?;
+                validate_nodes(children, depth + 1, total)?;
+            }
+            Node::Spacer { size, style, .. } => {
+                sanitize_opt_f32(size, "spacer.size", 0.0, 4096.0)?;
+                sanitize_style(style)?;
+            }
+            Node::Divider { thickness, style, .. } => {
+                *thickness = check_finite(*thickness, "divider.thickness", 0.0, 64.0)?;
+                sanitize_style(style)?;
+            }
+            Node::Logo { size, style } => {
+                *size = check_finite(*size, "logo.size", 1.0, 512.0)?;
+                sanitize_style(style)?;
+            }
+            Node::Text { style, .. }
+            | Node::Button { style, .. }
+            | Node::Wallet { style }
+            | Node::PageContent { style }
+            | Node::LibrarySearch { style, .. }
+            | Node::LibraryFilters { style, .. } => {
+                sanitize_style(style)?;
+            }
+            Node::Menu { items, style, .. } => {
+                if items.len() > MAX_MENU_ITEMS {
+                    return Err(format!("menu exceeds maximum of {MAX_MENU_ITEMS} items"));
+                }
+                sanitize_style(style)?;
+            }
+            Node::NavTabs { indicator_height, tab_gap, style, .. } => {
+                *indicator_height = check_finite(*indicator_height, "nav_tabs.indicator_height", 0.0, 64.0)?;
+                *tab_gap = check_finite(*tab_gap, "nav_tabs.tab_gap", 0.0, 256.0)?;
+                sanitize_style(style)?;
+            }
+            Node::BackForward { size, style }
+            | Node::Notifications { size, style, .. }
+            | Node::FriendsButton { size, style, .. } => {
+                *size = check_finite(*size, "control.size", 1.0, 256.0)?;
+                sanitize_style(style)?;
+            }
+            Node::WindowControls { height, style, .. } => {
+                *height = check_finite(*height, "window_controls.height", 1.0, 256.0)?;
+                sanitize_style(style)?;
+            }
+            Node::Account { avatar_size, style, .. } => {
+                *avatar_size = check_finite(*avatar_size, "account.avatar_size", 1.0, 256.0)?;
+                sanitize_style(style)?;
+            }
+            Node::DownloadsBar { width, style } => {
+                sanitize_opt_f32(width, "downloads_bar.width", 0.0, 4096.0)?;
+                sanitize_style(style)?;
+            }
+            Node::FriendsDrawer { width, style } => {
+                *width = check_finite(*width, "friends_drawer.width", 0.0, 4096.0)?;
+                sanitize_style(style)?;
+            }
+            Node::LibraryList { row_height, icon_size, style, .. } => {
+                *row_height = check_finite(*row_height, "library_list.row_height", 8.0, 256.0)?;
+                *icon_size = check_finite(*icon_size, "library_list.icon_size", 4.0, 256.0)?;
+                sanitize_style(style)?;
+            }
+            Node::WhatsNewShelf { card_width, card_height, max_items, gap, style, .. } => {
+                *card_width = check_finite(*card_width, "whats_new_shelf.card_width", 16.0, 2048.0)?;
+                *card_height = check_finite(*card_height, "whats_new_shelf.card_height", 16.0, 2048.0)?;
+                *max_items = (*max_items).min(100);
+                *gap = check_finite(*gap, "whats_new_shelf.gap", 0.0, 256.0)?;
+                sanitize_style(style)?;
+            }
+            Node::RecentGamesShelf { featured_width, capsule_width, capsule_height, gap, style, .. } => {
+                *featured_width = check_finite(*featured_width, "recent_games_shelf.featured_width", 16.0, 2048.0)?;
+                *capsule_width = check_finite(*capsule_width, "recent_games_shelf.capsule_width", 16.0, 2048.0)?;
+                *capsule_height = check_finite(*capsule_height, "recent_games_shelf.capsule_height", 16.0, 2048.0)?;
+                *gap = check_finite(*gap, "recent_games_shelf.gap", 0.0, 256.0)?;
+                sanitize_style(style)?;
+            }
+            Node::AllGamesGrid { card_width, card_height, gap, style, .. } => {
+                *card_width = check_finite(*card_width, "all_games_grid.card_width", 16.0, 2048.0)?;
+                *card_height = check_finite(*card_height, "all_games_grid.card_height", 16.0, 2048.0)?;
+                *gap = check_finite(*gap, "all_games_grid.gap", 0.0, 256.0)?;
+                sanitize_style(style)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl LayoutTree {
-    /// Parse a `layout.toml` document into a [`LayoutTree`].
+    /// Parse a `layout.toml` document into a validated [`LayoutTree`].
     pub fn parse(src: &str) -> Result<Self, String> {
-        toml::from_str(src).map_err(|e| e.to_string())
+        if src.len() > MAX_LAYOUT_TOML_BYTES {
+            return Err(format!("layout.toml exceeds maximum size of {MAX_LAYOUT_TOML_BYTES} bytes"));
+        }
+        let mut tree: Self = toml::from_str(src).map_err(|e| e.to_string())?;
+        tree.validate()?;
+        Ok(tree)
+    }
+
+    /// Enforce tree depth, node count, and finite clamped numeric bounds.
+    pub fn validate(&mut self) -> Result<(), String> {
+        let mut total = 0usize;
+        validate_nodes(&mut self.shell, 1, &mut total)?;
+        validate_nodes(&mut self.library, 1, &mut total)?;
+        Ok(())
     }
 
     /// True if neither `shell` nor `library` defines any declarative nodes.
     pub fn is_empty(&self) -> bool {
         self.shell.is_empty() && self.library.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_excessive_depth_node_count_and_non_finite_floats() {
+        // Deep nesting (> MAX_TREE_DEPTH) rejected.
+        let mut node = Node::Box { style: NodeStyle::default(), children: Vec::new() };
+        for _ in 0..(MAX_TREE_DEPTH + 2) {
+            node = Node::Box { style: NodeStyle::default(), children: vec![node] };
+        }
+        let mut deep = LayoutTree { shell: vec![node], library: Vec::new() };
+        assert!(deep.validate().is_err());
+
+        // Excessive node count (> MAX_TREE_NODES) rejected.
+        let many = (0..=MAX_TREE_NODES)
+            .map(|_| Node::Wallet { style: NodeStyle::default() })
+            .collect();
+        let mut bloated = LayoutTree { shell: many, library: Vec::new() };
+        assert!(bloated.validate().is_err());
+
+        // Non-finite floats rejected; extreme finite values clamped.
+        let mut nan_tree = LayoutTree {
+            shell: vec![Node::Logo { size: f32::NAN, style: NodeStyle::default() }],
+            library: Vec::new(),
+        };
+        assert!(nan_tree.validate().is_err());
+
+        let mut huge_tree = LayoutTree {
+            shell: vec![Node::Logo {
+                size: 1e9,
+                style: NodeStyle { font_size: Some(99999.0), ..Default::default() },
+            }],
+            library: Vec::new(),
+        };
+        huge_tree.validate().unwrap();
+        match &huge_tree.shell[0] {
+            Node::Logo { size, style } => {
+                assert_eq!(*size, 512.0);
+                assert_eq!(style.font_size, Some(128.0));
+            }
+            _ => panic!("expected Logo"),
+        }
     }
 }
