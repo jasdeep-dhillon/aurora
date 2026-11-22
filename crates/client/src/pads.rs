@@ -822,6 +822,7 @@ mod platform {
                     let mut st = State {
                         packet: 0,
                         buttons,
+                        paddles: paddles.iter().enumerate().fold(0, |mask, (i, down)| mask | (u8::from(*down) << i)),
                         lx: sticks[0],
                         ly: sticks[1],
                         rx: sticks[2],

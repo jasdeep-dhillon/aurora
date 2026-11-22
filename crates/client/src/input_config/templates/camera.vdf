@@ -1,0 +1,10 @@
+"controller_mappings"
+{
+    "version" "3"
+    "title" "Gamepad with Camera Controls / Gyro"
+    "controller_type" "controller_xboxone"
+    "aurora_bindings"
+    {
+        "Gyroscope" "pad Right stick"
+    }
+}

@@ -10,6 +10,8 @@
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
+use crate::legacy::{self, Sample};
+use vdf::controller::LegacyMap;
 use crate::pads_shm::{self, GUIDE, Shared, State};
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -42,6 +44,7 @@ type GetCaps = unsafe extern "system" fn(u32, u32, *mut [u8; 20]) -> u32;
 type GetBattery = unsafe extern "system" fn(u32, u8, *mut [u8; 2]) -> u32;
 type GetProc = unsafe extern "system" fn(*mut c_void, *const c_char) -> *mut c_void;
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> *mut c_void;
@@ -49,6 +52,19 @@ unsafe extern "system" {
     fn GetModuleFileNameW(module: *mut c_void, name: *mut u16, len: u32) -> u32;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
 }
+#[cfg(not(windows))]
+mod non_windows {
+    #![allow(non_snake_case)]
+    use std::ffi::c_void;
+
+    pub unsafe fn LoadLibraryW(_: *const u16) -> *mut c_void { std::ptr::null_mut() }
+    pub unsafe fn GetModuleHandleW(_: *const u16) -> *mut c_void { std::ptr::null_mut() }
+    pub unsafe fn GetModuleFileNameW(_: *mut c_void, _: *mut u16, _: u32) -> u32 { 0 }
+    pub unsafe fn GetProcAddress(_: *mut c_void, _: *const u8) -> *mut c_void { std::ptr::null_mut() }
+}
+#[cfg(not(windows))]
+use non_windows::*;
+
 const NOT_CONNECTED: u32 = 1167;
 
 fn wide(s: &str) -> Vec<u16> {
@@ -190,6 +206,7 @@ pub struct SteamInputPad {
     pub pad: Pad,
     pub calibrated: bool,
     pub family: u8,
+    pub paddles: u8,
 }
 
 /// The four pads as XInput / games see them.
@@ -229,7 +246,7 @@ fn steam_input_pads_with(
     let xbox_on = mask & pads_shm::FAMILY_XBOX != 0;
     let mut out: [Option<SteamInputPad>; 4] = real.map(|p| {
         p.filter(|_| xbox_on)
-            .map(|pad| SteamInputPad { pad, calibrated: false, family: pads_shm::SLOT_FAMILY_XBOX })
+            .map(|pad| SteamInputPad { pad, calibrated: false, family: pads_shm::SLOT_FAMILY_XBOX, paddles: 0 })
     });
     if let Some(s) = shm {
         let active_shared: Vec<usize> = (0..pads_shm::SLOTS)
@@ -240,7 +257,7 @@ fn steam_input_pads_with(
             if let Some(k) = k
                 && let Some(st) = s.slots[*k].read()
             {
-                out[i] = Some(SteamInputPad { pad: Pad::from(st), calibrated: st.calibrated, family: st.family });
+                out[i] = Some(SteamInputPad { pad: Pad::from(st), calibrated: st.calibrated, family: st.family, paddles: st.paddles });
             }
         }
     }
@@ -281,25 +298,87 @@ pub fn motion(i: usize) -> Option<([f32; 3], [f32; 3])> {
 
 // ------------------------------------------------------- the game's XInput
 
-fn get_state(i: u32, out: *mut Pad, ex: bool) -> u32 {
-    let Some(x) = XINPUT.as_ref() else { return NOT_CONNECTED };
-    let real = if ex { x.get_ex.unwrap_or(x.get) } else { x.get };
-    let r = unsafe { real(i, out) };
-    note(i as usize, r == 0);
-    if r == 0 || out.is_null() {
-        return r;
+#[derive(Default)]
+struct LegacyState {
+    map: LegacyMap,
+    packets: [Option<Pad>; 4],
+    revision: u64,
+}
+
+static LEGACY: LazyLock<Mutex<LegacyState>> = LazyLock::new(|| Mutex::new(LegacyState::default()));
+
+pub(crate) fn set_legacy_map(map: LegacyMap) {
+    let mut legacy = LEGACY.lock().unwrap_or_else(|e| e.into_inner());
+    legacy.map = map;
+    legacy.revision = legacy.revision.wrapping_add(1);
+}
+
+#[cfg(windows)]
+pub(crate) fn synthetic_layout() -> (u64, LegacyMap) {
+    let state = LEGACY.lock().unwrap_or_else(|e| e.into_inner());
+    (state.revision, state.map.clone())
+}
+
+#[cfg(windows)]
+pub(crate) fn synthetic_revision() -> u64 {
+    LEGACY.lock().unwrap_or_else(|e| e.into_inner()).revision
+}
+
+#[cfg(windows)]
+pub(crate) fn synthetic_pad() -> Option<Sample> {
+    steam_input_pads().iter().enumerate().find_map(|(index, entry)| {
+        let entry = (*entry)?;
+        Some(Sample {
+            pad: entry.pad, paddles: entry.paddles,
+            gyro: motion(index).map(|(_, gyro)| gyro).unwrap_or_default(),
+        })
+    })
+}
+
+fn translated(i: usize, sample: Sample, family: u8) -> Pad {
+    if !steam_input_enabled() || !pads_shm::family_allowed(family_mask(), family) {
+        return sample.pad;
     }
-    match shared_at(i as usize).and_then(|(s, k)| s.slots[k].read()) {
-        Some(st) => {
-            let mut p = Pad::from(st);
-            if !ex {
-                p.buttons &= !GUIDE;
-            }
-            unsafe { out.write_unaligned(p) };
-            0
+    let mut state = LEGACY.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(previous) = state.packets.get(i).copied() else { return sample.pad };
+    if state.map.0.is_empty() && previous.is_none() {
+        return sample.pad;
+    }
+    let mut mapped = legacy::remap(sample, &state.map);
+    if let Some(previous) = previous {
+        mapped.packet = previous.packet;
+        if mapped != previous {
+            mapped.packet = mapped.packet.wrapping_add(1);
         }
-        None => r,
     }
+    state.packets[i] = Some(mapped);
+    mapped
+}
+
+fn get_state(i: u32, out: *mut Pad, ex: bool) -> u32 {
+    let result = XINPUT.as_ref().map_or(NOT_CONNECTED, |x| {
+        unsafe { (if ex { x.get_ex.unwrap_or(x.get) } else { x.get })(i, out) }
+    });
+    note(i as usize, result == 0);
+    if out.is_null() {
+        return result;
+    }
+    let (sample, family) = if result == 0 {
+        (Sample { pad: unsafe { out.read_unaligned() }, ..Default::default() }, pads_shm::SLOT_FAMILY_XBOX)
+    } else if let Some(state) = shared_at(i as usize).and_then(|(s, k)| s.slots[k].read()) {
+        (Sample {
+            pad: Pad::from(state), paddles: state.paddles,
+            gyro: motion(i as usize).map(|(_, gyro)| gyro).unwrap_or_default(),
+        }, state.family)
+    } else {
+        return result;
+    };
+    let mut pad = translated(i as usize, sample, family);
+    if !ex {
+        pad.buttons &= !GUIDE;
+    }
+    unsafe { out.write_unaligned(pad) };
+    0
 }
 
 unsafe extern "system" fn hook_get_state(i: u32, out: *mut Pad) -> u32 {
@@ -474,14 +553,16 @@ fn patch_all() -> usize {
     patched
 }
 
-/// Show the app's pads to the game's own XInput. Only when the app shares
-/// pads and Steam Input is enabled (Windows; under Proton, Wine's XInput already sees every pad).
+/// Enable the launch layout worker and the game's XInput bridge (including under Proton).
+#[cfg(windows)]
 pub fn install() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        if !steam_input_enabled() || mapped().is_none() || XINPUT.is_none() {
+        if !steam_input_enabled() || crate::ipc::target().is_none() {
             return;
         }
+        crate::input::load();
+        crate::synthetic_input::start();
         let _ = std::thread::Builder::new().name("pads-imports".into()).spawn(|| {
             // Again now and then: games load engine plugins and XInput late.
             loop {
@@ -493,6 +574,11 @@ pub fn install() {
             }
         });
     });
+}
+
+#[cfg(not(windows))]
+pub fn install() {
+    crate::input::load();
 }
 
 #[cfg(all(test, windows))]

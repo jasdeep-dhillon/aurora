@@ -39,6 +39,9 @@ mod lobby;
 pub mod overlay;
 mod p2p;
 mod pads;
+mod legacy;
+#[cfg(windows)]
+mod synthetic_input;
 #[allow(dead_code)]
 mod pads_shm;
 mod pseudotcp;

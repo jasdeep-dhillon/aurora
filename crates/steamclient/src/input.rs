@@ -16,6 +16,7 @@ use crate::ifaces::{This, text};
 use crate::pads::{Pad, SteamInputPad};
 use crate::pads_shm::{self, PadCalibration};
 use crate::protocol::{Reply, Request};
+use vdf::controller::{Control, LayoutDocument, Output};
 use crate::state::{Bytes, lock};
 use crate::vt::Fp;
 use std::collections::HashMap;
@@ -100,33 +101,29 @@ pub struct Bindings {
     /// Action set or layer name → (source, group id) when it's active.
     presets: HashMap<String, Vec<(String, String)>>,
     layers: Vec<String>,
+    /// Deterministic default if a game has not activated a set yet.
+    first: Option<String>,
+    overrides: Vec<(Control, Output)>,
 }
 
 fn game_actions(input: &vdf::Obj) -> Vec<String> {
-    let mut out = Vec::new();
-    for (_, act) in input.obj("activators").map(|a| a.iter().collect::<Vec<_>>()).unwrap_or_default() {
-        let Some(bindings) = act.as_obj().and_then(|a| a.obj("bindings")) else { continue };
-        for (k, v) in bindings.iter() {
-            let Some(b) = v.as_str().filter(|_| k == "binding") else { continue };
-            let mut words = b.split(',').next().unwrap_or_default().split_whitespace();
-            if words.next() == Some("game_action") {
-                if let (Some(_set), Some(action)) = (words.next(), words.next()) {
-                    out.push(action.to_string());
-                }
-            }
-        }
-    }
-    out
+    vdf::controller::commands(input).filter_map(|command| match Output::parse(command) {
+        Some(Output::Native(_, action)) => Some(action),
+        _ => None,
+    }).collect()
 }
 
 impl Bindings {
     pub fn parse(text: &str) -> Option<Bindings> {
-        let doc = vdf::parse(text).ok()?;
-        let m = doc.obj("controller_mappings")?;
+        Self::compile(&LayoutDocument::parse(text).ok()?)
+    }
+
+    fn compile(doc: &LayoutDocument) -> Option<Bindings> {
+        let m = doc.mappings();
         let mut b = Bindings::default();
         for (k, v) in m.iter() {
             let Some(o) = v.as_obj() else { continue };
-            match k {
+            match k.to_ascii_lowercase().as_str() {
                 "group" => {
                     let id = o.str("id").unwrap_or_default().to_string();
                     let mut g = Group { mode: o.str("mode").unwrap_or_default().to_string(), ..Default::default() };
@@ -159,19 +156,21 @@ impl Bindings {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    b.first.get_or_insert_with(|| name.clone());
                     b.presets.insert(name, list);
                 }
                 "action_layers" => b.layers.extend(o.iter().map(|(n, _)| n.to_string())),
                 _ => {}
             }
         }
+        b.overrides = doc.overrides().collect();
         (!b.presets.is_empty()).then_some(b)
     }
 
     /// Active (source, group) for a set plus layers (a layer's sources win).
     fn active(&self, set: &str, layers: &[String]) -> Vec<(&str, &Group)> {
         let mut by_source: HashMap<&str, &Group> = HashMap::new();
-        let first = self.presets.get(set).or_else(|| self.presets.values().next());
+        let first = self.presets.get(set).or_else(|| self.first.as_ref().and_then(|name| self.presets.get(name)));
         for preset in first.into_iter().chain(layers.iter().filter_map(|l| self.presets.get(l))) {
             for (source, gid) in preset {
                 if let Some(g) = self.groups.get(gid) {
@@ -314,8 +313,7 @@ fn origin_text(o: i32) -> &'static str {
 #[derive(Default)]
 struct Input {
     bindings: Option<Bindings>,
-    loading: bool,
-    disabled_logged: bool,
+
     /// Interned names: handle = index + 1.
     sets: Vec<String>,
     actions: Vec<String>,
@@ -336,37 +334,62 @@ fn cal(s: &mut Input) -> PadCalibration {
     *s.cal.get_or_insert_with(crate::pads::calibration)
 }
 
-/// Ask Aurora for the bindings once (in the background).
-fn load() {
-    if !crate::pads::steam_input_enabled() {
-        let mut s = st();
-        if !s.disabled_logged {
-            s.disabled_logged = true;
-            crate::log!("input: Steam Input disabled for this game");
-        }
+/// Start the launch-scoped refresh worker. IPC and compilation stay off the
+/// game's input thread. A loaded layout and an empty layout both carry a revision.
+pub(crate) fn load() {
+    if !crate::pads::steam_input_enabled() || crate::ipc::target().is_none() {
         return;
     }
-    {
-        let mut s = st();
-        if s.bindings.is_some() || s.loading {
-            return;
-        }
-        s.loading = true;
-    }
-    std::thread::spawn(|| {
-        let (text, source) = match crate::ipc::request(Request::InputConfig) {
-            Some(Reply::InputConfig { bindings, source }) => (bindings, source),
-            _ => (String::new(), String::new()),
-        };
-        let parsed = Bindings::parse(&text);
-        match &parsed {
-            Some(b) => crate::log!("input: bindings from {source}: {} group(s), {} set(s)/layer(s)", b.groups.len(), b.presets.len()),
-            None => crate::log!("input: no Steam Input bindings for a pad; the game keeps its own controller support"),
-        }
-        let mut s = st();
-        s.loading = false;
-        s.bindings = Some(parsed.unwrap_or_default());
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        let _ = std::thread::Builder::new().name("controller-layout".into()).spawn(|| {
+            let mut known_revision = None;
+            let mut ack = None;
+            loop {
+                match crate::ipc::request(Request::InputLayout { known_revision }) {
+                    Some(Reply::InputLayout { revision, bindings, source }) => {
+                        replace(&bindings, &source);
+                        known_revision = Some(revision);
+                        ack = Some(revision);
+                    }
+                    Some(Reply::Ok) => {}
+                    _ if known_revision.is_none() => {
+                        // Older Aurora builds only answer the legacy request.
+                        if let Some(Reply::InputConfig { bindings, source }) = crate::ipc::request(Request::InputConfig) {
+                            replace(&bindings, &source);
+                            break;
+                        }
+                    }
+                    _ => {
+                        // Stop keyboard/mouse output if the session disappeared.
+                        replace("", "");
+                        known_revision = None;
+                        ack = None;
+                    }
+                }
+                if let Some(revision) = ack
+                    && matches!(crate::ipc::request(Request::InputLayoutApplied { revision }), Some(Reply::Ok))
+                {
+                    ack = None;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        });
     });
+}
+
+fn replace(text: &str, source: &str) {
+    let doc = LayoutDocument::parse(text).ok();
+    let bindings = doc.as_ref().and_then(Bindings::compile);
+    let legacy = doc.as_ref().map(LayoutDocument::legacy_map).unwrap_or_default();
+    crate::pads::set_legacy_map(legacy);
+    let mut state = st();
+    state.polled = None;
+    // Interned handles and game-selected active set/layers survive reloads.
+    state.bindings = bindings;
+    if !source.is_empty() {
+        crate::log!("input: loaded controller layout from {source}");
+    }
 }
 
 fn has_bindings(s: &Input) -> bool {

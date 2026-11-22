@@ -1,0 +1,13 @@
+"controller_mappings"
+{
+    "version" "3"
+    "title" "High-Precision Mouse/Camera"
+    "controller_type" "controller_xboxone"
+    "aurora_bindings"
+    {
+        "Right stick" "mouse_move"
+        "Gyroscope" "mouse_move"
+        "LT" "mouse_button RIGHT"
+        "RT" "mouse_button LEFT"
+    }
+}

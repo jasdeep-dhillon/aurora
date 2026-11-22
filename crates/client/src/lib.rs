@@ -54,8 +54,12 @@ pub mod store;
 
 pub use auth::Guard;
 pub use input_config::{
-    ActionSetSummary, BindingChoice, BindingOption, BindingOrigin, InputConfigReport, app_binding, app_bindings,
-    inspect_local as inspect_input_config_local, parse_vdf_summary, player_config_dir, set_app_binding, set_app_bindings,
+    ActionSetSummary, BindingChoice, BindingOption, BindingOrigin, BuiltInTemplate, CommunityCursor, CommunityLayout,
+    CommunityPage, Control, InputConfigReport, LayoutDocument, LayoutId, LayoutRequest, Output, TemplateChoice,
+    TemplateFileName, app_binding, app_bindings, binding_document, controller_key_name,
+    inspect_local as inspect_input_config_local,
+    managed_bindings_dir, managed_options, parse_vdf_summary, player_config_dir, read_layout, save_custom_layout,
+    set_app_binding, set_app_bindings,
 };
 pub use pads::{
     ConnectionKind, ControllerFamily, ControllerSettings, DetectedController, DetectionSnapshot, FamilyToggles,
@@ -325,7 +329,9 @@ pub enum Command {
     /// is missing or outdated (also done before each launch, like Steam).
     SyncWorkshop { app_id: AppId },
     /// Inspect Steam Input controller configurations (local + Workshop + official) for a game.
-    InspectInputConfig { app_id: AppId, install_dir: PathBuf },
+    InspectInputConfig { key: LayoutRequest, install_dir: PathBuf },
+    QueryControllerLayouts { key: LayoutRequest, cursor: Option<CommunityCursor> },
+    DownloadControllerLayout { key: LayoutRequest, id: u64 },
     /// The game's own Workshop tag groups (for filters).
     LoadWorkshopTags { app_id: AppId, language: String },
     LoadWishlist,
@@ -491,7 +497,9 @@ impl std::fmt::Debug for Command {
             Command::CancelRestore => f.write_str("CancelRestore"),
             Command::RequestFreeLicense { app_id } => f.debug_struct("RequestFreeLicense").field("app_id", app_id).finish(),
             Command::SyncWorkshop { app_id } => f.debug_struct("SyncWorkshop").field("app_id", app_id).finish(),
-            Command::InspectInputConfig { app_id, install_dir } => f.debug_struct("InspectInputConfig").field("app_id", app_id).field("install_dir", install_dir).finish(),
+            Command::InspectInputConfig { key, .. } => f.debug_tuple("InspectInputConfig").field(key).finish(),
+            Command::QueryControllerLayouts { key, .. } => f.debug_tuple("QueryControllerLayouts").field(key).finish(),
+            Command::DownloadControllerLayout { key, id } => f.debug_tuple("DownloadControllerLayout").field(key).field(id).finish(),
             Command::LoadWorkshopTags { app_id, language } => f.debug_struct("LoadWorkshopTags").field("app_id", app_id).field("language", language).finish(),
             Command::LoadWishlist => f.write_str("LoadWishlist"),
             Command::WishlistAdd { app_id } => f.debug_struct("WishlistAdd").field("app_id", app_id).finish(),
@@ -687,7 +695,11 @@ pub enum Event {
     /// Workshop items were downloaded (or failed) for a game.
     WorkshopSync { app_id: AppId, result: Result<crate::workshop::Report, String> },
     /// Controller bindings / action sets inspected for a game.
-    InputConfigInspected(InputConfigReport),
+    InputConfigInspected { key: LayoutRequest, report: InputConfigReport },
+    ControllerLayouts { key: LayoutRequest, result: Result<CommunityPage, String> },
+    ControllerLayoutDownloaded { key: LayoutRequest, result: Result<BindingChoice, String> },
+    ControllerLayoutRoute { app_id: AppId, enabled: bool },
+    ControllerLayoutApplied { app_id: AppId, source: String },
     WorkshopTags { app_id: AppId, result: Result<Vec<model::WorkshopTagCategory>, String> },
     /// (app id, date added)
     Wishlist(Vec<(AppId, u64)>),

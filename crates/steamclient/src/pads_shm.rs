@@ -107,7 +107,7 @@ pub struct Slot {
     /// X | Y << 16, XInput's sign (Y up is positive).
     left: AtomicU32,
     right: AtomicU32,
-    /// Bit 0: has motion sensor (gyro/accel) data.
+    /// Bit 0: motion available. Bits 16–19: R4, L4, R5, L5.
     motion_flags: AtomicU32,
     /// Accelerometer (m/s^2) as f32 bit patterns.
     accel: [AtomicU32; 3],
@@ -129,6 +129,7 @@ pub struct State {
     pub rx: i16,
     pub ry: i16,
     pub has_motion: bool,
+    pub paddles: u8,
     /// Calibration (deadzones, trigger threshold, Nintendo swap, gyro scale) was already applied.
     pub calibrated: bool,
     /// Controller family code (`SLOT_FAMILY_*`).
@@ -347,7 +348,7 @@ impl Slot {
         self.triggers.store(s0.lt as u32 | (s0.rt as u32) << 8, Ordering::Relaxed);
         self.left.store(pair(s0.lx, s0.ly), Ordering::Relaxed);
         self.right.store(pair(s0.rx, s0.ry), Ordering::Relaxed);
-        let flags = (s0.has_motion as u32) | ((s0.calibrated as u32) << 1) | ((s0.family as u32) << 8);
+        let flags = (s0.has_motion as u32) | ((s0.calibrated as u32) << 1) | ((s0.family as u32) << 8) | ((u32::from(s0.paddles) & 15) << 16);
         self.motion_flags.store(flags, Ordering::Relaxed);
         for i in 0..3 {
             self.accel[i].store(s0.accel_bits[i], Ordering::Relaxed);
@@ -377,6 +378,7 @@ impl Slot {
                 rx: r as u16 as i16,
                 ry: (r >> 16) as u16 as i16,
                 has_motion: flags & 1 != 0,
+                paddles: ((flags >> 16) & 15) as u8,
                 calibrated: flags & 2 != 0,
                 family: ((flags >> 8) & 0xFF) as u8,
                 accel_bits: [

@@ -524,6 +524,7 @@ struct Online {
     ipc: crate::ipc::Server,
     /// Each running game's token on that pipe.
     launch_tokens: HashMap<AppId, String>,
+    launch_layouts: HashMap<AppId, std::sync::Arc<tokio::sync::Mutex<crate::input_config::LaunchLayout>>>,
     /// Games we read non-Xbox controllers for (see pads.rs).
     pad_users: HashSet<AppId>,
     /// Games the official Steam client runs (anti-cheat), by install folder.
@@ -658,6 +659,7 @@ async fn online(
         web: Default::default(),
         ipc: ipc_server,
         launch_tokens: HashMap::new(),
+        launch_layouts: HashMap::new(),
         pad_users: HashSet::new(),
         official: HashMap::new(),
         drm_relaunch: Default::default(),
@@ -1001,7 +1003,10 @@ async fn online(
                     }
                 }
                 Some(Command::SyncWorkshop { app_id }) => st.sync_workshop(app_id, Vec::new(), sink),
-                Some(Command::InspectInputConfig { app_id, install_dir }) => {
+                Some(Command::InspectInputConfig { key, install_dir }) => {
+                    if key.account != model::account_id(st.me) {
+                        continue;
+                    }
                     let root = st
                         .steam_root
                         .clone()
@@ -1009,8 +1014,34 @@ async fn online(
                         .unwrap_or_default();
                     let (conn, me, sink) = (st.conn.clone(), st.me, sink.clone());
                     tokio::spawn(async move {
-                        let report = crate::input_config::inspect(&conn, app_id, me, &root, &install_dir).await;
-                        sink(Event::InputConfigInspected(report));
+                        let report = crate::input_config::inspect(&conn, key.app_id, me, &root, &install_dir).await;
+                        sink(Event::InputConfigInspected { key, report });
+                    });
+                }
+                Some(Command::QueryControllerLayouts { key, cursor }) => {
+                    if key.account != model::account_id(st.me) {
+                        continue;
+                    }
+                    let (conn, sink) = (st.conn.clone(), sink.clone());
+                    let online = st.link == Link::Online;
+                    tokio::spawn(async move {
+                        let result = if online {
+                            crate::input_config::community::query(&conn, key.app_id, cursor).await
+                        } else { Err("Steam is offline".into()) };
+                        sink(Event::ControllerLayouts { key, result });
+                    });
+                }
+                Some(Command::DownloadControllerLayout { key, id }) => {
+                    if key.account != model::account_id(st.me) {
+                        continue;
+                    }
+                    let (conn, sink) = (st.conn.clone(), sink.clone());
+                    let online = st.link == Link::Online;
+                    tokio::spawn(async move {
+                        let result = if online {
+                            crate::input_config::community::download(&conn, key, id).await
+                        } else { Err("Steam is offline".into()) };
+                        sink(Event::ControllerLayoutDownloaded { key, result });
                     });
                 }
                 Some(Command::LaunchWithoutCloud { app_id, install_dir, args }) => launch_now!(app_id, install_dir, args),
@@ -1674,6 +1705,7 @@ async fn online(
             Some(call) = ipc_rx.recv() => st.ipc_call(call, sink),
             Some(app_id) = exit_rx.recv() => {
                 st.running.remove(&app_id);
+                st.launch_layouts.remove(&app_id);
                 st.official.remove(&app_id);
                 if st.pad_users.remove(&app_id) {
                     crate::pads::stop();
@@ -3033,6 +3065,10 @@ impl Online {
                             self.pad_users.insert(app_id);
                         }
                         self.launch_tokens.insert(app_id, token.clone());
+                        if input_decision.enabled {
+                            self.launch_layouts.insert(app_id, Default::default());
+                        }
+                        sink(Event::ControllerLayoutRoute { app_id, enabled: input_decision.enabled });
                         // A game that never loads the DLL mustn't keep it in the registry.
                         tokio::spawn(async move {
                             tokio::time::sleep(Duration::from_secs(300)).await;
@@ -3391,17 +3427,56 @@ impl Online {
                     let _ = reply.send(crate::game_inventory::item_defs(&conn, app_id, me, &refresh, &cache_dir).await);
                 });
             }
-            Request::InputConfig => {
-                // Steam's own folder holds the player's Steam Input choices.
-                let root = self
-                    .steam_root
-                    .clone()
-                    .or_else(|| launch::reg_string("Software\\Valve\\Steam", "SteamPath").map(|p| std::path::PathBuf::from(p.replace('/', "\\"))))
+            Request::InputConfig | Request::InputLayout { .. } => {
+                let Some(cache) = self.launch_layouts.get(&app_id).cloned()
+                    .filter(|_| self.launch_tokens.get(&app_id) == Some(&token))
+                else {
+                    let _ = reply.send(Reply::InputConfig { bindings: String::new(), source: String::new() });
+                    return;
+                };
+                let root = self.steam_root.clone()
+                    .or_else(|| launch::reg_string("Software\\Valve\\Steam", "SteamPath").map(std::path::PathBuf::from))
                     .unwrap_or_default();
                 let dir = self.launched_dirs.get(&app_id).cloned().unwrap_or_default();
+                let online = self.link == Link::Online;
                 tokio::spawn(async move {
-                    let _ = reply.send(crate::input_config::config(&conn, app_id, me, &root, &dir).await);
+                    let mut cache = cache.lock().await;
+                    let (mut generation, mut choice) = crate::input_config::selection(app_id);
+                    loop {
+                        if cache.current.as_ref().is_some_and(|(current, _)| *current == generation) {
+                            break;
+                        }
+                        let layout = crate::input_config::resolve_layout(
+                            online.then_some(&conn), app_id, model::account_id(me), &root, &dir, &choice, None,
+                        ).await;
+                        let latest = crate::input_config::selection(app_id);
+                        if latest.0 == generation {
+                            cache.current = Some((generation, layout));
+                            break;
+                        }
+                        (generation, choice) = latest;
+                    }
+                    let (revision, layout) = cache.current.as_ref().unwrap();
+                    let response = match req {
+                        Request::InputConfig => Reply::InputConfig { bindings: layout.text.clone(), source: layout.source.clone() },
+                        Request::InputLayout { known_revision } if known_revision == Some(*revision) => Reply::Ok,
+                        _ => Reply::InputLayout { revision: *revision, bindings: layout.text.clone(), source: layout.source.clone() },
+                    };
+                    let _ = reply.send(response);
                 });
+            }
+            Request::InputLayoutApplied { revision } => {
+                if self.launch_tokens.get(&app_id) == Some(&token)
+                    && let Some(mut cache) = self.launch_layouts.get(&app_id).and_then(|c| c.try_lock().ok())
+                    && crate::input_config::selection(app_id).0 == revision
+                    && let Some((_, layout)) = cache.current.as_ref().filter(|(current, _)| *current == revision)
+                {
+                    if cache.acknowledged != Some(revision) {
+                        _sink(Event::ControllerLayoutApplied { app_id, source: layout.source.clone() });
+                        cache.acknowledged = Some(revision);
+                    }
+                    let _ = reply.send(Reply::Ok);
+                }
             }
             Request::Overlay { dialog, target } => {
                 _sink(Event::GameOverlay { app_id, dialog, target });

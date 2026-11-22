@@ -40,10 +40,22 @@ enum Win {
     Store,
     /// Local screenshots taken during the game.
     Screenshots,
+    /// Per-game Steam Input / controller layout switcher.
+    Controller,
 }
 
 impl Win {
-    const ALL: [Win; 8] = [Win::Overview, Win::Achievements, Win::Friends, Win::Chat, Win::Notes, Win::Community, Win::Store, Win::Screenshots];
+    const ALL: [Win; 9] = [
+        Win::Overview,
+        Win::Achievements,
+        Win::Friends,
+        Win::Chat,
+        Win::Notes,
+        Win::Community,
+        Win::Store,
+        Win::Screenshots,
+        Win::Controller,
+    ];
 }
 
 #[derive(Clone, Copy)]
@@ -74,7 +86,7 @@ pub struct Overlay {
     notes: String,
     search: String,
     show_offline: bool,
-    wins: [WinState; 8],
+    wins: [WinState; 9],
     /// Focus was given to the overlay since it opened.
     focused: bool,
     /// The window that had focus when the overlay opened (the game), so it
@@ -108,6 +120,10 @@ pub struct Overlay {
     /// App ID whose notes are currently loaded, and debounce timestamp for saving.
     notes_app: Option<AppId>,
     notes_dirty: Option<Instant>,
+    /// Whether Aurora's live controller layout bridge is active for the running game.
+    controller_route_enabled: Option<bool>,
+    /// Last layout source confirmed applied by the game bridge.
+    controller_applied_source: Option<String>,
 }
 
 impl Overlay {
@@ -126,7 +142,7 @@ impl Overlay {
         let main = ctx.clone();
         client::ingame::set_waker(move || crate::ingame::wake(&main, std::time::Duration::ZERO));
         let closed = WinState { open: false, pinned: false, opacity: 0.85 };
-        let mut wins = [closed; 8];
+        let mut wins = [closed; 9];
         // Like Steam: the game overview and friends open by default.
         wins[Win::Overview as usize].open = true;
         wins[Win::Friends as usize].open = true;
@@ -164,6 +180,20 @@ impl Overlay {
             take_shot_requested: false,
             notes_app: None,
             notes_dirty: None,
+            controller_route_enabled: None,
+            controller_applied_source: None,
+        }
+    }
+
+    pub fn set_controller_route(&mut self, app_id: AppId, enabled: bool) {
+        if self.game.is_some_and(|(id, _)| id == app_id) {
+            self.controller_route_enabled = Some(enabled);
+        }
+    }
+
+    pub fn set_controller_applied(&mut self, app_id: AppId, source: String) {
+        if self.game.is_some_and(|(id, _)| id == app_id) {
+            self.controller_applied_source = Some(source);
         }
     }
 
@@ -185,6 +215,8 @@ impl Overlay {
         self.notes_app = Some(app_id);
         self.notes_dirty = None;
         self.notes = std::fs::read_to_string(notes_path(app_id)).unwrap_or_default();
+        self.controller_route_enabled = None;
+        self.controller_applied_source = None;
     }
 
     /// Register Shift+Tab only while the game is the focused window (or the
@@ -247,6 +279,8 @@ impl Overlay {
         self.screenshots_dirty = true;
         self.take_shot_requested = false;
         self.notes_app = None;
+        self.controller_route_enabled = None;
+        self.controller_applied_source = None;
         for w in &mut self.wins {
             w.pinned = false;
         }
@@ -802,6 +836,7 @@ fn content(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
     chat_window(app, &ctx, t, actions);
     notes_window(app, &ctx, t);
     screenshots_window(app, &ctx, t);
+    controller_window(app, &ctx, t, actions);
     community_window(app, &ctx, t, actions);
     store_window(app, &ctx, t, actions);
     crate::builtin::group_chat::modals(&ctx, t, &app.state, &app.client, &mut app.overlay.group_ui);
@@ -871,7 +906,7 @@ fn top_strip(app: &mut SteamApp, ui: &mut Ui, t: &Theme) {
     }
     // Window buttons in the middle, like Steam's toolbar.
     let game = app.overlay.game.map(|g| g.0);
-    let mid = Rect::from_center_size(strip.center(), vec2(640.0, STRIP));
+    let mid = Rect::from_center_size(strip.center(), vec2(740.0, STRIP));
     let mut m = ui.new_child(egui::UiBuilder::new().max_rect(mid).layout(Layout::left_to_right(Align::Center)));
     m.spacing_mut().item_spacing.x = 6.0;
     let unread = app.state.total_unread();
@@ -890,6 +925,7 @@ fn top_strip(app: &mut SteamApp, ui: &mut Ui, t: &Theme) {
     toggle(&mut m, Win::Notes, icons::NOTE, t!("Notes"), 0);
     if game.is_some() {
         toggle(&mut m, Win::Screenshots, icons::CAMERA, t!("Screenshots"), 0);
+        toggle(&mut m, Win::Controller, icons::SLIDERS, t!("Controller"), 0);
     }
     if let Some(id) = game {
         use crate::builtin::hub::View;
@@ -1505,6 +1541,131 @@ fn screenshots_window(app: &mut SteamApp, ctx: &egui::Context, t: &Theme) {
         if client::ingame::delete_screenshot(&path).is_ok() {
             app.overlay.screenshots_dirty = true;
         }
+    }
+}
+
+fn controller_window(app: &mut SteamApp, ctx: &egui::Context, t: &Theme, actions: &mut Vec<Action>) {
+    let Some((app_id, _)) = app.overlay.game else { return };
+    let account = (app.state.steam_id & 0xFFFF_FFFF) as u32;
+    let screen = ctx.content_rect();
+    let pos = pos2(220.0, STRIP + 60.0);
+    let mut open_settings = false;
+
+    ov_window(
+        app,
+        ctx,
+        t,
+        Win::Controller,
+        &t!("Controller"),
+        pos,
+        vec2(460.0, (screen.height() - STRIP - 140.0).clamp(320.0, 560.0)),
+        |app, ui| {
+            let live_route = app.overlay.controller_route_enabled;
+            let applied_source = app.overlay.controller_applied_source.clone();
+            let current = client::app_binding(app_id);
+            let options = client::managed_options(&app.local.steam_root, account, app_id);
+
+            ui.horizontal_wrapped(|ui| {
+                match live_route {
+                    Some(true) => {
+                        w::pill(ui, t!("Live switching active"), t.play, t.play.gamma_multiply(0.14));
+                    }
+                    Some(false) => {
+                        w::pill(ui, t!("Live apply unavailable for this launch"), t.away, t.away.gamma_multiply(0.14));
+                    }
+                    None => {
+                        w::pill(ui, t!("Saved for next launch"), t.text_dim, t.raised);
+                    }
+                }
+                if let Some(src) = applied_source.as_deref().filter(|s| !s.is_empty()) {
+                    ui.label(w::text(t!("Applied: {source}", source = src), 12.0, t.text_dim));
+                }
+            });
+            ui.add_space(6.0);
+
+            if live_route == Some(false) {
+                ui.add(
+                    egui::Label::new(w::text(
+                        t!("This launch is managed outside Aurora's Steam Input bridge. Changes will be saved for future Aurora-managed launches."),
+                        12.0,
+                        t.text_dim,
+                    ))
+                    .wrap(),
+                );
+                ui.add_space(6.0);
+            }
+
+            let can_apply_now = live_route != Some(false);
+            let mut next_choice: Option<client::BindingChoice> = None;
+
+            egui::ScrollArea::vertical().id_salt("ov-controller-layouts").max_height(340.0).show(ui, |ui| {
+                let is_auto = current == client::BindingChoice::Auto;
+                let auto_kind = if is_auto { w::Kind::Primary } else { w::Kind::Secondary };
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_apply_now || !is_auto, |ui: &mut Ui| {
+                            w::button(ui, t, Some(icons::CONTROLLER), t!("Automatic (default)"), auto_kind, w::Size::Sm)
+                        })
+                        .clicked()
+                    {
+                        next_choice = Some(client::BindingChoice::Auto);
+                    }
+                });
+                ui.add_space(6.0);
+
+                ui.label(w::caption_text(t, t!("TEMPLATES & SAVED LAYOUTS")));
+                ui.add_space(4.0);
+                for opt in &options {
+                    let active = current == opt.choice;
+                    let fill = if active { w::active_fill(t) } else { t.surface };
+                    let stroke = Stroke::new(1.0, if active { t.accent } else { t.border });
+                    egui::Frame::new()
+                        .fill(fill)
+                        .stroke(stroke)
+                        .corner_radius(t.corner_small())
+                        .inner_margin(Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(w::text_semibold(&opt.label, 13.0, t.text));
+                                    let kind_lbl = match opt.origin {
+                                        client::BindingOrigin::Template => t!("Template"),
+                                        client::BindingOrigin::Community(_) => t!("Community"),
+                                        client::BindingOrigin::Custom => t!("Custom"),
+                                        _ => t!("Configuration"),
+                                    };
+                                    ui.label(w::text(kind_lbl, 11.5, t.text_dim));
+                                });
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if active {
+                                        w::pill(ui, t!("Active"), t.play, t.play.gamma_multiply(0.14));
+                                    } else if w::button(ui, t, None, t!("Apply"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                                        next_choice = Some(opt.choice.clone());
+                                    }
+                                });
+                            });
+                        });
+                    ui.add_space(4.0);
+                }
+            });
+
+            if let Some(choice) = next_choice {
+                client::set_app_binding(app_id, choice);
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if w::button(ui, t, Some(icons::SLIDERS), t!("Edit Layout…"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                    open_settings = true;
+                }
+            });
+        },
+    );
+
+    if open_settings {
+        actions.push(Action::Navigate { page: "settings".into(), arg: Some(format!("controller:{app_id}")) });
+        app.overlay.close();
     }
 }
 

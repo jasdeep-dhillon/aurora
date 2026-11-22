@@ -5,13 +5,17 @@
 //! configurations (Workshop files listed in its app info), unless the player
 //! explicitly picked a configuration in Settings → Controller.
 
-use crate::ipc::protocol::Reply;
 use model::AppId;
 use net::Connection;
-use proto::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+pub use vdf::controller::{Control, LayoutDocument, Output, key_name as controller_key_name};
+use vdf::controller::MAX_BYTES;
+
+mod storage;
+pub(crate) mod community;
+pub use community::{CommunityCursor, CommunityLayout, CommunityPage, LayoutRequest};
 
 /// Pads we read through XInput, best match first.
 const TYPES: &[&str] = &[
@@ -30,6 +34,9 @@ pub enum BindingOrigin {
     GameFile,
     Official(u64),
     CustomFile,
+    Template,
+    Community(u64),
+    Custom,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -38,6 +45,69 @@ pub enum BindingChoice {
     Auto,
     LocalFile(PathBuf),
     Workshop(u64),
+    Template(TemplateChoice),
+    Community(u64),
+    Custom(LayoutId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TemplateChoice {
+    BuiltIn(BuiltInTemplate),
+    Installed(TemplateFileName),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BuiltInTemplate {
+    Gamepad,
+    Camera,
+    Keyboard,
+    Precision,
+}
+
+impl BuiltInTemplate {
+    pub const ALL: [Self; 4] = [Self::Gamepad, Self::Camera, Self::Keyboard, Self::Precision];
+
+    fn text(self) -> &'static str {
+        match self {
+            Self::Gamepad => include_str!("input_config/templates/gamepad.vdf"),
+            Self::Camera => include_str!("input_config/templates/camera.vdf"),
+            Self::Keyboard => include_str!("input_config/templates/keyboard.vdf"),
+            Self::Precision => include_str!("input_config/templates/precision.vdf"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String")]
+pub struct LayoutId(String);
+
+impl TryFrom<String> for LayoutId {
+    type Error = &'static str;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        if s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            Ok(Self(s.to_ascii_lowercase()))
+        } else {
+            Err("expected a 32-digit hexadecimal layout ID")
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String")]
+pub struct TemplateFileName(String);
+
+impl TryFrom<String> for TemplateFileName {
+    type Error = &'static str;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        if s.len() <= 255 && s.len() > 4 && s.to_ascii_lowercase().ends_with(".vdf")
+            && !s.starts_with(['.', ' '])
+            && !s.chars().any(|c| c.is_control() || "/\\:<>|?*".contains(c) || c == '"')
+        {
+            Ok(Self(s))
+        } else {
+            Err("expected one .vdf basename")
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -70,47 +140,112 @@ pub struct InputConfigReport {
     pub action_sets: Vec<ActionSetSummary>,
     pub available: Vec<BindingOption>,
     pub config_dir: Option<PathBuf>,
+    pub document: Option<LayoutDocument>,
 }
 
-static APP_BINDINGS: OnceLock<Mutex<BTreeMap<AppId, BindingChoice>>> = OnceLock::new();
+#[derive(Default)]
+struct Selections {
+    choices: BTreeMap<AppId, BindingChoice>,
+    revisions: HashMap<AppId, u64>,
+}
 
-fn bindings_lock() -> &'static Mutex<BTreeMap<AppId, BindingChoice>> {
-    APP_BINDINGS.get_or_init(|| Mutex::new(BTreeMap::new()))
+static APP_BINDINGS: OnceLock<Mutex<Selections>> = OnceLock::new();
+
+fn bindings_lock() -> &'static Mutex<Selections> {
+    APP_BINDINGS.get_or_init(|| Mutex::new(Selections::default()))
 }
 
 pub fn app_bindings() -> BTreeMap<AppId, BindingChoice> {
-    bindings_lock().lock().unwrap_or_else(|e| e.into_inner()).clone()
+    bindings_lock().lock().unwrap_or_else(|e| e.into_inner()).choices.clone()
 }
 
 pub fn set_app_bindings(map: BTreeMap<AppId, BindingChoice>) {
-    *bindings_lock().lock().unwrap_or_else(|e| e.into_inner()) = map
+    let mut selections = bindings_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let changed: std::collections::HashSet<_> = selections.choices.keys().chain(map.keys()).copied().collect();
+    for app_id in changed {
+        *selections.revisions.entry(app_id).or_default() += 1;
+    }
+    selections.choices = map
         .into_iter()
         .filter(|(_, c)| !matches!(c, BindingChoice::Auto))
         .collect();
+    drop(selections);
     crate::preferences_changed();
 }
 
 pub fn set_app_binding(app_id: AppId, choice: BindingChoice) {
     let mut guard = bindings_lock().lock().unwrap_or_else(|e| e.into_inner());
     if matches!(choice, BindingChoice::Auto) {
-        guard.remove(&app_id);
+        guard.choices.remove(&app_id);
     } else {
-        guard.insert(app_id, choice);
+        guard.choices.insert(app_id, choice);
     }
+    *guard.revisions.entry(app_id).or_default() += 1;
+    drop(guard);
     crate::preferences_changed();
 }
 
 pub fn app_binding(app_id: AppId) -> BindingChoice {
-    bindings_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&app_id)
-        .cloned()
-        .unwrap_or(BindingChoice::Auto)
+    selection(app_id).1
+}
+
+pub(crate) fn selection(app_id: AppId) -> (u64, BindingChoice) {
+    let selected = bindings_lock().lock().unwrap_or_else(|e| e.into_inner());
+    (selected.revisions.get(&app_id).copied().unwrap_or(0), selected.choices.get(&app_id).cloned().unwrap_or_default())
+}
+
+#[derive(Default)]
+pub(crate) struct LaunchLayout {
+    pub current: Option<(u64, ResolvedLayout)>,
+    pub acknowledged: Option<u64>,
 }
 
 fn is_mappings(text: &str) -> bool {
-    text.contains("controller_mappings") && text.contains("game_action")
+    LayoutDocument::parse(text).is_ok()
+}
+
+pub fn read_layout(path: &Path) -> Result<LayoutDocument, String> {
+    let text = storage::read_file(path).map_err(|error| error.to_string())?;
+    LayoutDocument::parse(&text).map_err(|error| error.to_string())
+}
+
+pub fn save_custom_layout(account: u32, app_id: AppId, doc: &LayoutDocument) -> Result<BindingChoice, String> {
+    let id = LayoutId(crate::ipc::os_random_hex(16));
+    store_layout(account, app_id, "custom", &format!("{}.vdf", id.0), doc)?;
+    Ok(BindingChoice::Custom(id))
+}
+
+pub fn managed_bindings_dir(account: u32, app_id: AppId) -> PathBuf {
+    crate::store::config_dir()
+        .join("controller-bindings")
+        .join(account.to_string())
+        .join(app_id.to_string())
+}
+
+fn managed(account: u32, app_id: AppId, kind: &str, create: bool) -> std::io::Result<storage::Directory> {
+    storage::Directory::open(&crate::store::config_dir(),
+        &["controller-bindings", &account.to_string(), &app_id.to_string(), kind], create)
+}
+
+fn store_layout(account: u32, app_id: AppId, kind: &str, file: &str, doc: &LayoutDocument) -> Result<(), String> {
+    let text = doc.write();
+    let checked = LayoutDocument::parse(&text).map_err(|err| err.to_string())?;
+    let _compiled = checked.legacy_map();
+    managed(account, app_id, kind, true).and_then(|dir| dir.commit(file, text.as_bytes())).map_err(|err| err.to_string())
+}
+
+fn templates(root: &Path) -> std::io::Result<storage::Directory> {
+    if root.as_os_str().is_empty() {
+        return Err(std::io::ErrorKind::NotFound.into());
+    }
+    storage::Directory::open(root, &["controller_base", "templates"], false)
+}
+
+fn files(dir: &storage::Directory) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(&dir.path).into_iter().flatten().take(256).flatten()
+        .filter_map(|e| e.file_name().into_string().ok()).collect();
+    names.sort();
+    names
 }
 
 fn rank(text: &str) -> usize {
@@ -138,25 +273,34 @@ pub fn player_config_dir(steam_root: &Path, account: u32, app_id: AppId) -> Path
 /// All Xbox-style / controller_mappings `.vdf` files under `dir`, best rank first.
 fn all_in(dir: &Path, depth: u32) -> Vec<(usize, String, PathBuf)> {
     let mut found: Vec<(usize, String, PathBuf)> = Vec::new();
-    fn walk(dir: &Path, depth: u32, found: &mut Vec<(usize, String, PathBuf)>) {
+    fn walk(dir: &Path, depth: u32, budget: &mut usize, found: &mut Vec<(usize, String, PathBuf)>) {
+        if !std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir() && !storage::is_link(&meta)) {
+            return;
+        }
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
+            if *budget == 0 {
+                return;
+            }
+            *budget -= 1;
             let p = e.path();
-            if p.is_dir() {
-                if depth > 0 {
-                    walk(&p, depth - 1, found);
-                }
-            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("vdf"))
-                && e.metadata().map(|m| m.len() < 2_000_000).unwrap_or(false)
-                && let Ok(t) = std::fs::read_to_string(&p)
+            let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
+            if storage::is_link(&meta) {
+                continue;
+            }
+            if meta.is_dir() && depth > 0 {
+                walk(&p, depth - 1, budget, found);
+            } else if meta.is_file()
+                && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("vdf"))
+                && let Ok(t) = storage::read_file(&p)
                 && is_mappings(&t)
             {
                 found.push((rank(&t), t, p));
             }
         }
     }
-    walk(dir, depth, &mut found);
-    found.sort_by_key(|f| f.0);
+    walk(dir, depth, &mut 256, &mut found);
+    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
     found
 }
 
@@ -183,7 +327,7 @@ fn player_workshop_choices(steam_root: &Path, account: u32, app_id: AppId, xbox_
         .join("config");
     let mut sets: Vec<(u8, String, PathBuf)> = std::fs::read_dir(&dir)
         .map(|rd| {
-            rd.flatten()
+            rd.take(256).flatten()
                 .map(|e| e.path())
                 .filter_map(|p| {
                     let n = p.file_name()?.to_str()?.to_ascii_lowercase();
@@ -207,7 +351,7 @@ fn player_workshop_choices(steam_root: &Path, account: u32, app_id: AppId, xbox_
     sets.sort();
     sets.into_iter()
         .filter_map(|(_, n, p)| {
-            let id = vdf::parse(&std::fs::read_to_string(&p).ok()?)
+            let id = vdf::parse(&storage::read_file(&p).ok()?)
                 .ok()?
                 .obj("controller_config")?
                 .obj(&app_id.to_string())?
@@ -220,15 +364,7 @@ fn player_workshop_choices(steam_root: &Path, account: u32, app_id: AppId, xbox_
 /// A configuration from the Workshop (they belong to Steam's controller
 /// configs app, 241100, not to the game).
 async fn workshop_file(conn: &Connection, _app_id: AppId, id: u64) -> Option<String> {
-    let req = CPublishedFileGetDetailsRequest { publishedfileids: vec![id], ..Default::default() };
-    let r = conn
-        .call::<_, CPublishedFileGetDetailsResponse>("PublishedFile.GetDetails#1", &req)
-        .await
-        .ok()?;
-    let d = r.publishedfiledetails.first()?;
-    let url = Some(d.file_url().to_string()).filter(|u| !u.is_empty())?;
-    let text = reqwest::get(&url).await.ok()?.text().await.ok()?;
-    is_mappings(&text).then_some(text)
+    community::download_text(conn, id, None).await.ok()
 }
 
 /// Official configurations from the app info:
@@ -250,62 +386,102 @@ async fn official_list(conn: &Connection, app_id: AppId) -> Vec<(usize, u64, Str
     files
 }
 
-async fn official(conn: &Connection, app_id: AppId) -> Option<(String, u64)> {
-    for (_, id, _) in official_list(conn, app_id).await {
-        if let Some(text) = workshop_file(conn, app_id, id).await {
-            return Some((text, id));
-        }
-    }
-    None
+#[derive(Default)]
+pub(crate) struct ResolvedLayout {
+    pub text: String,
+    pub source: String,
+    path: Option<PathBuf>,
+    workshop_id: Option<u64>,
 }
 
-pub async fn config(conn: &Connection, app_id: AppId, me: u64, steam_root: &Path, install_dir: &Path) -> Reply {
-    let account = (me & 0xFFFF_FFFF) as u32;
-    let override_choice = app_binding(app_id);
-    let chosen = match &override_choice {
-        BindingChoice::LocalFile(path) => std::fs::read_to_string(path)
-            .ok()
-            .filter(|t| is_mappings(t))
-            .map(|t| (t, format!("selected file ({})", path.display()))),
-        BindingChoice::Workshop(id) => workshop_file(conn, app_id, *id)
-            .await
-            .map(|t| (t, format!("selected Workshop configuration ({id})"))),
-        BindingChoice::Auto => None,
-    };
+impl ResolvedLayout {
+    fn file(text: String, path: PathBuf, label: &str) -> Self {
+        let source = format!("{label} ({})", path.display());
+        Self { text, source, path: Some(path), workshop_id: None }
+    }
+}
 
-    let found = if chosen.is_some() {
-        chosen
-    } else if let Some((t, p)) = player_config(steam_root, account, app_id) {
-        Some((t, format!("your configuration ({})", p.display())))
-    } else if let Some((t, id)) = async {
-        for (id, _) in player_workshop_choices(steam_root, account, app_id, true) {
-            if let Some(t) = workshop_file(conn, app_id, id).await {
-                return Some((t, id));
+fn explicit_local(choice: &BindingChoice, steam_root: &Path, account: u32, app_id: AppId) -> Option<ResolvedLayout> {
+    let (text, path, workshop_id) = match choice {
+        BindingChoice::LocalFile(path) => {
+            let text = storage::read_file(path).ok()?;
+            (text, Some(path.clone()), None)
+        }
+        BindingChoice::Template(TemplateChoice::BuiltIn(template)) => (template.text().into(), None, None),
+        BindingChoice::Template(TemplateChoice::Installed(name)) => {
+            let dir = templates(steam_root).ok()?;
+            (dir.read(&name.0).ok()?, Some(dir.path.join(&name.0)), None)
+        }
+        BindingChoice::Community(id) => {
+            let dir = managed(account, app_id, "community", false).ok()?;
+            let name = format!("{id}.vdf");
+            (dir.read(&name).ok()?, Some(dir.path.join(name)), Some(*id))
+        }
+        BindingChoice::Custom(id) => {
+            let dir = managed(account, app_id, "custom", false).ok()?;
+            let name = format!("{}.vdf", id.0);
+            (dir.read(&name).ok()?, Some(dir.path.join(name)), None)
+        }
+        BindingChoice::Auto | BindingChoice::Workshop(_) => return None,
+    };
+    let doc = LayoutDocument::parse(&text).ok()?;
+    let source = doc.title().map(str::to_owned).or_else(|| {
+        path.as_ref()?.file_name()?.to_str().map(str::to_owned)
+    }).unwrap_or_default();
+    Some(ResolvedLayout { text, source, path, workshop_id })
+}
+
+/// The canonical precedence for Settings, launch-time IPC and live updates.
+/// With no online connection, skip remote candidates and use the same local order.
+pub(crate) async fn resolve_layout(
+    conn: Option<&Connection>, app_id: AppId, account: u32, steam_root: &Path, install_dir: &Path,
+    choice: &BindingChoice, officials: Option<&[(usize, u64, String)]>,
+) -> ResolvedLayout {
+    if let Some(resolved) = explicit_local(choice, steam_root, account, app_id) {
+        return resolved;
+    }
+    if let (BindingChoice::Workshop(id), Some(conn)) = (choice, conn)
+        && let Some(text) = workshop_file(conn, app_id, *id).await
+    {
+        return ResolvedLayout { text, source: format!("Workshop #{id}"), workshop_id: Some(*id), path: None };
+    }
+    if !steam_root.as_os_str().is_empty() {
+        if let Some((text, path)) = player_config(steam_root, account, app_id) {
+            return ResolvedLayout::file(text, path, "User configuration");
+        }
+        if let Some(conn) = conn {
+            for (id, _) in player_workshop_choices(steam_root, account, app_id, true).into_iter().take(8) {
+                if let Some(text) = workshop_file(conn, app_id, id).await {
+                    return ResolvedLayout { text, source: format!("User Workshop #{id}"), workshop_id: Some(id), path: None };
+                }
             }
         }
-        None
     }
-    .await
+    if !install_dir.as_os_str().is_empty()
+        && let Some((text, path)) = best_in(install_dir, 3)
     {
-        Some((t, format!("your Workshop configuration ({id})")))
-    } else if let Some((t, p)) = (!install_dir.as_os_str().is_empty()).then(|| best_in(install_dir, 3)).flatten() {
-        Some((t, format!("the game's files ({})", p.display())))
-    } else {
-        official(conn, app_id)
-            .await
-            .map(|(t, id)| (t, format!("official configuration (Workshop {id})")))
-    };
-
-    match found {
-        Some((bindings, source)) => {
-            tracing::info!("Steam Input for {app_id}: {source}");
-            Reply::InputConfig { bindings, source }
-        }
-        None => {
-            tracing::info!("Steam Input for {app_id}: no bindings for an Xbox-style pad");
-            Reply::InputConfig { bindings: String::new(), source: String::new() }
+        return ResolvedLayout::file(text, path, "Game files");
+    }
+    if let Some(conn) = conn {
+        let fetched;
+        let list = match officials {
+            Some(list) => list,
+            None => {
+                fetched = official_list(conn, app_id).await;
+                &fetched
+            }
+        };
+        for (_, id, _) in list.iter().take(8) {
+            if let Some(text) = workshop_file(conn, app_id, *id).await {
+                return ResolvedLayout { text, source: format!("Official Workshop #{id}"), workshop_id: Some(*id), path: None };
+            }
         }
     }
+    ResolvedLayout::default()
+}
+
+pub fn binding_document(choice: &BindingChoice, steam_root: &Path, account: u32, app_id: AppId) -> Option<LayoutDocument> {
+    LayoutDocument::parse(&explicit_local(choice, steam_root, account, app_id)?.text).ok()
 }
 
 fn game_actions_in(input: &vdf::Obj) -> Vec<String> {
@@ -329,12 +505,10 @@ fn game_actions_in(input: &vdf::Obj) -> Vec<String> {
 /// Extract controller type and human-readable action sets / layers from a
 /// `controller_mappings` VDF.
 pub fn parse_vdf_summary(text: &str) -> (String, Vec<ActionSetSummary>) {
-    let Ok(doc) = vdf::parse(text) else {
+    let Ok(doc) = LayoutDocument::parse(text) else {
         return (String::new(), Vec::new());
     };
-    let Some(m) = doc.obj("controller_mappings") else {
-        return (String::new(), Vec::new());
-    };
+    let m = doc.mappings();
     let ctrl_type = m.str("controller_type").unwrap_or_default().to_string();
 
     let mut set_titles: HashMap<String, String> = HashMap::new();
@@ -419,7 +593,6 @@ pub fn parse_vdf_summary(text: &str) -> (String, Vec<ActionSetSummary>) {
 /// Inspect local Steam Input configurations for `app_id` without needing network.
 pub fn inspect_local(steam_root: &Path, account: u32, app_id: AppId, install_dir: &Path) -> InputConfigReport {
     let mut available: Vec<BindingOption> = Vec::new();
-    let mut user_vdfs = Vec::new();
     let cfg_dir = (!steam_root.as_os_str().is_empty()).then(|| player_config_dir(steam_root, account, app_id));
 
     if let Some(dir) = &cfg_dir {
@@ -434,7 +607,6 @@ pub fn inspect_local(steam_root: &Path, account: u32, app_id: AppId, install_dir
                 path: Some(path.clone()),
                 workshop_id: None,
             });
-            user_vdfs.push((text, path));
         }
     }
 
@@ -453,7 +625,6 @@ pub fn inspect_local(steam_root: &Path, account: u32, app_id: AppId, install_dir
         }
     }
 
-    let mut game_vdfs = Vec::new();
     if !install_dir.as_os_str().is_empty() {
         for (_, text, path) in all_in(install_dir, 3) {
             let ct = controller_type_in(&text);
@@ -466,71 +637,73 @@ pub fn inspect_local(steam_root: &Path, account: u32, app_id: AppId, install_dir
                 path: Some(path.clone()),
                 workshop_id: None,
             });
-            game_vdfs.push((text, path));
         }
     }
 
+    available.extend(managed_options(steam_root, account, app_id));
     let active_choice = app_binding(app_id);
-    let mut active_source = String::new();
-    let mut active_path = None;
-    let mut active_workshop_id = None;
-    let mut active_vdf = None;
+    if let BindingChoice::LocalFile(path) = &active_choice
+        && !available.iter().any(|o| o.path.as_ref() == Some(path))
+    {
+        let label = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        available.push(BindingOption {
+            choice: active_choice.clone(), origin: BindingOrigin::CustomFile,
+            controller_type: read_layout(path).ok().and_then(|doc| doc.mappings().str("controller_type").map(str::to_owned)).unwrap_or_default(),
+            label: label.into(), path: Some(path.clone()), workshop_id: None,
+        });
+    }
+    let mut report = InputConfigReport { app_id, active_choice, available, config_dir: cfg_dir, ..Default::default() };
+    // With no connection every branch completes immediately.
+    use futures_util::FutureExt;
+    let resolved = resolve_layout(None, app_id, account, steam_root, install_dir, &report.active_choice, None)
+        .now_or_never().expect("local resolution has no asynchronous operations");
+    populate(&mut report, resolved);
+    report
+}
 
-    match &active_choice {
-        BindingChoice::LocalFile(p) => {
-            if !available.iter().any(|o| o.path.as_ref() == Some(p)) {
-                let ct = std::fs::read_to_string(p).ok().map(|t| controller_type_in(&t)).unwrap_or_default();
-                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                available.push(BindingOption {
-                    choice: BindingChoice::LocalFile(p.clone()),
-                    origin: BindingOrigin::CustomFile,
-                    controller_type: ct,
-                    label: format!("Custom: {name}"),
-                    path: Some(p.clone()),
-                    workshop_id: None,
-                });
-            }
-            if let Ok(t) = std::fs::read_to_string(p)
-                && is_mappings(&t)
-            {
-                active_source = format!("Selected file ({})", p.display());
-                active_path = Some(p.clone());
-                active_vdf = Some(t);
-            }
+pub fn managed_options(steam_root: &Path, account: u32, app_id: AppId) -> Vec<BindingOption> {
+    let mut options = Vec::new();
+    let mut add = |choice: BindingChoice, origin| {
+        if let Some(resolved) = explicit_local(&choice, steam_root, account, app_id) {
+            options.push(BindingOption {
+                choice, origin, controller_type: controller_type_in(&resolved.text), label: resolved.source,
+                path: resolved.path, workshop_id: resolved.workshop_id,
+            });
         }
-        BindingChoice::Workshop(id) => {
-            active_workshop_id = Some(*id);
-            active_source = format!("Workshop #{id}");
+    };
+    for template in BuiltInTemplate::ALL {
+        add(BindingChoice::Template(TemplateChoice::BuiltIn(template)), BindingOrigin::Template);
+    }
+    if let Ok(dir) = templates(steam_root) {
+        for name in files(&dir).into_iter().filter_map(|n| TemplateFileName::try_from(n).ok()) {
+            add(BindingChoice::Template(TemplateChoice::Installed(name)), BindingOrigin::Template);
         }
-        BindingChoice::Auto => {
-            if let Some((t, p)) = user_vdfs.into_iter().next() {
-                active_source = format!("User configuration ({})", p.display());
-                active_path = Some(p);
-                active_vdf = Some(t);
-            } else if let Some((t, p)) = game_vdfs.into_iter().next() {
-                active_source = format!("Game files ({})", p.display());
-                active_path = Some(p);
-                active_vdf = Some(t);
+    }
+    if let Ok(dir) = managed(account, app_id, "community", false) {
+        for name in files(&dir) {
+            if let Some(id) = name.strip_suffix(".vdf").and_then(|n| n.parse::<u64>().ok()).filter(|id| *id != 0) {
+                add(BindingChoice::Community(id), BindingOrigin::Community(id));
             }
         }
     }
-
-    let (active_controller_type, action_sets) = active_vdf
-        .as_deref()
-        .map(parse_vdf_summary)
-        .unwrap_or_default();
-
-    InputConfigReport {
-        app_id,
-        active_choice,
-        active_source,
-        active_path,
-        active_workshop_id,
-        active_controller_type,
-        action_sets,
-        available,
-        config_dir: cfg_dir,
+    if let Ok(dir) = managed(account, app_id, "custom", false) {
+        for name in files(&dir) {
+            if let Some(id) = name.strip_suffix(".vdf").and_then(|n| LayoutId::try_from(n.to_owned()).ok()) {
+                add(BindingChoice::Custom(id), BindingOrigin::Custom);
+            }
+        }
     }
+    options
+}
+
+fn populate(report: &mut InputConfigReport, resolved: ResolvedLayout) {
+    let (kind, sets) = parse_vdf_summary(&resolved.text);
+    report.active_source = resolved.source;
+    report.active_path = resolved.path;
+    report.active_workshop_id = resolved.workshop_id;
+    report.active_controller_type = kind;
+    report.action_sets = sets;
+    report.document = LayoutDocument::parse(&resolved.text).ok();
 }
 
 /// Inspect local and online (Workshop + official PICS) Steam Input configurations.
@@ -551,35 +724,8 @@ pub async fn inspect(conn: &Connection, app_id: AppId, me: u64, steam_root: &Pat
         }
     }
 
-    // Download Workshop / Official VDF if the active config isn't already resolved from disk.
-    if report.action_sets.is_empty() {
-        let fetched = match report.active_choice {
-            BindingChoice::Workshop(id) => workshop_file(conn, app_id, id).await.map(|t| (t, id, format!("Selected Workshop #{id}"))),
-            BindingChoice::LocalFile(_) => None,
-            BindingChoice::Auto => {
-                let mut hit = None;
-                for (id, _) in player_workshop_choices(steam_root, account, app_id, true) {
-                    if let Some(t) = workshop_file(conn, app_id, id).await {
-                        hit = Some((t, id, format!("User Workshop #{id}")));
-                        break;
-                    }
-                }
-                if hit.is_none()
-                    && let Some((t, id)) = official(conn, app_id).await
-                {
-                    hit = Some((t, id, format!("Official configuration (Workshop {id})")));
-                }
-                hit
-            }
-        };
-        if let Some((text, id, src)) = fetched {
-            let (ct, sets) = parse_vdf_summary(&text);
-            report.active_source = src;
-            report.active_workshop_id = Some(id);
-            report.active_controller_type = ct;
-            report.action_sets = sets;
-        }
-    }
+    let resolved = resolve_layout(Some(conn), app_id, account, steam_root, install_dir, &report.active_choice, Some(&officials)).await;
+    populate(&mut report, resolved);
     report
 }
 
@@ -640,7 +786,7 @@ mod tests {
 
         set_app_binding(620, BindingChoice::Auto);
         let report = inspect_local(&steam, 42, 620, &game);
-        assert_eq!(report.available.len(), 2);
+        assert_eq!(report.available.len(), 6);
         assert_eq!(report.active_path.as_ref(), Some(&user_vdf));
         assert_eq!(report.action_sets.len(), 3);
 
