@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Download &amp; Install Aurora Steam Client (Arch, Debian/Ubuntu, Fedora, Windows)</title>
+<meta name="description" content="Download and install Aurora Steam Client on Arch Linux (.pkg.tar.zst), Debian/Ubuntu (.deb), Fedora (.rpm), generic Linux (.tar.gz), Windows 10/11 (.exe or portable .zip), or build from source with Rust.">
+<meta name="theme-color" content="#161D25">
+<link rel="canonical" href="https://mollie2999.github.io/Aurora/install/">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Aurora Steam Client">
+<meta property="og:title" content="Download &amp; Install Aurora Steam Client — Linux &amp; Windows">
+<meta property="og:description" content="Packages for Arch Linux, Debian/Ubuntu, Fedora, generic Linux, and Windows 10/11, plus Cargo build instructions.">
+<meta property="og:image" content="https://mollie2999.github.io/Aurora/assets/img/social.png">
+<meta property="og:url" content="https://mollie2999.github.io/Aurora/install/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="../assets/fonts/Geist.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../assets/subpage.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="logo-fade" gradientUnits="userSpaceOnUse" x1="0" y1="50" x2="0" y2="8">
+      <stop offset="0" stop-color="#DFE3E6" stop-opacity=".85"/>
+      <stop offset="1" stop-color="#DFE3E6" stop-opacity="0"/>
+    </linearGradient>
+    <symbol id="logo" viewBox="0 0 64 64">
+      <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30 L54 8 C49 9 45 12 40 17 C31 26 21 30 11 25 Z" fill="url(#logo-fade)"/>
+      <path d="M6 46 C18 54 30 50 40 40 C46 34 52 30 58 30" fill="none" stroke="#DFE3E6" stroke-width="5" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="../"><svg aria-hidden="true"><use href="#logo"/></svg>Aurora</a>
+    <nav class="tabs" aria-label="Site">
+      <a class="pill" href="../">Home</a>
+      <a class="pill" href="../linux/">Linux &amp; Proton</a>
+      <a class="pill" href="../benchmarks/">Benchmarks</a>
+      <a class="pill" href="./" aria-current="page">Install</a>
+      <a class="pill" href="../faq/">FAQ</a>
+    </nav>
+    <span class="spacer"></span>
+    <a class="pill gh" href="https://github.com/mollie2999/Aurora"><span>GitHub</span></a>
+    <a class="btn btn-brand" href="https://github.com/mollie2999/Aurora/releases/latest">Latest Release</a>
+  </div>
+</header>
+
+<main id="main" class="wrap">
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <a href="../">Aurora Steam Client</a>
+    <span aria-hidden="true">/</span>
+    <span>Install</span>
+  </nav>
+
+  <section class="page-hero">
+    <p class="eyebrow">Downloads · Linux x86_64 &amp; Windows 10/11</p>
+    <h1>Download &amp; install <span>Aurora Steam Client</span></h1>
+    <p class="lede">Every release ships native Linux packages for Arch, Debian/Ubuntu, and Fedora, a universal Linux tarball, and both an auto-updating installer and portable archive for Windows 10 &amp; 11—with <code>SHA256SUMS.txt</code> verification.</p>
+    <div class="hero-actions">
+      <a class="btn btn-brand" href="https://github.com/mollie2999/Aurora/releases/latest">Open Latest Release on GitHub</a>
+      <a class="pill" href="../faq/">Read Safety &amp; Anti-Cheat FAQ</a>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="linux-pkg-h">
+    <h2 id="linux-pkg-h">Linux installation</h2>
+    <p>Download the package for your distribution from the <a class="link" href="https://github.com/mollie2999/Aurora/releases/latest">latest GitHub release</a>. Keep Steam installed on disk for Proton and the windowless Steam host; install <code>ffmpeg</code> and <code>libpulse</code> for trailers and Steam Broadcasts.</p>
+    <div class="grid-2">
+      <div class="card">
+        <h3>Arch Linux / CachyOS / Manjaro</h3>
+        <p>Download <code>aurora-bin-&lt;version&gt;-x86_64.pkg.tar.zst</code> and install with <code>pacman</code>:</p>
+        <div class="term"><pre><span class="p">$ </span>sudo pacman -U ./aurora-bin-*-x86_64.pkg.tar.zst</pre></div>
+      </div>
+      <div class="card">
+        <h3>Debian, Ubuntu 22.04+, Linux Mint, Pop!_OS</h3>
+        <p>Download <code>aurora_&lt;version&gt;_amd64.deb</code> and install with <code>apt</code>:</p>
+        <div class="term"><pre><span class="p">$ </span>sudo apt install ./aurora_*_amd64.deb</pre></div>
+      </div>
+      <div class="card">
+        <h3>Fedora / Nobara / RHEL-family</h3>
+        <p>Download <code>aurora-&lt;version&gt;.x86_64.rpm</code> and install with <code>dnf</code>:</p>
+        <div class="term"><pre><span class="p">$ </span>sudo dnf install ./aurora-*.x86_64.rpm</pre></div>
+      </div>
+      <div class="card">
+        <h3>Generic Linux tarball</h3>
+        <p>Download <code>Aurora-Linux-x86_64.tar.gz</code>, extract anywhere, and run:</p>
+        <div class="term"><pre><span class="p">$ </span>tar -xzf Aurora-Linux-x86_64.tar.gz
+<span class="p">$ </span>./aurora</pre></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="win-pkg-h">
+    <h2 id="win-pkg-h">Windows 10 &amp; 11 installation</h2>
+    <div class="grid-2">
+      <div class="card">
+        <h3>Windows Installer (recommended)</h3>
+        <p>Download <code>Aurora-Setup-&lt;version&gt;.exe</code> from the latest release. It installs per-user without administrator rights, creates Start Menu shortcuts, and automatically checks for updates (including SemVer prereleases).</p>
+        <p>If Windows SmartScreen warns about an unsigned open-source binary, choose <b>More info → Run anyway</b>.</p>
+      </div>
+      <div class="card">
+        <h3>Windows Portable ZIP</h3>
+        <p>Download <code>Aurora-&lt;version&gt;-portable.zip</code>, extract to any folder, and run <code>aurora.exe</code>. No installer or registry entries required.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="src-h">
+    <h2 id="src-h">Build from source (Rust)</h2>
+    <div class="card">
+      <p>Requires <a class="link" href="https://rustup.rs">Rust</a>. To preview Aurora without signing in, pass <code>--demo</code>. For Proton games on Linux, copy the CI-built Windows <code>steamclient</code> DLLs from a release next to your compiled binary.</p>
+      <div class="term"><pre><span class="p">$ </span>git clone https://github.com/mollie2999/Aurora.git
+<span class="p">$ </span>cd Aurora
+<span class="p">$ </span>cargo build --release -p aurora -p steamhost
+<span class="p">$ </span>target/release/aurora          <span class="c"># sign in with your Steam account</span>
+<span class="p">$ </span>target/release/aurora --demo   <span class="c"># sample library, no sign-in</span></pre></div>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="verify-h">
+    <h2 id="verify-h">Verify downloads (SHA-256)</h2>
+    <div class="card">
+      <p>Every GitHub release includes <code>SHA256SUMS.txt</code> so you can verify your package before installing:</p>
+      <div class="term"><pre><span class="p">$ </span>sha256sum -c --ignore-missing SHA256SUMS.txt</pre></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap credits">
+    <p>Aurora Steam Client is open source (MIT), built on <a href="https://github.com/madonchik123/SteamInRust">SteamInRust</a>. Unofficial and not affiliated with Valve. Steam is a trademark of Valve Corporation.</p>
+  </div>
+  <div class="statusbar">
+    <div class="wrap">
+      <span>Aurora Steam Client</span>
+      <nav aria-label="Footer navigation">
+        <a href="../">Home</a>
+        <a href="../linux/">Linux &amp; Proton</a>
+        <a href="../benchmarks/">Benchmarks</a>
+        <a href="./">Install</a>
+        <a href="../faq/">FAQ</a>
+        <a href="https://github.com/mollie2999/Aurora">GitHub</a>
+      </nav>
+    </div>
+  </div>
+</footer>
+</body>
+</html>

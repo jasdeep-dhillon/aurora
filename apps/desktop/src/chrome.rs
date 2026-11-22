@@ -22,10 +22,18 @@ pub fn toggle_maximized(ctx: &egui::Context) {
     ctx.send_viewport_cmd(ViewportCommand::Maximized(!max));
 }
 
-/// Minimize the window and release cached image/heap memory immediately.
+fn trim_after_frame_id() -> Id {
+    Id::unique("trim-after-frame")
+}
+
+pub(crate) fn take_memory_trim_request(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|data| data.remove_temp::<bool>(trim_after_frame_id())).unwrap_or(false)
+}
+
+/// Minimize the window and release cached images before the frame completes.
 pub fn minimize(ctx: &egui::Context) {
     ctx.forget_all_images();
-    crate::release_memory();
+    ctx.data_mut(|data| data.insert_temp(trim_after_frame_id(), true));
     ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
 }
 

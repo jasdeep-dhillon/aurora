@@ -149,8 +149,7 @@ impl ThemeManager {
             if !manifest_path.is_file() {
                 continue;
             }
-            match fs::read_to_string(&manifest_path)
-                .map_err(Error::from)
+            match read_bounded_text(&manifest_path, tree::MAX_LAYOUT_TOML_BYTES as u64)
                 .and_then(|s| ThemeManifest::parse(&s))
             {
                 Ok(manifest) => {
@@ -355,9 +354,10 @@ impl ThemeManager {
         let layout = if let Some(path) =
             safe_rel_path(&installed.dir, layout_rel).filter(|p| p.is_file())
         {
-            let src = fs::read_to_string(&path)?;
+            let src = read_bounded_text(&path, tree::MAX_LAYOUT_TOML_BYTES as u64)?;
             LayoutTree::parse(&src).map_err(Error::InvalidLayout)?
-        } else if let Some(inline) = installed.manifest.layout.clone() {
+        } else if let Some(mut inline) = installed.manifest.layout.clone() {
+            inline.validate().map_err(Error::InvalidLayout)?;
             inline
         } else {
             LayoutTree::default()
@@ -409,10 +409,128 @@ impl ThemeManager {
     }
 }
 
+/// Maximum size allowed for a single custom theme font file (16 MiB).
+pub const MAX_FONT_BYTES: u64 = 16 * 1024 * 1024;
+
+pub(crate) fn open_regular_no_symlinks(path: &Path) -> Result<fs::File, Error> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Component;
+
+        let mut comps: Vec<Component<'_>> = Vec::new();
+        let mut is_abs = false;
+        for c in path.components() {
+            match c {
+                Component::RootDir => is_abs = true,
+                Component::CurDir => {}
+                Component::ParentDir | Component::Normal(_) => comps.push(c),
+                Component::Prefix(_) => return Err(Error::UnsafePath(path.display().to_string())),
+            }
+        }
+        if comps.is_empty() {
+            return Err(Error::UnsafePath(path.display().to_string()));
+        }
+        let start = if is_abs { c"/" } else { c"." };
+        let fd = unsafe { libc::open(start.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return Err(Error::Io(std::io::Error::last_os_error()));
+        }
+        let mut dirfd = unsafe { OwnedFd::from_raw_fd(fd) };
+        for (idx, comp) in comps.iter().enumerate() {
+            let is_last = idx + 1 == comps.len();
+            let cseg = match comp {
+                Component::ParentDir => CString::new("..").unwrap(),
+                Component::Normal(s) => CString::new(s.as_bytes()).map_err(|_| Error::UnsafePath(path.display().to_string()))?,
+                _ => continue,
+            };
+            let flags = if is_last {
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC
+            } else {
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+            };
+            let next = unsafe { libc::openat(dirfd.as_raw_fd(), cseg.as_ptr(), flags) };
+            if next < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::ELOOP) {
+                    return Err(Error::UnsafePath(path.display().to_string()));
+                }
+                return Err(Error::Io(err));
+            }
+            let owned = unsafe { OwnedFd::from_raw_fd(next) };
+            if is_last {
+                return Ok(fs::File::from(owned));
+            }
+            dirfd = owned;
+        }
+        Err(Error::UnsafePath(path.display().to_string()))
+    }
+    #[cfg(not(unix))]
+    {
+        let pre = fs::symlink_metadata(path)?;
+        if pre.file_type().is_symlink() || !pre.is_file() {
+            return Err(Error::UnsafePath(path.display().to_string()));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if (pre.file_attributes() & 0x0400) != 0 {
+                return Err(Error::UnsafePath(path.display().to_string()));
+            }
+        }
+        let mut opts = fs::OpenOptions::new();
+        opts.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            opts.custom_flags(0x0020_0000);
+        }
+        Ok(opts.open(path)?)
+    }
+}
+
+pub(crate) fn read_bounded_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>, Error> {
+    use std::io::Read;
+    let file = open_regular_no_symlinks(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(Error::UnsafePath(path.display().to_string()));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if (meta.file_attributes() & 0x0400) != 0 {
+            return Err(Error::UnsafePath(path.display().to_string()));
+        }
+    }
+    if meta.len() > max_bytes {
+        return Err(Error::PackageLimit(format!(
+            "file '{}' exceeds maximum size of {max_bytes} bytes",
+            path.display()
+        )));
+    }
+    let mut buf = Vec::new();
+    file.take(max_bytes.saturating_add(1)).read_to_end(&mut buf)?;
+    if buf.len() as u64 > max_bytes {
+        return Err(Error::PackageLimit(format!(
+            "file '{}' exceeds maximum size of {max_bytes} bytes",
+            path.display()
+        )));
+    }
+    Ok(buf)
+}
+
+pub(crate) fn read_bounded_text(path: &Path, max_bytes: u64) -> Result<String, Error> {
+    let bytes = read_bounded_bytes(path, max_bytes)?;
+    String::from_utf8(bytes).map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+}
+
 fn load_custom_fonts(dir: &Path, cfg: &FontsConfig) -> Option<ui::CustomFonts> {
     let load = |rel: &Option<String>| -> Option<Vec<u8>> {
         let p = safe_rel_path(dir, rel.as_deref()?)?;
-        fs::read(p).ok()
+        read_bounded_bytes(&p, MAX_FONT_BYTES).ok()
     };
     let regular = load(&cfg.regular);
     let bold = load(&cfg.bold);

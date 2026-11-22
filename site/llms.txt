@@ -1,0 +1,32 @@
+# Aurora Steam Client
+
+> Aurora Steam Client is an unofficial, free, open-source (MIT) Steam desktop client for Linux and Windows written in Rust with egui. It replaces the official Chromium-based Steam interface (`steamwebhelper`) with a single native process using ~166 MB idle RAM instead of ~1,408 MB on Linux. It started as a Linux-first fork of SteamInRust and supports Wayland, X11, Proton, Steam DRM, and Windows 10/11.
+
+Aurora signs in directly to the user's own Steam account (password, Steam Guard, or QR code) and communicates with Steam's servers directly. It is not affiliated with or endorsed by Valve, and it is unrelated to Aurora Linux (Universal Blue), Cheat Happens Aurora, or Daturaxoxo/Aurora.
+
+## Key facts
+
+- **Platforms & packages:** Linux x86_64 (Arch `.pkg.tar.zst`, Debian/Ubuntu `.deb`, Fedora `.rpm`, generic `.tar.gz`) and Windows 10/11 (auto-updating installer `.exe`, portable `.zip`)
+- **Measured Linux benchmarks (vs official Steam build 1792618285 on CachyOS GNOME Wayland):**
+  - First window: 0.14 s vs 2.77 s (20x faster)
+  - Signed-in main window: 2.16 s vs 4.90 s (2.3x faster)
+  - Idle memory (PSS): 166 MB vs 1,408 MB (8.5x less)
+  - Idle CPU: 0.2% vs 18% of one core (90x less)
+  - Processes: 1 vs 16
+  - Program size: 46 MB vs 2,129 MB (46x smaller)
+- **Core features:** Store with search, Discovery Queue, Points Shop, and native Linux trailers; Library with collections, non-Steam games, game move/backup/restore; fast parallel depot downloader; Friends, Activity Feed, Chat, Community & Live Broadcasts; Workshop; Inventory, Market & Trading; Steam Cloud; offline mode; Vulkan & D3D11/D3D12 Shift+Tab in-game overlay with FPS HUD, notes, and F12 screenshots; Wayland/X11 system tray; Steam Input controller settings; declarative custom themes (including NEVKO, Native Adwaita, Steam Desktop Replica); Rhai plugins; English, Russian, French, and Spanish UI.
+- **Linux game launching:** Native Linux games run directly on a windowless Steam host; Windows games run via Proton (with per-game Proton selection and shader cache pre-compilation); SteamStub DRM games run via Proton on the windowless Steam host (fail-closed ownership checks via Valve's engine); anti-cheat games (VAC, Easy Anti-Cheat, BattlEye) launch through the official Steam client by default.
+- **Not yet supported:** Big Picture, Remote Play, voice chat. Checkout opens Steam's website.
+
+## Documentation & pages
+
+- [Home](https://mollie2999.github.io/Aurora/)
+- [Linux, Wayland & Proton Guide](https://mollie2999.github.io/Aurora/linux/)
+- [Aurora vs Steam Benchmarks](https://mollie2999.github.io/Aurora/benchmarks/)
+- [Download & Install Guide](https://mollie2999.github.io/Aurora/install/)
+- [FAQ: Safety, Anti-Cheat & Aurora vs SteamInRust](https://mollie2999.github.io/Aurora/faq/)
+- [GitHub Repository](https://github.com/mollie2999/Aurora)
+- [Latest Release](https://github.com/mollie2999/Aurora/releases/latest)
+- [Changelog](https://github.com/mollie2999/Aurora/blob/main/CHANGELOG.md)
+- [Linux Benchmark Methodology & Script](https://github.com/mollie2999/Aurora/blob/main/docs/benchmarks-linux.md)
+- [Upstream project (SteamInRust)](https://github.com/madonchik123/SteamInRust)

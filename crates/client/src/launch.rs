@@ -714,8 +714,39 @@ pub fn kill_in_folder(dir: &Path) {
     }
 }
 
-pub fn wait(app_id: AppId, mut child: Child) -> AppId {
+/// Wait for a game process and any launcher-spawned child processes. On
+/// Windows, attaches the child to a Job Object so descendant processes
+/// (even outside `install_dir`) keep IPC and shared controller publishing
+/// alive through launcher handoff; falls back to `processes_in(install_dir)`
+/// if job assignment is unavailable.
+pub fn wait_in_dir(app_id: AppId, install_dir: &Path, mut child: Child) -> AppId {
+    #[cfg(windows)]
+    let job = win::JobGuard::attach(&child);
     wait_all(&mut child);
+    #[cfg(windows)]
+    {
+        const GRACE: Duration = Duration::from_secs(5);
+        let mut logged = false;
+        let mut empty_since: Option<Instant> = None;
+        loop {
+            let alive = match &job {
+                Some(j) => j.has_processes(),
+                None => !win::processes_in(install_dir).is_empty(),
+            };
+            if alive {
+                if !logged {
+                    tracing::info!("initial game process exited; waiting for launcher-spawned processes");
+                    logged = true;
+                }
+                empty_since = None;
+            } else if empty_since.get_or_insert_with(Instant::now).elapsed() >= GRACE {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = install_dir;
     app_id
 }
 
@@ -793,13 +824,19 @@ struct Swap {
 
 static SWAP: Mutex<Option<Swap>> = Mutex::new(None);
 
-/// Point steam_api at our DLL (64-bit or 32-bit) for one launch.
-pub fn swap_begin(token: &str, dll: &Path, is64: bool, account_id: u32) -> Result<(), String> {
+/// Point steam_api at our 64-bit and/or 32-bit DLLs for one launch so a 32-bit
+/// launcher spawning a 64-bit game (or vice versa) still loads Aurora's DLL.
+/// Any partial registry writes are rolled back if a subsequent write fails.
+pub fn swap_begin_both(token: &str, dll64: Option<&Path>, dll32: Option<&Path>, account_id: u32) -> Result<(), String> {
     // Linux: Proton's own prefix registry already points at the DLL.
     if cfg!(not(windows)) {
         return Ok(());
     }
+    if dll64.is_none() && dll32.is_none() {
+        return Err("steamclient DLL missing".into());
+    }
     let mut swap = SWAP.lock().unwrap();
+    let created = swap.is_none();
     let state = swap.get_or_insert_with(|| Swap {
         saved: Saved {
             pid: win::reg_dword(ACTIVE, "pid"),
@@ -811,17 +848,30 @@ pub fn swap_begin(token: &str, dll: &Path, is64: bool, account_id: u32) -> Resul
         pending: Default::default(),
         running: Default::default(),
     });
-    let dll = dll.to_string_lossy().into_owned();
     let pid = std::process::id();
-    win::set_string(ACTIVE, if is64 { "SteamClientDll64" } else { "SteamClientDll" }, &dll)?;
-    win::set_dword(ACTIVE, "pid", pid)?;
-    win::set_dword(ACTIVE, "ActiveUser", account_id)?;
-    state.ours.pid = Some(pid);
-    state.ours.user = Some(account_id);
-    if is64 {
-        state.ours.dll64 = Some(dll);
-    } else {
-        state.ours.dll32 = Some(dll);
+    let apply = (|| -> Result<(), String> {
+        if let Some(d64) = dll64 {
+            let s = d64.to_string_lossy().into_owned();
+            win::set_string(ACTIVE, "SteamClientDll64", &s)?;
+            state.ours.dll64 = Some(s);
+        }
+        if let Some(d32) = dll32 {
+            let s = d32.to_string_lossy().into_owned();
+            win::set_string(ACTIVE, "SteamClientDll", &s)?;
+            state.ours.dll32 = Some(s);
+        }
+        win::set_dword(ACTIVE, "pid", pid)?;
+        state.ours.pid = Some(pid);
+        win::set_dword(ACTIVE, "ActiveUser", account_id)?;
+        state.ours.user = Some(account_id);
+        Ok(())
+    })();
+    if let Err(e) = apply {
+        if created {
+            restore_all(state);
+            *swap = None;
+        }
+        return Err(e);
     }
     state.pending.insert(token.to_string());
     state.running.insert(token.to_string());
@@ -2494,6 +2544,65 @@ mod win {
         fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> *mut c_void;
         fn Process32FirstW(snap: *mut c_void, entry: *mut ProcessEntry) -> i32;
         fn Process32NextW(snap: *mut c_void, entry: *mut ProcessEntry) -> i32;
+        fn CreateJobObjectW(attrs: *const c_void, name: *const u16) -> *mut c_void;
+        fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+        fn QueryInformationJobObject(job: *mut c_void, class: u32, info: *mut c_void, len: u32, ret_len: *mut u32) -> i32;
+    }
+
+    /// Windows Job Object handle that tracks the spawned game process and all
+    /// of its descendants across launcher handoffs.
+    pub struct JobGuard(*mut c_void);
+
+    unsafe impl Send for JobGuard {}
+
+    impl JobGuard {
+        pub fn attach(child: &std::process::Child) -> Option<Self> {
+            use std::os::windows::io::AsRawHandle;
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if job.is_null() {
+                return None;
+            }
+            let ok = unsafe { AssignProcessToJobObject(job, child.as_raw_handle().cast()) };
+            if ok == 0 {
+                unsafe { CloseHandle(job) };
+                return None;
+            }
+            Some(Self(job))
+        }
+
+        pub fn has_processes(&self) -> bool {
+            // JobObjectBasicAccountingInformation (class 1): ActiveProcesses is a u32
+            // at byte offset 36 (after four 8-byte LARGE_INTEGERs and one u32 TotalProcesses).
+            const JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION: u32 = 1;
+            #[repr(C)]
+            struct BasicAccounting {
+                total_user_time: i64,
+                total_kernel_time: i64,
+                this_period_user_time: i64,
+                this_period_kernel_time: i64,
+                total_page_fault_count: u32,
+                total_processes: u32,
+                active_processes: u32,
+                total_terminated_processes: u32,
+            }
+            let mut info: BasicAccounting = unsafe { std::mem::zeroed() };
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.0,
+                    JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+                    (&mut info as *mut BasicAccounting).cast(),
+                    std::mem::size_of::<BasicAccounting>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            ok != 0 && info.active_processes > 0
+        }
+    }
+
+    impl Drop for JobGuard {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
     }
 
     #[link(name = "shell32")]
@@ -2577,7 +2686,9 @@ mod win {
     }
 
     pub fn processes_in(dir: &Path) -> Vec<u32> {
-        let want = dir.to_string_lossy().to_lowercase();
+        let want_trimmed = dir.to_string_lossy().to_lowercase();
+        let want_trimmed = want_trimmed.trim_end_matches(['\\', '/']);
+        let want_prefix = format!("{want_trimmed}\\");
         let mut out = Vec::new();
         unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -2589,7 +2700,8 @@ mod win {
             let mut ok = Process32FirstW(snap, &mut e) != 0;
             while ok {
                 if let Some((true, name)) = image(e.pid) {
-                    if PathBuf::from(&name).starts_with(dir) || name.to_lowercase().starts_with(&want) {
+                    let lower = name.to_lowercase();
+                    if PathBuf::from(&name).starts_with(dir) || lower.starts_with(&want_prefix) {
                         out.push(e.pid);
                     }
                 }
@@ -3173,14 +3285,21 @@ mod tests {
         assert!(enabled.contains(&(crate::pads::ENV_INPUT_FAMILIES, "0xf".into())));
         assert!(enabled.contains(&(crate::pads::ENV_PADS, "Local\\sir-pads-1".into())));
 
-        // Xbox-only globally: Steam Input enabled for Xbox, SHM bridge omitted.
+        // Xbox-only globally: Steam Input and SHM bridge remain enabled so
+        // Xbox-classified third-party pads that native XInput misses still work;
+        // disabling all families omits STEAMINRUST_PADS.
         cfg.families.playstation = false;
         cfg.families.switch_pro = false;
         cfg.families.generic = false;
         let xbox_only = steam_input_env_vars(0, &cfg, Some("Local\\sir-pads-1"));
         assert!(xbox_only.contains(&(crate::pads::ENV_STEAM_INPUT, "1".into())));
         assert!(xbox_only.contains(&(crate::pads::ENV_INPUT_FAMILIES, "0x1".into())));
-        assert!(!xbox_only.iter().any(|(k, _)| *k == crate::pads::ENV_PADS));
+        assert!(xbox_only.contains(&(crate::pads::ENV_PADS, "Local\\sir-pads-1".into())));
+
+        cfg.families.xbox = false;
+        let none_enabled = steam_input_env_vars(0, &cfg, Some("Local\\sir-pads-1"));
+        assert!(none_enabled.contains(&(crate::pads::ENV_STEAM_INPUT, "0".into())));
+        assert!(!none_enabled.iter().any(|(k, _)| *k == crate::pads::ENV_PADS));
     }
 
     #[cfg(target_os = "linux")]

@@ -42,6 +42,9 @@ const MAX_SRVS: usize = 256;
 
 /// Captured Direct command queues keyed by `ID3D12Device` raw pointer.
 static QUEUES: LazyLock<Mutex<HashMap<usize, ID3D12CommandQueue>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Lock-free fast-path pointer for a already-captured Direct command queue.
+/// Safe against ABA reuse because `QUEUES` holds a strong COM reference to it.
+static KNOWN_DIRECT_QUEUE: AtomicUsize = AtomicUsize::new(0);
 static RENDERER: Mutex<Option<D3d12Renderer>> = Mutex::new(None);
 
 /// Install the `ID3D12CommandQueue::ExecuteCommandLists` vtable hook if
@@ -86,20 +89,24 @@ pub fn install_if_loaded() -> bool {
 }
 
 unsafe extern "system" fn hook_execute_command_lists(this: *mut c_void, count: u32, lists: *const *mut c_void) {
-    let _ = std::panic::catch_unwind(|| unsafe {
-        if let Some(q) = ID3D12CommandQueue::from_raw_borrowed(&this) {
-            if q.GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT {
-                let mut dev: Option<ID3D12Device> = None;
-                if q.GetDevice(&mut dev).is_ok() {
-                    if let Some(dev) = dev {
-                        if let Ok(mut map) = QUEUES.lock() {
-                            map.entry(dev.as_raw() as usize).or_insert_with(|| q.clone());
+    let this_addr = this as usize;
+    if this_addr != 0 && KNOWN_DIRECT_QUEUE.load(Ordering::Acquire) != this_addr {
+        let _ = std::panic::catch_unwind(|| unsafe {
+            if let Some(q) = ID3D12CommandQueue::from_raw_borrowed(&this) {
+                if q.GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT {
+                    let mut dev: Option<ID3D12Device> = None;
+                    if q.GetDevice(&mut dev).is_ok() {
+                        if let Some(dev) = dev {
+                            if let Ok(mut map) = QUEUES.lock() {
+                                let stored = map.entry(dev.as_raw() as usize).or_insert_with(|| q.clone());
+                                KNOWN_DIRECT_QUEUE.store(stored.as_raw() as usize, Ordering::Release);
+                            }
                         }
                     }
                 }
             }
-        }
-    });
+        });
+    }
     let real: ExecuteCommandListsFn = unsafe { std::mem::transmute(REAL_EXECUTE.load(Ordering::Acquire)) };
     unsafe { real(this, count, lists) }
 }
@@ -252,6 +259,11 @@ struct D3d12Renderer {
     next_fence: u64,
     frames: Vec<FrameSlot>,
     textures: HashMap<u64, D3d12Tex>,
+    /// Resources retired from `textures`, freed once `fence >= retire_fence`.
+    retired_resources: Vec<(u64, ID3D12Resource)>,
+    /// SRV heap slots retired from `textures`, reused only once all prior
+    /// in-flight frames (`fence >= retire_fence`) have completed on the GPU.
+    retired_srvs: Vec<(u64, usize)>,
     linear_out: bool,
     size: (u32, u32),
     last_present: Instant,
@@ -366,6 +378,8 @@ impl D3d12Renderer {
                 next_fence: 1,
                 frames,
                 textures: HashMap::new(),
+                retired_resources: Vec::new(),
+                retired_srvs: Vec::new(),
                 linear_out,
                 size: (desc.BufferDesc.Width, desc.BufferDesc.Height),
                 last_present: Instant::now(),
@@ -548,6 +562,10 @@ impl D3d12Renderer {
             if self.fence.GetCompletedValue() < value {
                 if self.fence.SetEventOnCompletion(value, self.fence_event).is_ok() {
                     WaitForSingleObject(self.fence_event, INFINITE);
+                } else {
+                    while self.fence.GetCompletedValue() < value {
+                        std::thread::yield_now();
+                    }
                 }
             }
         }
@@ -652,55 +670,82 @@ impl D3d12Renderer {
         if let Some((res, ptr, _cap)) = slot.as_ref().filter(|(_, _, cap)| *cap >= bytes) {
             return Ok((unsafe { res.GetGPUVirtualAddress() }, *ptr));
         }
+        let Some(cap) = util::checked_grow_capacity(bytes, 64 * 1024) else {
+            return Err(windows::core::Error::from(windows::Win32::Foundation::E_INVALIDARG));
+        };
+        let (res, ptr) = unsafe { device_ref.create_upload_buffer(cap)? };
         if let Some((old, _, _)) = slot.take() {
             garbage.push(old);
         }
-        let cap = bytes.next_power_of_two().max(64 * 1024);
-        let (res, ptr) = unsafe { device_ref.create_upload_buffer(cap)? };
         let gpu = unsafe { res.GetGPUVirtualAddress() };
         *slot = Some((res, ptr, cap));
         Ok((gpu, ptr))
+    }
+
+    unsafe fn reclaim_retired(&mut self) {
+        let completed = unsafe { self.fence.GetCompletedValue() };
+        self.retired_resources.retain(|(f, _)| *f > completed);
+        let mut i = 0;
+        while i < self.retired_srvs.len() {
+            if self.retired_srvs[i].0 <= completed {
+                let (_, slot) = self.retired_srvs.swap_remove(i);
+                self.free_srvs.push(slot);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn retire_fence(&self) -> u64 {
+        self.frames.iter().map(|f| f.fence_value).max().unwrap_or(0).max(self.next_fence)
     }
 
     unsafe fn apply_tex_op(&mut self, op: TexOp, garbage: &mut Vec<ID3D12Resource>) {
         match op {
             TexOp::Free(id) => {
                 if let Some(tex) = self.textures.remove(&id) {
-                    garbage.push(tex.resource);
-                    self.free_srvs.push(tex.srv_slot);
+                    let rf = self.retire_fence();
+                    self.retired_resources.push((rf, tex.resource));
+                    self.retired_srvs.push((rf, tex.srv_slot));
                 }
             }
             TexOp::Set(t) => unsafe {
                 let [w, h] = t.size;
-                if w == 0 || h == 0 {
+                let Some((row_bytes, _)) = util::validate_tex_rgba(t.size, t.rgba.len()) else {
+                    return;
+                };
+                let align = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT as usize;
+                let Some(row_pitch) = row_bytes.checked_add(align - 1).map(|v| v & !(align - 1)) else {
+                    return;
+                };
+                if u32::try_from(row_pitch).is_err() {
                     return;
                 }
-                let row_pitch = ((w as usize * 4) + (D3D12_TEXTURE_DATA_PITCH_ALIGNMENT as usize - 1))
-                    & !(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT as usize - 1);
-                let upload_size = row_pitch * h as usize;
+                let Some(upload_size) = row_pitch.checked_mul(h as usize) else {
+                    return;
+                };
+                if let Some([px, py]) = t.pos {
+                    let Some(tex) = self.textures.get(&t.id) else { return };
+                    if !util::validate_tex_subrect([px, py], t.size, tex.size) {
+                        return;
+                    }
+                }
                 let Ok((staging, ptr)) = self.create_upload_buffer(upload_size) else { return };
                 for row in 0..h as usize {
-                    std::ptr::copy_nonoverlapping(t.rgba.as_ptr().add(row * w as usize * 4), ptr.add(row * row_pitch), w as usize * 4);
+                    std::ptr::copy_nonoverlapping(t.rgba.as_ptr().add(row * row_bytes), ptr.add(row * row_pitch), row_bytes);
                 }
                 staging.Unmap(0, None);
 
                 let (dst_res, dst_x, dst_y, was_srv) = match t.pos {
                     Some([px, py]) => {
                         let Some(tex) = self.textures.get_mut(&t.id) else { return };
-                        if px + w > tex.size[0] || py + h > tex.size[1] {
-                            return;
-                        }
                         tex.linear = t.linear;
                         (tex.resource.clone(), px, py, true)
                     }
                     None => {
-                        let slot = if let Some(old) = self.textures.remove(&t.id) {
-                            garbage.push(old.resource);
-                            old.srv_slot
-                        } else {
-                            let Some(slot) = self.free_srvs.pop() else { return };
-                            slot
-                        };
+                        // Allocate a fresh SRV slot so we never overwrite a descriptor
+                        // that another in-flight command list is still reading.
+                        let Some(slot) = self.free_srvs.pop() else { return };
                         let heap = D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() };
                         let desc = D3D12_RESOURCE_DESC {
                             Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
@@ -733,7 +778,11 @@ impl D3d12Renderer {
                         };
                         let cpu = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: self.srv_heap.GetCPUDescriptorHandleForHeapStart().ptr + slot * self.srv_stride };
                         self.device.CreateShaderResourceView(&res, Some(&srv_desc), cpu);
-                        self.textures.insert(t.id, D3d12Tex { resource: res.clone(), srv_slot: slot, size: t.size, linear: t.linear });
+                        if let Some(old) = self.textures.insert(t.id, D3d12Tex { resource: res.clone(), srv_slot: slot, size: t.size, linear: t.linear }) {
+                            let rf = self.retire_fence();
+                            self.retired_resources.push((rf, old.resource));
+                            self.retired_srvs.push((rf, old.srv_slot));
+                        }
                         (res, 0, 0, false)
                     }
                 };
@@ -784,6 +833,7 @@ impl D3d12Renderer {
             let idx = (sc3.GetCurrentBackBufferIndex() as usize) % self.frames.len();
             let fence_val = self.frames[idx].fence_value;
             self.wait_fence(fence_val);
+            self.reclaim_retired();
             self.frames[idx].garbage.clear();
             self.frames[idx].allocator.Reset()?;
             self.cmd_list.Reset(&self.frames[idx].allocator, Some(&self.pso))?;
@@ -793,14 +843,23 @@ impl D3d12Renderer {
                 self.apply_tex_op(op, &mut garbage);
             }
 
-            if let Some(frame) = frame.filter(|f| !f.meshes.is_empty()) {
-                let vbytes: usize = frame.meshes.iter().map(|m| m.vertices.len()).sum();
-                let ibytes: usize = frame.meshes.iter().map(|m| m.indices.len() * 4).sum();
-                if vbytes > 0 && ibytes > 0 {
-                    let mut vb_slot = self.frames[idx].vb.take();
-                    let mut ib_slot = self.frames[idx].ib.take();
-                    let (vb_gpu, vb_ptr) = Self::ensure_upload_slot(self, &mut vb_slot, &mut garbage, vbytes)?;
-                    let (ib_gpu, ib_ptr) = Self::ensure_upload_slot(self, &mut ib_slot, &mut garbage, ibytes)?;
+            if let Some(frame) = frame.filter(|f| !f.meshes.is_empty())
+                && let Some((vbytes, ibytes)) = util::validate_mesh_totals(&frame.meshes, VERTEX_SIZE)
+                && vbytes > 0
+                && ibytes > 0
+            {
+                let mut vb_slot = self.frames[idx].vb.take();
+                let mut ib_slot = self.frames[idx].ib.take();
+                let vb_res = Self::ensure_upload_slot(self, &mut vb_slot, &mut garbage, vbytes);
+                let ib_res = Self::ensure_upload_slot(self, &mut ib_slot, &mut garbage, ibytes);
+                self.frames[idx].vb = vb_slot;
+                self.frames[idx].ib = ib_slot;
+                // If upload buffer growth failed after texture uploads were recorded,
+                // skip drawing meshes instead of abandoning the command list so
+                // recorded texture barriers still execute cleanly.
+                if let (Ok((vb_gpu, vb_ptr)), Ok((ib_gpu, ib_ptr))) = (vb_res, ib_res)
+                    && let Some(bb) = self.frames[idx].back_buffer.clone()
+                {
                     let mut v_at = vb_ptr;
                     let mut i_at = ib_ptr;
                     for m in &frame.meshes {
@@ -810,14 +869,6 @@ impl D3d12Renderer {
                         std::ptr::copy_nonoverlapping(m.indices.as_ptr() as *const u8, i_at, ib_len);
                         i_at = i_at.add(ib_len);
                     }
-                    self.frames[idx].vb = vb_slot;
-                    self.frames[idx].ib = ib_slot;
-
-                    let Some(bb) = self.frames[idx].back_buffer.clone() else {
-                        self.frames[idx].garbage = garbage;
-                        self.cmd_list.Close()?;
-                        return Ok(());
-                    };
                     let rtv = self.frames[idx].rtv;
 
                     let b_in = transition_barrier(&bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);

@@ -20,7 +20,7 @@ use crate::state::{Bytes, lock};
 use crate::vt::Fp;
 use std::collections::HashMap;
 use std::ffi::c_char;
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::{Condvar, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 pub fn imp(name: &str) -> Option<Fp> {
@@ -31,7 +31,8 @@ pub fn imp(name: &str) -> Option<Fp> {
     }
     match name {
         "Init" => f!(init),
-        "Shutdown" | "SetInputActionManifestFilePath" | "BNewDataAvailable" | "BWaitForData" => f!(yes),
+        "Shutdown" | "BNewDataAvailable" | "BWaitForData" => f!(yes),
+        "SetInputActionManifestFilePath" => f!(set_manifest_path),
         "RunFrame" => f!(run_frame),
         "GetConnectedControllers" => f!(connected),
         "GetActionSetHandle" => f!(set_handle),
@@ -312,9 +313,22 @@ fn origin_text(o: i32) -> &'static str {
 // ------------------------------------------------------------------- state
 
 #[derive(Default)]
+enum LoadState {
+    #[default]
+    Idle,
+    Loading(Instant),
+    Loaded,
+    Absent,
+    TransientError(Instant),
+}
+
+#[derive(Default)]
 struct Input {
     bindings: Option<Bindings>,
-    loading: bool,
+    manifest_bindings: Option<Bindings>,
+    manifest_path: Option<String>,
+    load_state: LoadState,
+    waited_once: bool,
     disabled_logged: bool,
     /// Interned names: handle = index + 1.
     sets: Vec<String>,
@@ -327,6 +341,11 @@ struct Input {
 }
 
 static I: LazyLock<Mutex<Input>> = LazyLock::new(|| Mutex::new(Input::default()));
+static LOAD_CV: LazyLock<Condvar> = LazyLock::new(Condvar::new);
+
+const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
+const RETRY_BACKOFF: Duration = Duration::from_secs(1);
+const STALE_LOADING: Duration = Duration::from_secs(5);
 
 fn st() -> MutexGuard<'static, Input> {
     I.lock().unwrap_or_else(|e| e.into_inner())
@@ -336,7 +355,81 @@ fn cal(s: &mut Input) -> PadCalibration {
     *s.cal.get_or_insert_with(crate::pads::calibration)
 }
 
-/// Ask Aurora for the bindings once (in the background).
+fn read_bounded_text(path: &std::path::Path, cap: u64) -> Option<String> {
+    use std::io::Read;
+    let f = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    f.take(cap + 1).read_to_end(&mut buf).ok()?;
+    if buf.len() as u64 > cap {
+        return None;
+    }
+    String::from_utf8(buf).ok()
+}
+
+/// Resolve a relative VDF path referenced by a manifest strictly inside `dir`.
+fn safe_manifest_child(dir: &std::path::Path, rel: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    if rel.is_empty() {
+        return None;
+    }
+    let rel_path = std::path::Path::new(rel);
+    if rel_path.is_absolute()
+        || !rel_path.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        return None;
+    }
+    let canon_dir = std::fs::canonicalize(dir).ok()?;
+    let canon_child = std::fs::canonicalize(dir.join(rel_path)).ok()?;
+    canon_child.starts_with(&canon_dir).then_some(canon_child)
+}
+
+/// Try to load an Xbox-compatible `controller_mappings` VDF referenced by a
+/// game's `SetInputActionManifestFilePath` (either directly or from its
+/// `configuration` / `default_bindings` entries in the same directory).
+fn load_bindings_from_manifest(manifest_path: &str) -> Option<Bindings> {
+    let path = std::path::Path::new(manifest_path);
+    let text = read_bounded_text(path, MAX_MANIFEST_BYTES)?;
+    if let Some(b) = Bindings::parse(&text) {
+        return Some(b);
+    }
+    let dir = path.parent()?;
+    let doc = vdf::parse(&text).ok()?;
+    let root = doc.obj("In Game Actions").or_else(|| doc.obj("actions"))?;
+    let mut candidates: Vec<(usize, std::path::PathBuf)> = Vec::new();
+    if let Some(cfg) = root.obj("configuration").or_else(|| root.obj("default_bindings")) {
+        for (_, v) in cfg.iter() {
+            if let Some(o) = v.as_obj() {
+                let ctype = o.str("controller_type").unwrap_or_default();
+                let rel = o.str("path").unwrap_or_default();
+                let Some(child) = safe_manifest_child(dir, rel) else { continue };
+                let rank = match ctype {
+                    "controller_xboxone" => 0,
+                    "controller_xbox360" => 1,
+                    "controller_xboxelite" => 2,
+                    "controller_generic" => 3,
+                    "controller_ps4" | "controller_ps5" => 4,
+                    _ => 5,
+                };
+                candidates.push((rank, child));
+            } else if let Some(rel) = v.as_str()
+                && let Some(child) = safe_manifest_child(dir, rel)
+            {
+                candidates.push((5, child));
+            }
+        }
+    }
+    candidates.sort_by_key(|(r, _)| *r);
+    for (_, p) in candidates {
+        if let Some(vdf_text) = read_bounded_text(&p, MAX_MANIFEST_BYTES)
+            && let Some(b) = Bindings::parse(&vdf_text)
+        {
+            return Some(b);
+        }
+    }
+    None
+}
+
+/// Ask Aurora for the bindings (retrying after transient IPC failures).
 fn load() {
     if !crate::pads::steam_input_enabled() {
         let mut s = st();
@@ -348,29 +441,70 @@ fn load() {
     }
     {
         let mut s = st();
-        if s.bindings.is_some() || s.loading {
-            return;
+        match s.load_state {
+            LoadState::Loaded | LoadState::Absent => return,
+            LoadState::Loading(since) if since.elapsed() < STALE_LOADING => return,
+            LoadState::TransientError(at) if at.elapsed() < RETRY_BACKOFF => return,
+            LoadState::Idle | LoadState::Loading(_) | LoadState::TransientError(_) => {
+                s.load_state = LoadState::Loading(Instant::now());
+            }
         }
-        s.loading = true;
     }
-    std::thread::spawn(|| {
-        let (text, source) = match crate::ipc::request(Request::InputConfig) {
-            Some(Reply::InputConfig { bindings, source }) => (bindings, source),
-            _ => (String::new(), String::new()),
-        };
-        let parsed = Bindings::parse(&text);
-        match &parsed {
-            Some(b) => crate::log!("input: bindings from {source}: {} group(s), {} set(s)/layer(s)", b.groups.len(), b.presets.len()),
-            None => crate::log!("input: no Steam Input bindings for a pad; the game keeps its own controller support"),
+    let spawned = std::thread::Builder::new().name("input-config".into()).spawn(|| {
+        struct AbortGuard(bool);
+        impl Drop for AbortGuard {
+            fn drop(&mut self) {
+                if !self.0 {
+                    let mut s = st();
+                    if matches!(s.load_state, LoadState::Loading(_)) {
+                        s.load_state = LoadState::TransientError(Instant::now());
+                    }
+                    LOAD_CV.notify_all();
+                }
+            }
         }
+        let mut guard = AbortGuard(false);
+        let reply = crate::ipc::request(Request::InputConfig);
         let mut s = st();
-        s.loading = false;
-        s.bindings = Some(parsed.unwrap_or_default());
+        match reply {
+            Some(Reply::InputConfig { bindings, source }) => {
+                let parsed = Bindings::parse(&bindings);
+                match &parsed {
+                    Some(b) => {
+                        crate::log!("input: bindings from {source}: {} group(s), {} set(s)/layer(s)", b.groups.len(), b.presets.len());
+                        s.bindings = parsed;
+                        s.load_state = LoadState::Loaded;
+                    }
+                    None => {
+                        crate::log!("input: no Steam Input bindings from Aurora; using manifest fallback if set");
+                        s.load_state = LoadState::Absent;
+                    }
+                }
+            }
+            _ => {
+                crate::log!("input: transient IPC failure loading Steam Input bindings; will retry");
+                s.load_state = LoadState::TransientError(Instant::now());
+            }
+        }
+        guard.0 = true;
+        LOAD_CV.notify_all();
     });
+    if spawned.is_err() {
+        let mut s = st();
+        s.load_state = LoadState::TransientError(Instant::now());
+        LOAD_CV.notify_all();
+    }
+}
+
+fn active_bindings(s: &Input) -> Option<&Bindings> {
+    s.bindings
+        .as_ref()
+        .filter(|b| !b.presets.is_empty())
+        .or_else(|| s.manifest_bindings.as_ref().filter(|b| !b.presets.is_empty()))
 }
 
 fn has_bindings(s: &Input) -> bool {
-    s.bindings.as_ref().is_some_and(|b| !b.presets.is_empty())
+    active_bindings(s).is_some()
 }
 
 /// Read the pads (pads.rs asks empty XInput slots only once a second).
@@ -422,12 +556,45 @@ extern "C" fn run_frame(_t: This) {
     poll(&mut st());
 }
 
+extern "C" fn set_manifest_path(_t: This, path: *const c_char) -> bool {
+    let p = unsafe { text(path) };
+    if p.is_empty() {
+        return false;
+    }
+    let parsed = load_bindings_from_manifest(&p);
+    let mut s = st();
+    if let Some(b) = parsed {
+        crate::log!("input: loaded fallback bindings from manifest {p}: {} group(s), {} set(s)/layer(s)", b.groups.len(), b.presets.len());
+        s.manifest_path = Some(p);
+        s.manifest_bindings = Some(b);
+        true
+    } else {
+        s.manifest_path = Some(p);
+        s.manifest_bindings = None;
+        false
+    }
+}
+
 extern "C" fn connected(_t: This, out: *mut u64) -> i32 {
     if !crate::pads::steam_input_enabled() {
         return 0;
     }
     load();
     let mut s = st();
+    // Avoid returning 0 on the very first frame right after Init() while the
+    // background IPC fetch is still in flight.
+    if !has_bindings(&s) && matches!(s.load_state, LoadState::Loading(_)) && !s.waited_once {
+        s.waited_once = true;
+        let deadline = Instant::now() + Duration::from_millis(150);
+        while matches!(s.load_state, LoadState::Loading(_)) {
+            let Some(rem) = deadline.checked_duration_since(Instant::now()) else { break };
+            let (guard, timeout) = LOAD_CV.wait_timeout(s, rem).unwrap_or_else(|e| e.into_inner());
+            s = guard;
+            if timeout.timed_out() {
+                break;
+            }
+        }
+    }
     if !has_bindings(&s) {
         return 0;
     }
@@ -512,7 +679,7 @@ extern "C" fn digital_data(_t: This, ret: *mut u8, handle: u64, action: u64) -> 
     let (mut state, mut active) = (false, false);
     if let Some((pad, calibrated, cal, set, layers)) = context(&mut s, handle) {
         let edge = if calibrated { 0 } else { (cal.trigger_threshold * 255.0).round().max(1.0) as u8 };
-        if let Some(b) = s.bindings.as_ref() {
+        if let Some(b) = active_bindings(&s) {
             for (source, g) in b.active(&set, &layers) {
                 for (input, acts) in &g.inputs {
                     if acts.contains(&name) {
@@ -535,7 +702,7 @@ extern "C" fn analog_data(_t: This, ret: *mut u8, handle: u64, action: u64) -> *
     let name = s.actions.get(action.saturating_sub(1) as usize).cloned().unwrap_or_default();
     let mut b = Bytes::new(16);
     if let Some((pad, calibrated, cal, set, layers)) = context(&mut s, handle) {
-        if let Some(bind) = s.bindings.as_ref() {
+        if let Some(bind) = active_bindings(&s) {
             // The strongest source wins when several drive the action.
             let best = bind
                 .active(&set, &layers)
@@ -557,7 +724,7 @@ extern "C" fn analog_data(_t: This, ret: *mut u8, handle: u64, action: u64) -> *
 /// Origins bound to an action in a set (at most 8, like k_unMaxOrigins).
 fn origins(set: u64, action: u64, analog: bool, out: *mut i32) -> i32 {
     let s = st();
-    let (Some(b), Some(set), Some(name)) = (s.bindings.as_ref(), s.sets.get(set.saturating_sub(1) as usize), s.actions.get(action.saturating_sub(1) as usize)) else { return 0 };
+    let (Some(b), Some(set), Some(name)) = (active_bindings(&s), s.sets.get(set.saturating_sub(1) as usize), s.actions.get(action.saturating_sub(1) as usize)) else { return 0 };
     let mut list = Vec::new();
     for (source, g) in b.active(set, &[]) {
         if analog && g.analog.contains(name) {
@@ -692,5 +859,29 @@ mod tests {
         let layered = b.active("InGame", &["Aim".to_string()]);
         assert!(layered.iter().any(|(s, g)| *s == "button_diamond" && g.inputs.iter().any(|(_, a)| a.contains(&"select".to_string()))));
         assert_eq!(origin("right_trigger", "click"), 129);
+    }
+
+    #[test]
+    fn manifest_path_loads_adjacent_xbox_bindings() {
+        let dir = std::env::temp_dir().join(format!("aurora-input-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let xbox_vdf = dir.join("xbox.vdf");
+        std::fs::write(&xbox_vdf, CONFIG).unwrap();
+        let manifest = dir.join("game_actions.vdf");
+        std::fs::write(
+            &manifest,
+            r#""In Game Actions"
+{
+    "configuration"
+    {
+        "0" { "controller_type" "controller_xboxone" "path" "xbox.vdf" }
+    }
+}"#,
+        )
+        .unwrap();
+        let loaded = load_bindings_from_manifest(manifest.to_str().unwrap()).expect("should load xbox.vdf from manifest");
+        assert!(!loaded.presets.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

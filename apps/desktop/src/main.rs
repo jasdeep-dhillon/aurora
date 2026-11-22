@@ -37,7 +37,11 @@ fn main() -> eframe::Result {
     let link = std::env::args().skip(1).find(|a| a.starts_with("steam://"));
     // `--separate` runs a second copy (for previews and testing).
     let separate = std::env::args().any(|a| a == "--separate");
-    if !separate && links::forward_to_running(link.as_deref().unwrap_or("show")) {
+    #[cfg(target_os = "linux")]
+    let activation_token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
+    #[cfg(not(target_os = "linux"))]
+    let activation_token: Option<String> = None;
+    if !separate && links::forward_to_running(link.as_deref().unwrap_or("show"), activation_token.as_deref()) {
         return Ok(());
     }
     // An update downloaded last time installs now, before the app opens.

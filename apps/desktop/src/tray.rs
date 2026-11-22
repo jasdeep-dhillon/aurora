@@ -29,6 +29,17 @@ pub enum TrayCmd {
     Exit,
 }
 
+pub struct TrayEvent {
+    pub command: TrayCmd,
+    pub activation_token: Option<String>,
+}
+
+impl From<TrayCmd> for TrayEvent {
+    fn from(command: TrayCmd) -> Self {
+        Self { command, activation_token: None }
+    }
+}
+
 const MENU_W: f32 = 270.0;
 const MENU_ID: &str = "tray-menu";
 
@@ -60,10 +71,11 @@ pub struct Tray {
     _icon: Option<TrayIcon>,
     #[cfg(target_os = "linux")]
     linux: Option<crate::tray_linux::LinuxTray>,
-    /// The main window is a Wayland window (it can't be hidden, only minimized).
+    #[cfg(target_os = "linux")]
+    activator: Option<crate::wayland_activate::Activator>,
     wayland: bool,
-    rx: mpsc::Receiver<TrayCmd>,
-    tx: Arc<Mutex<mpsc::Sender<TrayCmd>>>,
+    rx: mpsc::Receiver<TrayEvent>,
+    tx: Arc<Mutex<mpsc::Sender<TrayEvent>>>,
     menu: Arc<Mutex<MenuState>>,
     /// The menu window exists (created on first use, then kept hidden).
     created: bool,
@@ -90,18 +102,18 @@ impl Tray {
                     _ => None,
                 };
                 if let Some(cmd) = cmd {
-                    let _ = events_tx.send(cmd);
-                    repaint.request_repaint();
+                    let _ = events_tx.send(cmd.into());
+                    repaint.request_repaint_of(ViewportId::ROOT);
                 }
             }));
             icon
         };
         #[cfg(target_os = "linux")]
-        let (linux, wayland) = {
+        let (linux, activator, wayland) = {
             use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
             let wayland = cc.display_handle().is_ok_and(|d| matches!(d.as_raw(), RawDisplayHandle::Wayland(_)));
-            let activator = wayland.then(|| crate::wayland_activate::Activator::new(cc, cc)).flatten();
-            (crate::tray_linux::LinuxTray::spawn(tx.clone(), ctx.clone(), activator), wayland)
+            let activator = wayland.then(|| crate::wayland_activate::Activator::new(cc)).flatten();
+            (crate::tray_linux::LinuxTray::spawn(tx.clone(), ctx.clone(), wayland), activator, wayland)
         };
         #[cfg(not(target_os = "linux"))]
         let wayland = false;
@@ -112,6 +124,8 @@ impl Tray {
             _icon: icon,
             #[cfg(target_os = "linux")]
             linux,
+            #[cfg(target_os = "linux")]
+            activator,
             wayland,
             rx,
             tx: Arc::new(Mutex::new(tx)),
@@ -141,6 +155,21 @@ impl Tray {
         self.wayland
     }
 
+    pub fn activate_window(&self, frame: &mut eframe::Frame, token: Option<String>) {
+        #[cfg(target_os = "linux")]
+        if self.wayland && let Some(token) = token {
+            if frame.is_window_attached() {
+                if let Some(activator) = &self.activator {
+                    activator.activate(frame, &token);
+                }
+            } else {
+                frame.set_window_activation_token(token);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (frame, token);
+    }
+
     /// Open the menu with its bottom-right corner at `at` (for previews).
     pub fn open_menu(&self, at: Pos2) {
         let mut m = self.menu.lock().unwrap();
@@ -149,10 +178,10 @@ impl Tray {
         m.had_focus = false;
     }
 
-    pub fn poll(&mut self, ctx: &egui::Context) -> Vec<TrayCmd> {
+    pub fn poll(&mut self, ctx: &egui::Context) -> Vec<TrayEvent> {
         let mut out = Vec::new();
-        for cmd in self.rx.try_iter() {
-            match cmd {
+        for event in self.rx.try_iter() {
+            match event.command {
                 TrayCmd::Menu(x, y) => {
                     let ppp = ctx.native_pixels_per_point().unwrap_or(1.0);
                     let mut m = self.menu.lock().unwrap();
@@ -161,7 +190,7 @@ impl Tray {
                     m.had_focus = false;
                     ctx.request_repaint_of(ViewportId::from_hash_of(MENU_ID));
                 }
-                other => out.push(other),
+                _ => out.push(event),
             }
         }
         out
@@ -239,7 +268,7 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context) {
             ui.ctx().request_repaint_of(ViewportId::ROOT);
         }
         if let Some(cmd) = picked {
-            let _ = tx.lock().unwrap().send(cmd);
+            let _ = tx.lock().unwrap().send(cmd.into());
             close = true;
         }
         if close {

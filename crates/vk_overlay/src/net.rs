@@ -26,8 +26,17 @@ pub fn parse_hotkey_env(s: Option<&str>, default: (u8, u32)) -> (u8, u32) {
 
 /// Texture operation queued for the Vulkan render thread.
 pub enum TexOp {
+    ClearAll,
     Set(TexSet),
     Free(u64),
+}
+
+struct TexState {
+    ops: Vec<TexOp>,
+    /// CPU-side mirror of every live texture so a newly created swapchain
+    /// renderer (or an overflow resync) can replay the exact live texture set.
+    shadow: HashMap<u64, TexSet>,
+    resync: bool,
 }
 
 /// Latest overlay frame received from Aurora.
@@ -40,11 +49,7 @@ pub struct Frame {
 pub struct Shared {
     pub open: AtomicBool,
     pub open_cv: (Mutex<bool>, Condvar),
-    pub tex_ops: Mutex<Vec<TexOp>>,
-    /// CPU-side mirror of every live texture so a newly created swapchain
-    /// renderer (e.g. fullscreen/borderless switch in Helldivers 2) can replay
-    /// the egui font atlas and all existing images immediately.
-    tex_shadow: Mutex<HashMap<u64, TexSet>>,
+    tex: Mutex<TexState>,
     pub frame: Mutex<Option<Arc<Frame>>>,
     pub size: Mutex<(u32, u32)>,
     shot_requested: AtomicBool,
@@ -64,8 +69,11 @@ impl Shared {
         Self {
             open: AtomicBool::new(false),
             open_cv: (Mutex::new(false), Condvar::new()),
-            tex_ops: Mutex::new(Vec::new()),
-            tex_shadow: Mutex::new(HashMap::new()),
+            tex: Mutex::new(TexState {
+                ops: Vec::new(),
+                shadow: HashMap::new(),
+                resync: false,
+            }),
             frame: Mutex::new(None),
             size: Mutex::new((0, 0)),
             shot_requested: AtomicBool::new(false),
@@ -145,12 +153,22 @@ impl Shared {
     }
 
     /// Stream an RGB screenshot frame cleanly under the 64 KiB wire limit.
+    /// Holds `out_tx` across the whole Start/Chunk/End sequence so concurrent
+    /// swapchains cannot interleave screenshot chunks.
     pub fn send_screenshot_rgb(&self, width: u32, height: u32, rgb: Vec<u8>) {
-        self.send(FromGame::ScreenshotStart { width, height });
-        for chunk in rgb.chunks(32 * 1024) {
-            self.send(FromGame::ScreenshotChunk(chunk.to_vec()));
+        if let Ok(g) = self.out_tx.lock() {
+            if let Some(tx) = g.as_ref() {
+                if tx.send(FromGame::ScreenshotStart { width, height }).is_err() {
+                    return;
+                }
+                for chunk in rgb.chunks(32 * 1024) {
+                    if tx.send(FromGame::ScreenshotChunk(chunk.to_vec())).is_err() {
+                        return;
+                    }
+                }
+                let _ = tx.send(FromGame::ScreenshotEnd);
+            }
         }
-        self.send(FromGame::ScreenshotEnd);
     }
 
     pub fn update_size(&self, width: u32, height: u32) {
@@ -174,30 +192,42 @@ impl Shared {
     }
 
     pub fn drain_tex_ops(&self) -> Vec<TexOp> {
-        std::mem::take(&mut *self.tex_ops.lock().unwrap_or_else(|e| e.into_inner()))
+        let mut st = self.tex.lock().unwrap_or_else(|e| e.into_inner());
+        if st.resync {
+            st.resync = false;
+            st.ops.clear();
+            let mut out = Vec::with_capacity(st.shadow.len() + 1);
+            out.push(TexOp::ClearAll);
+            out.extend(st.shadow.values().cloned().map(TexOp::Set));
+            return out;
+        }
+        std::mem::take(&mut st.ops)
     }
 
     /// Snapshot all live textures so a freshly created `OverlayRenderer`
     /// (after swapchain creation/recreation) gets the font atlas and images.
     pub fn snapshot_tex_ops(&self) -> Vec<TexOp> {
-        self.tex_shadow
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .cloned()
-            .map(TexOp::Set)
-            .collect()
+        let st = self.tex.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::with_capacity(st.shadow.len() + 1);
+        out.push(TexOp::ClearAll);
+        out.extend(st.shadow.values().cloned().map(TexOp::Set));
+        out
     }
 
-    fn apply_shadow(&self, set: &[TexSet], free: &[u64]) {
+    /// Atomically update the CPU texture shadow and queue (or trigger resync)
+    /// under one lock so consumers never see reordered versions across a resync.
+    fn apply_and_queue_tex_ops(&self, set: Vec<TexSet>, free: Vec<u64>) {
         const MAX_SHADOW_TEXTURES: usize = 256;
         const MAX_SHADOW_BYTES: usize = 128 << 20;
-        let mut map = self.tex_shadow.lock().unwrap_or_else(|e| e.into_inner());
-        for id in free {
-            map.remove(id);
+        const MAX_PENDING_TEX_OPS: usize = 512;
+        const MAX_PENDING_TEX_BYTES: usize = 64 << 20;
+
+        let mut st = self.tex.lock().unwrap_or_else(|e| e.into_inner());
+        for id in &free {
+            st.shadow.remove(id);
         }
-        let mut total_bytes: usize = map.values().map(|t| t.rgba.len()).sum();
-        for ts in set {
+        let mut shadow_bytes: usize = st.shadow.values().map(|t| t.rgba.len()).sum();
+        for ts in &set {
             let Some(expected) = (ts.size[0] as usize)
                 .checked_mul(ts.size[1] as usize)
                 .and_then(|px| px.checked_mul(4))
@@ -209,15 +239,21 @@ impl Shared {
             }
             match ts.pos {
                 None => {
-                    let prev_bytes = map.get(&ts.id).map_or(0, |t| t.rgba.len());
-                    let next_total = total_bytes.saturating_sub(prev_bytes).saturating_add(ts.rgba.len());
-                    if (map.contains_key(&ts.id) || map.len() < MAX_SHADOW_TEXTURES) && next_total <= MAX_SHADOW_BYTES {
-                        map.insert(ts.id, ts.clone());
-                        total_bytes = next_total;
+                    let prev_bytes = st.shadow.get(&ts.id).map_or(0, |t| t.rgba.len());
+                    let next_total = shadow_bytes.saturating_sub(prev_bytes).saturating_add(ts.rgba.len());
+                    if (st.shadow.contains_key(&ts.id) || st.shadow.len() < MAX_SHADOW_TEXTURES) && next_total <= MAX_SHADOW_BYTES {
+                        st.shadow.insert(ts.id, ts.clone());
+                        shadow_bytes = next_total;
+                    } else {
+                        // Shadow budget exceeded: remove any stale copy of this id so
+                        // a later resync never resurrects an older version.
+                        if let Some(old) = st.shadow.remove(&ts.id) {
+                            shadow_bytes = shadow_bytes.saturating_sub(old.rgba.len());
+                        }
                     }
                 }
                 Some([px, py]) => {
-                    if let Some(dst) = map.get_mut(&ts.id) {
+                    if let Some(dst) = st.shadow.get_mut(&ts.id) {
                         let dw = dst.size[0] as usize;
                         let dh = dst.size[1] as usize;
                         let sw = ts.size[0] as usize;
@@ -239,6 +275,41 @@ impl Shared {
                 }
             }
         }
+
+        if st.resync {
+            return;
+        }
+        for t in set {
+            if t.pos.is_none() {
+                let id = t.id;
+                st.ops.retain(|op| match op {
+                    TexOp::Set(prev) => prev.id != id,
+                    TexOp::Free(prev_id) => *prev_id != id,
+                    TexOp::ClearAll => true,
+                });
+            }
+            st.ops.push(TexOp::Set(t));
+        }
+        for id in free {
+            st.ops.retain(|op| match op {
+                TexOp::Set(prev) => prev.id != id,
+                TexOp::Free(prev_id) => *prev_id != id,
+                TexOp::ClearAll => true,
+            });
+            st.ops.push(TexOp::Free(id));
+        }
+        let pending_bytes: usize = st
+            .ops
+            .iter()
+            .map(|op| match op {
+                TexOp::Set(t) => t.rgba.len(),
+                TexOp::Free(_) | TexOp::ClearAll => 0,
+            })
+            .sum();
+        if st.ops.len() > MAX_PENDING_TEX_OPS || pending_bytes > MAX_PENDING_TEX_BYTES {
+            st.ops.clear();
+            st.resync = true;
+        }
     }
 
     pub fn current_frame(&self) -> Option<Arc<Frame>> {
@@ -250,8 +321,12 @@ impl Shared {
         self.shutdown.store(true, Ordering::Release);
         self.set_open_local(false);
         *self.frame.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        self.tex_ops.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        self.tex_shadow.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        {
+            let mut st = self.tex.lock().unwrap_or_else(|e| e.into_inner());
+            st.ops.clear();
+            st.shadow.clear();
+            st.resync = false;
+        }
         *self.out_tx.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
@@ -263,13 +338,17 @@ pub fn shared() -> &'static Shared {
 }
 
 /// Returns true if the Aurora Vulkan overlay env vars are present and enabled.
+/// Cached once per process so `vkQueuePresentKHR` avoids per-frame env lookups.
 pub fn is_enabled() -> bool {
-    if std::env::var("DISABLE_AURORA_OVERLAY").ok().as_deref() == Some("1") {
-        return false;
-    }
-    std::env::var("AURORA_VK_OVERLAY").ok().as_deref() == Some("1")
-        && std::env::var("AURORA_OVERLAY_PORT").ok().and_then(|s| s.parse::<u16>().ok()).is_some()
-        && std::env::var("AURORA_OVERLAY_TOKEN").ok().is_some_and(|t| !t.is_empty())
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        if std::env::var_os("DISABLE_AURORA_OVERLAY").is_some_and(|v| v == "1") {
+            return false;
+        }
+        std::env::var_os("AURORA_VK_OVERLAY").is_some_and(|v| v == "1")
+            && std::env::var("AURORA_OVERLAY_PORT").ok().and_then(|s| s.parse::<u16>().ok()).is_some()
+            && std::env::var_os("AURORA_OVERLAY_TOKEN").is_some_and(|t| !t.is_empty())
+    })
 }
 
 fn start_client() {
@@ -339,14 +418,7 @@ fn start_client() {
                     }
                     ToGame::Frame { pixels_per_point, cursor: _, set, free, meshes } => {
                         if !set.is_empty() || !free.is_empty() {
-                            shared().apply_shadow(&set, &free);
-                            let mut ops = shared().tex_ops.lock().unwrap_or_else(|e| e.into_inner());
-                            for t in set {
-                                ops.push(TexOp::Set(t));
-                            }
-                            for id in free {
-                                ops.push(TexOp::Free(id));
-                            }
+                            shared().apply_and_queue_tex_ops(set, free);
                         }
                         let frame = if meshes.is_empty() {
                             None

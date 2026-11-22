@@ -99,12 +99,12 @@ struct FrameSlot {
     cmd: VkCommandBuffer,
     fence: VkFence,
     fence_pending: bool,
+    last_submit_gen: u64,
     done_sem: VkSemaphore,
     vb: Option<GpuBuf>,
     ib: Option<GpuBuf>,
     uploaded: Option<Arc<Frame>>,
     staging: Vec<GpuBuf>,
-    retired_tex: Vec<Texture>,
 }
 
 pub struct OverlayRenderer {
@@ -126,6 +126,8 @@ pub struct OverlayRenderer {
     pipeline: VkPipeline,
     slots: Vec<FrameSlot>,
     textures: HashMap<u64, Texture>,
+    submit_gen: u64,
+    retired_tex: Vec<(u64, Texture)>,
 }
 
 impl OverlayRenderer {
@@ -538,6 +540,7 @@ impl OverlayRenderer {
                 device, dd, mem_props, format, can_copy_src, width, height, linear_out: is_linear_output_format(format),
                 cmd_pool, render_pass, ds_layout, ds_pool, sampler_linear, sampler_nearest,
                 pipe_layout, pipeline, slots: Vec::new(), textures: HashMap::new(),
+                submit_gen: 0, retired_tex: Vec::new(),
             };
             r.destroy();
             return None;
@@ -597,6 +600,7 @@ impl OverlayRenderer {
                     device, dd, mem_props, format, can_copy_src, width, height, linear_out: is_linear_output_format(format),
                     cmd_pool, render_pass, ds_layout, ds_pool, sampler_linear, sampler_nearest,
                     pipe_layout, pipeline, slots, textures: HashMap::new(),
+                    submit_gen: 0, retired_tex: Vec::new(),
                 };
                 r.destroy();
                 return None;
@@ -608,12 +612,12 @@ impl OverlayRenderer {
                 cmd,
                 fence,
                 fence_pending: false,
+                last_submit_gen: 0,
                 done_sem,
                 vb: None,
                 ib: None,
                 uploaded: None,
                 staging: Vec::new(),
-                retired_tex: Vec::new(),
             });
         }
 
@@ -636,6 +640,8 @@ impl OverlayRenderer {
             pipeline,
             slots,
             textures: HashMap::new(),
+            submit_gen: 0,
+            retired_tex: Vec::new(),
         })
     }
 
@@ -853,14 +859,30 @@ impl OverlayRenderer {
             self.slots[idx].fence_pending = false;
         }
 
-        // Reclaim staging buffers & retired textures from this slot's completed frame.
+        // Reclaim staging buffers from this slot's completed frame and retired
+        // textures once all pending slots referencing them have finished.
         let old_staging = std::mem::take(&mut self.slots[idx].staging);
         for b in old_staging {
             unsafe { self.destroy_buf(b) };
         }
-        let old_retired = std::mem::take(&mut self.slots[idx].retired_tex);
-        for t in old_retired {
-            unsafe { self.destroy_tex(t) };
+        let min_pending = self
+            .slots
+            .iter()
+            .filter(|s| s.fence_pending)
+            .map(|s| s.last_submit_gen)
+            .min_by(|a, b| (a.wrapping_sub(*b) as i64).cmp(&0));
+        let mut ri = 0;
+        while ri < self.retired_tex.len() {
+            let safe = match min_pending {
+                None => true,
+                Some(min_gen) => (min_gen.wrapping_sub(self.retired_tex[ri].0) as i64) > 0,
+            };
+            if safe {
+                let (_, t) = self.retired_tex.swap_remove(ri);
+                unsafe { self.destroy_tex(t) };
+            } else {
+                ri += 1;
+            }
         }
 
         if unsafe { (self.dd.reset_command_buffer)(cmd, 0) } != VK_SUCCESS {
@@ -978,53 +1000,40 @@ impl OverlayRenderer {
 
         // 1. Apply texture updates / frees
         let mut new_staging = Vec::new();
-        let mut new_retired = Vec::new();
+        let retire_gen = self.submit_gen.wrapping_add(1);
         for op in tex_ops {
             match op {
-                TexOp::Free(id) => {
-                    if let Some(t) = self.textures.remove(&id) {
+                TexOp::ClearAll => {
+                    for (_, t) in self.textures.drain() {
                         new_retired.push(t);
                     }
                 }
+                TexOp::Free(id) => {
+                    if let Some(t) = self.textures.remove(&id) {
+                        self.retired_tex.push((retire_gen, t));
+                    }
+                }
                 TexOp::Set(ts) => {
-                    let expected = (ts.size[0] as usize).saturating_mul(ts.size[1] as usize).saturating_mul(4);
+                    let Some(expected) = (ts.size[0] as usize)
+                        .checked_mul(ts.size[1] as usize)
+                        .and_then(|px| px.checked_mul(4))
+                    else {
+                        continue;
+                    };
                     if ts.size[0] == 0 || ts.size[1] == 0 || ts.rgba.len() != expected {
                         continue;
                     }
-                    let (old_layout, target_img) = match ts.pos {
-                        Some([px, py]) => {
-                            if let Some(existing) = self.textures.get(&ts.id) {
-                                if px.saturating_add(ts.size[0]) <= existing.width
-                                    && py.saturating_add(ts.size[1]) <= existing.height
-                                {
-                                    (VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, existing.image)
-                                } else {
-                                    continue;
-                                }
-                            } else {
-                                continue;
-                            }
+                    // Validate sub-rectangle bounds and prepare staging buffer
+                    // BEFORE creating or replacing `self.textures` so a staging
+                    // allocation/map failure never leaves an UNDEFINED texture.
+                    if let Some([px, py]) = ts.pos {
+                        let Some(existing) = self.textures.get(&ts.id) else { continue };
+                        if !px.checked_add(ts.size[0]).is_some_and(|r| r <= existing.width)
+                            || !py.checked_add(ts.size[1]).is_some_and(|b| b <= existing.height)
+                        {
+                            continue;
                         }
-                        None => {
-                            let reuse = self.textures.get(&ts.id).is_some_and(|e| {
-                                e.width == ts.size[0] && e.height == ts.size[1] && e.linear == ts.linear
-                            });
-                            if reuse {
-                                (VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, self.textures[&ts.id].image)
-                            } else {
-                                if let Some(old) = self.textures.remove(&ts.id) {
-                                    new_retired.push(old);
-                                }
-                                let Some(tex) = (unsafe { self.create_texture(ts.size[0], ts.size[1], ts.linear) }) else {
-                                    continue;
-                                };
-                                let img = tex.image;
-                                self.textures.insert(ts.id, tex);
-                                (VK_IMAGE_LAYOUT_UNDEFINED, img)
-                            }
-                        }
-                    };
-
+                    }
                     let Some(stg) = (unsafe { self.create_host_buf(ts.rgba.len(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT) }) else {
                         continue;
                     };
@@ -1037,6 +1046,28 @@ impl OverlayRenderer {
                         ptr::copy_nonoverlapping(ts.rgba.as_ptr(), mapped.cast::<u8>(), ts.rgba.len());
                         (self.dd.unmap_memory)(self.device, stg.mem);
                     }
+
+                    let (old_layout, target_img) = match ts.pos {
+                        Some(_) => (VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, self.textures[&ts.id].image),
+                        None => {
+                            let reuse = self.textures.get(&ts.id).is_some_and(|e| {
+                                e.width == ts.size[0] && e.height == ts.size[1] && e.linear == ts.linear
+                            });
+                            if reuse {
+                                (VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, self.textures[&ts.id].image)
+                            } else {
+                                let Some(tex) = (unsafe { self.create_texture(ts.size[0], ts.size[1], ts.linear) }) else {
+                                    unsafe { self.destroy_buf(stg) };
+                                    continue;
+                                };
+                                let img = tex.image;
+                                if let Some(old) = self.textures.insert(ts.id, tex) {
+                                    self.retired_tex.push((retire_gen, old));
+                                }
+                                (VK_IMAGE_LAYOUT_UNDEFINED, img)
+                            }
+                        }
+                    };
 
                     let subrange = VkImageSubresourceRange {
                         aspectMask: VK_IMAGE_ASPECT_COLOR_BIT,
@@ -1135,30 +1166,62 @@ impl OverlayRenderer {
             }
         }
         self.slots[idx].staging = new_staging;
-        self.slots[idx].retired_tex = new_retired;
 
         // 2. Upload (only when frame changed) & draw meshes
         if let Some(frame) = frame {
-            let total_vbytes: usize = frame.meshes.iter().map(|m| m.vertices.len()).sum();
-            let total_ibytes: usize = frame.meshes.iter().map(|m| m.indices.len() * 4).sum();
-            if total_vbytes > 0 && total_ibytes > 0 {
+            let mesh_totals = (|| -> Option<(usize, usize)> {
+                let mut tv = 0usize;
+                let mut ti = 0usize;
+                let mut total_verts = 0usize;
+                let mut total_indices = 0usize;
+                for m in &frame.meshes {
+                    if m.vertices.len() % VERTEX_SIZE != 0 {
+                        return None;
+                    }
+                    let vcount = m.vertices.len() / VERTEX_SIZE;
+                    let vcount_u32 = u32::try_from(vcount).ok()?;
+                    if m.indices.iter().any(|&idx| idx >= vcount_u32) {
+                        return None;
+                    }
+                    let ib = m.indices.len().checked_mul(4)?;
+                    tv = tv.checked_add(m.vertices.len())?;
+                    ti = ti.checked_add(ib)?;
+                    total_verts = total_verts.checked_add(vcount)?;
+                    total_indices = total_indices.checked_add(m.indices.len())?;
+                }
+                i32::try_from(total_verts).ok()?;
+                u32::try_from(total_indices).ok()?;
+                Some((tv, ti))
+            })();
+            if let Some((total_vbytes, total_ibytes)) = mesh_totals
+                && total_vbytes > 0
+                && total_ibytes > 0
+            {
                 let mut vb_opt = self.slots[idx].vb.take();
                 let mut ib_opt = self.slots[idx].ib.take();
 
                 let mut grew = false;
                 if vb_opt.as_ref().is_none_or(|b| b.cap < total_vbytes) {
-                    if let Some(old) = vb_opt.take() {
-                        unsafe { self.destroy_buf(old) };
+                    if let Some(cap) = total_vbytes.checked_next_power_of_two() {
+                        if let Some(old) = vb_opt.take() {
+                            unsafe { self.destroy_buf(old) };
+                        }
+                        vb_opt = unsafe { self.create_host_buf(cap, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) };
+                        grew = true;
+                    } else {
+                        vb_opt = None;
                     }
-                    vb_opt = unsafe { self.create_host_buf(total_vbytes.next_power_of_two(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) };
-                    grew = true;
                 }
                 if ib_opt.as_ref().is_none_or(|b| b.cap < total_ibytes) {
-                    if let Some(old) = ib_opt.take() {
-                        unsafe { self.destroy_buf(old) };
+                    if let Some(cap) = total_ibytes.checked_next_power_of_two() {
+                        if let Some(old) = ib_opt.take() {
+                            unsafe { self.destroy_buf(old) };
+                        }
+                        ib_opt = unsafe { self.create_host_buf(cap, VK_BUFFER_USAGE_INDEX_BUFFER_BIT) };
+                        grew = true;
+                    } else {
+                        ib_opt = None;
                     }
-                    ib_opt = unsafe { self.create_host_buf(total_ibytes.next_power_of_two(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT) };
-                    grew = true;
                 }
 
                 if let (Some(vb), Some(ib)) = (vb_opt.as_ref(), ib_opt.as_ref()) {
@@ -1323,6 +1386,8 @@ impl OverlayRenderer {
             }
             return (None, take_shot.then_some(Err(())));
         }
+        self.submit_gen = self.submit_gen.wrapping_add(1);
+        self.slots[idx].last_submit_gen = self.submit_gen;
         self.slots[idx].fence_pending = true;
 
         let shot_res = if let Some((buf, kind)) = capture {
@@ -1335,8 +1400,12 @@ impl OverlayRenderer {
                     unsafe { (self.dd.unmap_memory)(self.device, buf.mem) };
                     rgb_res = Ok((self.width, self.height, rgb));
                 }
+                unsafe { self.destroy_buf(buf) };
+            } else {
+                // Fence timed out or failed: GPU copy may still be in flight,
+                // so keep `buf` alive until this slot's fence signals.
+                self.slots[idx].staging.push(buf);
             }
-            unsafe { self.destroy_buf(buf) };
             Some(rgb_res)
         } else if shot_early_err {
             Some(Err(()))
@@ -1349,14 +1418,28 @@ impl OverlayRenderer {
 
     pub fn destroy(&mut self) {
         unsafe {
-            let _ = (self.dd.device_wait_idle)(self.device);
+            // Wait only on this swapchain's own pending fences rather than calling
+            // `vkDeviceWaitIdle`, which requires host synchronization across every
+            // queue on the device and would race with concurrent swapchain presents.
+            let pending_fences: Vec<VkFence> = self
+                .slots
+                .iter()
+                .filter(|s| s.fence_pending)
+                .map(|s| s.fence)
+                .collect();
+            if !pending_fences.is_empty() {
+                let _ = (self.dd.wait_for_fences)(
+                    self.device,
+                    pending_fences.len() as u32,
+                    pending_fences.as_ptr(),
+                    VK_TRUE,
+                    u64::MAX,
+                );
+            }
             let slots = std::mem::take(&mut self.slots);
             for slot in slots {
                 for b in slot.staging {
                     self.destroy_buf(b);
-                }
-                for t in slot.retired_tex {
-                    self.destroy_tex(t);
                 }
                 if let Some(b) = slot.vb {
                     self.destroy_buf(b);
@@ -1371,6 +1454,10 @@ impl OverlayRenderer {
             }
             let textures = std::mem::take(&mut self.textures);
             for (_, t) in textures {
+                self.destroy_tex(t);
+            }
+            let retired = std::mem::take(&mut self.retired_tex);
+            for (_, t) in retired {
                 self.destroy_tex(t);
             }
             if self.pipeline != 0 {

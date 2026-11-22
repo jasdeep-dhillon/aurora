@@ -190,7 +190,30 @@ pub(crate) fn is_allowed_payload(payload: &str) -> bool {
     p == "show" || parse(p).is_some()
 }
 
-fn accept_one(mut stream: TcpStream, expected_token: &str) -> Option<String> {
+pub struct LinkRequest {
+    pub arg: String,
+    pub activation_token: Option<String>,
+}
+
+fn valid_activation_token(token: &str) -> bool {
+    !token.is_empty() && !token.chars().any(char::is_control)
+}
+
+fn parse_request(payload: &str) -> Option<LinkRequest> {
+    let (arg, activation_token) = if let Some(encoded) = payload.strip_prefix("activate ") {
+        let (arg, token): (String, String) = serde_json::from_str(encoded).ok()?;
+        if !valid_activation_token(&token) {
+            return None;
+        }
+        (arg, Some(token))
+    } else {
+        (payload.to_owned(), None)
+    };
+    let arg = arg.trim();
+    (!arg.contains(['\r', '\n']) && is_allowed_payload(arg)).then(|| LinkRequest { arg: arg.to_owned(), activation_token })
+}
+
+fn accept_one(mut stream: TcpStream, expected_token: &str) -> Option<LinkRequest> {
     if !stream.peer_addr().is_ok_and(|a| a.ip().is_loopback()) {
         return None;
     }
@@ -206,38 +229,54 @@ fn accept_one(mut stream: TcpStream, expected_token: &str) -> Option<String> {
     if expected_token.is_empty() || !ct_eq(got_token.as_bytes(), expected_token.as_bytes()) {
         return None;
     }
-    let payload = payload.trim();
-    if !is_allowed_payload(payload) {
-        return None;
-    }
+    let request = parse_request(payload.trim())?;
     let _ = stream.write_all(b"ok\n").and_then(|_| stream.flush());
-    Some(payload.to_string())
+    Some(request)
 }
 
-fn forward_with(addr: SocketAddr, token_file: &Path, arg: &str) -> bool {
+fn forward_line(addr: SocketAddr, line: &str) -> std::io::Result<bool> {
+    let mut stream = TcpStream::connect_timeout(&addr, FORWARD_TIMEOUT)?;
+    stream.set_read_timeout(Some(FORWARD_TIMEOUT))?;
+    stream.set_write_timeout(Some(FORWARD_TIMEOUT))?;
+    stream.write_all(line.as_bytes())?;
+    stream.flush()?;
+    let mut ack = String::new();
+    match BufReader::new(stream.take(16)).read_line(&mut ack)? {
+        0 => Ok(false),
+        _ if ack.trim() == "ok" => Ok(true),
+        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid link acknowledgement")),
+    }
+}
+
+fn forward_with(addr: SocketAddr, token_file: &Path, arg: &str, activation_token: Option<&str>) -> bool {
     let arg = arg.trim();
     if arg.contains(['\r', '\n']) || !is_allowed_payload(arg) {
         return false;
     }
     let Some(token) = read_token_file(token_file) else { return false };
-    let Ok(mut s) = TcpStream::connect_timeout(&addr, FORWARD_TIMEOUT) else { return false };
-    let _ = s.set_read_timeout(Some(FORWARD_TIMEOUT));
-    let _ = s.set_write_timeout(Some(FORWARD_TIMEOUT));
-    if s.write_all(format!("{token} {arg}\n").as_bytes()).and_then(|_| s.flush()).is_err() {
-        return false;
+    if let Some(activation_token) = activation_token.filter(|token| valid_activation_token(token))
+        && let Ok(encoded) = serde_json::to_string(&(arg, activation_token))
+    {
+        let line = format!("{token} activate {encoded}\n");
+        if line.len() as u64 <= MAX_LINE_BYTES {
+            match forward_line(addr, &line) {
+                // Older listeners close an unrecognized request without an acknowledgement.
+                Ok(false) => {}
+                result => return result.unwrap_or(false),
+            }
+        }
     }
-    let mut ack = String::new();
-    BufReader::new(s.take(16)).read_line(&mut ack).is_ok() && ack.trim() == "ok"
+    forward_line(addr, &format!("{token} {arg}\n")).unwrap_or(false)
 }
 
 /// Try to hand `arg` to an already-running copy. Returns true if it did.
-pub fn forward_to_running(arg: &str) -> bool {
-    forward_with(SocketAddr::from(([127, 0, 0, 1], PORT)), &token_path(), arg)
+pub fn forward_to_running(arg: &str, activation_token: Option<&str>) -> bool {
+    forward_with(SocketAddr::from(([127, 0, 0, 1], PORT)), &token_path(), arg, activation_token)
 }
 
 /// Listen for authenticated links from later launches. Each line received
-/// carries `<token> <link|show>`.
-pub fn listen(ctx: egui::Context) -> mpsc::Receiver<String> {
+/// carries `<token> <link|show>` or `<token> activate ["<link|show>","<activation token>"]`.
+pub fn listen(ctx: egui::Context) -> mpsc::Receiver<LinkRequest> {
     let (tx, rx) = mpsc::channel();
     if let Ok(listener) = TcpListener::bind(("127.0.0.1", PORT)) {
         let token = generate_token();
@@ -249,7 +288,7 @@ pub fn listen(ctx: egui::Context) -> mpsc::Receiver<String> {
             for stream in listener.incoming().flatten() {
                 if let Some(payload) = accept_one(stream, &token) {
                     let _ = tx.send(payload);
-                    ctx.request_repaint();
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
                 }
             }
         });
@@ -389,6 +428,44 @@ mod ipc_auth_tests {
     use super::*;
 
     #[test]
+    fn activation_payload_preserves_legacy_messages_and_rejects_line_breaks() {
+        let message = parse_request("steam://run/570").unwrap();
+        assert_eq!(message.arg, "steam://run/570");
+        assert!(message.activation_token.is_none());
+        let message = parse_request(r#"activate ["show","desktop-123"]"#).unwrap();
+        assert_eq!(message.arg, "show");
+        assert_eq!(message.activation_token.as_deref(), Some("desktop-123"));
+        assert!(parse_request(r#"activate ["show","bad\ntoken"]"#).is_none());
+    }
+
+    #[test]
+    fn activation_forwarding_falls_back_to_a_legacy_listener() {
+        let dir = std::env::temp_dir().join(format!("sir-links-legacy-test-{}", std::process::id()));
+        let path = dir.join("links.token");
+        let token = generate_token();
+        write_token_file(&path, &token).unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let receiver = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(LISTEN_TIMEOUT)).unwrap();
+            let mut attempt = String::new();
+            BufReader::new(stream).read_line(&mut attempt).unwrap();
+            assert!(attempt.starts_with(&format!("{token} activate ")));
+
+            let (stream, _) = listener.accept().unwrap();
+            let request = accept_one(stream, &token).unwrap();
+            assert_eq!(request.arg, "show");
+            assert!(request.activation_token.is_none());
+        });
+
+        assert!(forward_with(addr, &path, "show", Some("desktop-123")));
+        receiver.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn authenticates_and_bounds_localhost_forwarding() {
         let dir = std::env::temp_dir().join(format!("sir-links-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -438,14 +515,18 @@ mod ipc_auth_tests {
         let idle = TcpStream::connect(addr).unwrap();
         let t0 = std::time::Instant::now();
 
-        assert!(forward_with(addr, &tok_path, "show"));
+        assert!(forward_with(addr, &tok_path, "show", None));
         assert!(t0.elapsed() < Duration::from_secs(3), "idle client hung listener!");
         drop(idle);
-        assert!(forward_with(addr, &tok_path, "steam://rungameid/570"));
-        assert!(!forward_with(addr, &tok_path, "https://evil.example"));
+        assert!(forward_with(addr, &tok_path, "steam://rungameid/570", Some("desktop-123")));
+        assert!(!forward_with(addr, &tok_path, "https://evil.example", Some("desktop-123")));
 
-        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), "show");
-        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), "steam://rungameid/570");
+        let legacy = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(legacy.arg, "show");
+        assert!(legacy.activation_token.is_none());
+        let activated = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(activated.arg, "steam://rungameid/570");
+        assert_eq!(activated.activation_token.as_deref(), Some("desktop-123"));
         assert!(rx.try_recv().is_err(), "no invalid/unauthenticated messages may pass");
 
         let _ = std::fs::remove_dir_all(&dir);
