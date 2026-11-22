@@ -531,20 +531,27 @@ impl GlRenderer {
             }
             TexOp::Set(t) => unsafe {
                 let [w, h] = t.size;
-                if w == 0 || h == 0 {
+                if util::validate_tex_rgba(t.size, t.rgba.len()).is_none() {
                     return;
                 }
+                const GL_PIXEL_UNPACK_BUFFER: c_uint = 0x88EC;
+                const GL_PIXEL_UNPACK_BUFFER_BINDING: c_uint = 0x88EF;
                 let mut prev_tex = 0;
                 let mut prev_align = 4;
                 let mut prev_row_len = 0;
                 let mut prev_skip_px = 0;
                 let mut prev_skip_rows = 0;
+                let mut prev_pbo = 0;
                 (gl.get_integerv)(GL_TEXTURE_BINDING_2D, &mut prev_tex);
                 (gl.get_integerv)(GL_UNPACK_ALIGNMENT, &mut prev_align);
                 (gl.get_integerv)(GL_UNPACK_ROW_LENGTH, &mut prev_row_len);
                 (gl.get_integerv)(GL_UNPACK_SKIP_PIXELS, &mut prev_skip_px);
                 (gl.get_integerv)(GL_UNPACK_SKIP_ROWS, &mut prev_skip_rows);
+                (gl.get_integerv)(GL_PIXEL_UNPACK_BUFFER_BINDING, &mut prev_pbo);
 
+                if prev_pbo != 0 {
+                    (gl.bind_buffer)(GL_PIXEL_UNPACK_BUFFER, 0);
+                }
                 (gl.pixel_storei)(GL_UNPACK_ALIGNMENT, 1);
                 (gl.pixel_storei)(GL_UNPACK_ROW_LENGTH, 0);
                 (gl.pixel_storei)(GL_UNPACK_SKIP_PIXELS, 0);
@@ -554,7 +561,7 @@ impl GlRenderer {
                 match t.pos {
                     Some([x, y]) => {
                         if let Some(tex) = self.textures.get_mut(&t.id) {
-                            if x + w <= tex.size[0] && y + h <= tex.size[1] {
+                            if util::validate_tex_subrect([x, y], t.size, tex.size) {
                                 tex.linear = t.linear;
                                 (gl.bind_texture)(GL_TEXTURE_2D, tex.id);
                                 (gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
@@ -579,6 +586,10 @@ impl GlRenderer {
                         (gl.tex_image_2d)(GL_TEXTURE_2D, 0, GL_RGBA as c_int, w as c_int, h as c_int, 0, GL_RGBA, GL_UNSIGNED_BYTE, t.rgba.as_ptr().cast());
                         self.textures.insert(t.id, GlTex { id: gl_id, size: t.size, linear: t.linear });
                     }
+                }
+
+                if prev_pbo != 0 {
+                    (gl.bind_buffer)(GL_PIXEL_UNPACK_BUFFER, prev_pbo as c_uint);
                 }
 
                 (gl.pixel_storei)(GL_UNPACK_ALIGNMENT, prev_align);
