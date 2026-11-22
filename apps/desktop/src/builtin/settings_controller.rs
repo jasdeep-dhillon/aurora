@@ -445,16 +445,16 @@ impl ControllerPage {
                             ui.selectable_value(&mut self.selected_app, Some(*id), name);
                         }
                     });
-                if w::button(ui, t, Some(icons::REFRESH), t!("Refresh"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                if editor_action_button(ui, t, Some(icons::REFRESH), t!("Refresh"), false).clicked() {
                     self.inspect_now(ctx, app_id, &install_dir, &current_choice);
                     if self.tab == BindingsTab::Community {
                         self.query_community(ctx, app_id, true);
                     }
                 }
-                if w::button(ui, t, Some(icons::SLIDERS), t!("Game Properties…"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                if editor_action_button(ui, t, Some(icons::SLIDERS), t!("Game Properties…"), false).clicked() {
                     ctx.act(Action::Navigate { page: "library".into(), arg: Some(format!("props:{app_id}")) });
                 }
-                if w::button(ui, t, Some(icons::FOLDER), t!("Aurora bindings folder"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                if editor_action_button(ui, t, Some(icons::FOLDER), t!("Aurora bindings folder"), false).clicked() {
                     let account = (ctx.state.steam_id & 0xFFFF_FFFF) as u32;
                     let dir = client::managed_bindings_dir(account, app_id);
                     let _ = std::fs::create_dir_all(&dir);
@@ -693,7 +693,7 @@ impl ControllerPage {
             self.query_community(ctx, app_id, true);
         }
 
-        w::panel(t).show(ui, |ui| {
+        editor_workspace_frame(t).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(w::text_semibold(t!("Community Layouts"), 14.0, t.text));
@@ -701,12 +701,12 @@ impl ControllerPage {
                     ui.spinner();
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if w::button(ui, t, Some(icons::REFRESH), t!("Refresh"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                    if editor_action_button(ui, t, Some(icons::REFRESH), t!("Refresh"), false).clicked() {
                         self.query_community(ctx, app_id, true);
                     }
                 });
             });
-            ui.add_space(6.0);
+            ui.add_space(8.0);
 
             if let Some(err) = &self.community_error {
                 ui.add(egui::Label::new(w::text(err, 12.5, t.away)).wrap());
@@ -726,9 +726,9 @@ impl ControllerPage {
                 let busy = self.downloading_req.is_some_and(|(_, id)| id == item.id);
                 egui::Frame::new()
                     .fill(if active { w::active_fill(t) } else { t.surface })
-                    .stroke(Stroke::new(1.0, if active { t.accent } else { t.border }))
+                    .stroke(Stroke::new(1.0, if active { t.accent } else { editor_button_border(t) }))
                     .corner_radius(t.corner_small())
-                    .inner_margin(Margin::symmetric(10, 8))
+                    .inner_margin(Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
@@ -777,7 +777,7 @@ impl ControllerPage {
 
             if self.community_next.is_some()
                 && !self.community_loading
-                && w::button(ui, t, None, t!("Load more"), w::Kind::Secondary, w::Size::Sm).clicked()
+                && editor_action_button(ui, t, None, t!("Load more"), false).clicked()
             {
                 self.query_community(ctx, app_id, false);
             }
@@ -821,13 +821,13 @@ impl ControllerPage {
         }
 
         let account = (ctx.state.steam_id & 0xFFFF_FFFF) as u32;
-        w::panel(t).show(ui, |ui| {
+        editor_workspace_frame(t).show(ui, |ui| {
             ui.set_width(ui.available_width());
             // Start-from template strip
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                ui.label(w::text_medium(t!("Start from:"), 12.5, t.text_dim));
-                if w::button(ui, t, None, t!("Automatic"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                ui.label(w::text_semibold(t!("Start from:"), 12.5, t.text_dim));
+                if editor_action_button(ui, t, None, t!("Automatic"), false).clicked() {
                     self.editor_doc = Some(LayoutDocument::automatic());
                     self.editor_title = "Custom Layout".into();
                     self.editor_dirty = true;
@@ -835,7 +835,7 @@ impl ControllerPage {
                 for tmpl in BuiltInTemplate::ALL {
                     let choice = BindingChoice::Template(TemplateChoice::BuiltIn(tmpl));
                     let label = builtin_template_short_label(tmpl);
-                    if w::button(ui, t, None, label, w::Kind::Secondary, w::Size::Sm).clicked() {
+                    if editor_action_button(ui, t, None, label, false).clicked() {
                         if let Some(doc) = client::binding_document(&choice, &ctx.local.steam_root, account, app_id) {
                             self.editor_title = format!("{} (Custom)", doc.title().unwrap_or(label));
                             self.editor_doc = Some(doc);
@@ -845,20 +845,20 @@ impl ControllerPage {
                 }
                 if let Some(report) = self.report.clone()
                     && report.document.is_some()
-                    && w::button(ui, t, None, t!("Active layout"), w::Kind::Ghost, w::Size::Sm).clicked()
+                    && editor_action_button(ui, t, Some(icons::RESTORE), t!("Active layout"), false).clicked()
                 {
                     self.load_editor_from_active(app_id, &report);
                 }
             });
 
-            ui.add_space(8.0);
+            ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.label(w::text_medium(t!("Layout name:"), 13.0, t.text));
-                if ui.add(egui::TextEdit::singleline(&mut self.editor_title).desired_width(260.0)).changed() {
+                if ui.add(egui::TextEdit::singleline(&mut self.editor_title).desired_width(280.0)).changed() {
                     self.editor_dirty = true;
                 }
             });
-            ui.add_space(8.0);
+            ui.add_space(12.0);
 
             let Some(mut doc) = self.editor_doc.clone() else { return };
             let legacy = doc.legacy_map();
@@ -866,102 +866,140 @@ impl ControllerPage {
             let selected = self.editor_selected.unwrap_or(Control::A);
 
             ui.columns(2, |cols| {
-                // Left: Grouped physical control picker
-                cols[0].label(w::caption_text(t, t!("SELECT A CONTROL TO REMAP")));
-                cols[0].add_space(6.0);
-                let groups: &[(&str, &[Control])] = &[
-                    (t!("Face buttons"), &[Control::A, Control::B, Control::X, Control::Y]),
-                    (t!("Bumpers & Triggers"), &[Control::LB, Control::RB, Control::LT, Control::RT]),
-                    (t!("D-pad & Menu"), &[Control::Up, Control::Down, Control::Left, Control::Right, Control::Start, Control::Back]),
-                    (
-                        t!("Left stick"),
-                        &[Control::LeftStick, Control::L3, Control::LeftStickUp, Control::LeftStickDown, Control::LeftStickLeft, Control::LeftStickRight],
-                    ),
-                    (
-                        t!("Right stick"),
-                        &[Control::RightStick, Control::R3, Control::RightStickUp, Control::RightStickDown, Control::RightStickLeft, Control::RightStickRight],
-                    ),
-                    (t!("Back paddles & Gyro"), &[Control::L4, Control::R4, Control::L5, Control::R5, Control::Gyro]),
-                ];
-                egui::ScrollArea::vertical().id_salt(("ctrl-editor-controls", app_id)).max_height(300.0).show(&mut cols[0], |ui| {
-                    for (heading, ctrls) in groups {
-                        ui.label(w::text_medium(*heading, 12.0, t.text_dim));
+                // Left pane: all physical controller inputs at full height (no nested scroll)
+                editor_section_card(t).show(&mut cols[0], |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(w::caption_text(t, t!("SELECT A CONTROL TO REMAP")));
+                    ui.add_space(8.0);
+                    let groups: &[(&str, &[Control])] = &[
+                        (t!("Face buttons"), &[Control::A, Control::B, Control::X, Control::Y]),
+                        (t!("Bumpers & Triggers"), &[Control::LB, Control::RB, Control::LT, Control::RT]),
+                        (
+                            t!("D-pad & Menu"),
+                            &[Control::Up, Control::Down, Control::Left, Control::Right, Control::Start, Control::Back],
+                        ),
+                        (
+                            t!("Left stick"),
+                            &[
+                                Control::LeftStick,
+                                Control::L3,
+                                Control::LeftStickUp,
+                                Control::LeftStickDown,
+                                Control::LeftStickLeft,
+                                Control::LeftStickRight,
+                            ],
+                        ),
+                        (
+                            t!("Right stick"),
+                            &[
+                                Control::RightStick,
+                                Control::R3,
+                                Control::RightStickUp,
+                                Control::RightStickDown,
+                                Control::RightStickLeft,
+                                Control::RightStickRight,
+                            ],
+                        ),
+                        (t!("Back paddles & Gyro"), &[Control::L4, Control::R4, Control::L5, Control::R5, Control::Gyro]),
+                    ];
+                    for (idx, (heading, ctrls)) in groups.iter().enumerate() {
+                        if idx > 0 {
+                            ui.add_space(8.0);
+                        }
+                        ui.label(w::text_semibold(*heading, 12.0, t.text_dim));
+                        ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                             for &c in *ctrls {
                                 let is_sel = selected == c;
                                 let mapped = legacy.0.get(&c).and_then(|v| v.first()).map(Output::display_label);
-                                let text = match mapped {
-                                    Some(lbl) => format!("{} ({lbl})", c.name()),
-                                    None => c.name().to_string(),
-                                };
-                                let kind = if is_sel { w::Kind::Primary } else { w::Kind::Secondary };
-                                if w::button(ui, t, None, &text, kind, w::Size::Sm).clicked() {
+                                if editor_control_tile(ui, t, c.name(), mapped.as_deref(), is_sel).clicked() {
                                     self.editor_selected = Some(c);
                                 }
                             }
                         });
-                        ui.add_space(6.0);
                     }
                 });
 
-                // Right: Output target picker for selected control
-                let current_out = legacy
-                    .0
-                    .get(&selected)
-                    .and_then(|v| v.first())
-                    .cloned()
-                    .unwrap_or_else(|| default_output_for(selected));
-                cols[1].label(w::caption_text(t, t!("REMAP TARGET")));
-                cols[1].add_space(4.0);
-                cols[1].label(w::text_semibold(
-                    t!("{control} → {target}", control = selected.name(), target = current_out.display_label()),
-                    14.0,
-                    t.text,
-                ));
-                cols[1].add_space(8.0);
+                // Right pane: output target picker for the selected control (full height, no nested scroll)
+                editor_section_card(t).show(&mut cols[1], |ui| {
+                    ui.set_width(ui.available_width());
+                    let current_out = legacy
+                        .0
+                        .get(&selected)
+                        .and_then(|v| v.first())
+                        .cloned()
+                        .unwrap_or_else(|| default_output_for(selected));
+                    let has_override = legacy.0.contains_key(&selected);
 
-                let mut chosen_out: Option<Output> = None;
-                let mut clear_override = false;
+                    ui.label(w::caption_text(t, t!("REMAP TARGET")));
+                    ui.add_space(6.0);
+                    egui::Frame::new()
+                        .fill(w::active_fill(t))
+                        .stroke(Stroke::new(1.0, t.accent.gamma_multiply(0.55)))
+                        .corner_radius(t.corner_small())
+                        .inner_margin(Margin::symmetric(12, 8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(w::text_bold(
+                                t!("{control} → {target}", control = selected.name(), target = current_out.display_label()),
+                                14.5,
+                                t.text,
+                            ));
+                        });
+                    ui.add_space(8.0);
 
-                cols[1].horizontal_wrapped(|ui| {
-                    if w::button(ui, t, None, t!("Unassigned"), w::Kind::Ghost, w::Size::Sm).clicked() {
-                        chosen_out = Some(Output::Unassigned);
-                    }
-                    if w::button(ui, t, Some(icons::RESTORE), t!("Default"), w::Kind::Ghost, w::Size::Sm).clicked() {
-                        clear_override = true;
-                    }
-                });
-                cols[1].add_space(6.0);
+                    let mut chosen_out: Option<Output> = None;
+                    let mut clear_override = false;
 
-                if selected.vector() {
-                    cols[1].label(w::text_medium(t!("Analog / Pointer output"), 12.5, t.text_dim));
-                    cols[1].horizontal_wrapped(|ui| {
-                        for out in [Output::Pad(Control::LeftStick), Output::Pad(Control::RightStick), Output::MouseMove] {
-                            let kind = if current_out == out { w::Kind::Primary } else { w::Kind::Secondary };
-                            if w::button(ui, t, None, &out.display_label(), kind, w::Size::Sm).clicked() {
-                                chosen_out = Some(out);
-                            }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                        if editor_action_button(
+                            ui,
+                            t,
+                            None,
+                            t!("Unassigned"),
+                            current_out == Output::Unassigned && has_override,
+                        )
+                        .clicked()
+                        {
+                            chosen_out = Some(Output::Unassigned);
+                        }
+                        if editor_action_button(ui, t, Some(icons::RESTORE), t!("Default"), !has_override).clicked() {
+                            clear_override = true;
                         }
                     });
-                } else {
-                    egui::ScrollArea::vertical().id_salt(("ctrl-editor-targets", app_id)).max_height(220.0).show(&mut cols[1], |ui| {
-                        ui.label(w::text_medium(t!("Gamepad button / trigger"), 12.0, t.text_dim));
+                    ui.add_space(10.0);
+
+                    if selected.vector() {
+                        ui.label(w::text_semibold(t!("Analog / Pointer output"), 12.0, t.text_dim));
+                        ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                            for &c in Control::ALL.iter().filter(|c| c.pad_output() && !c.vector()) {
-                                let out = Output::Pad(c);
-                                let kind = if current_out == out { w::Kind::Primary } else { w::Kind::Secondary };
-                                if w::button(ui, t, None, c.name(), kind, w::Size::Sm).clicked() {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                            for out in [Output::Pad(Control::LeftStick), Output::Pad(Control::RightStick), Output::MouseMove] {
+                                if editor_keycap(ui, t, &out.display_label(), current_out == out, 88.0).clicked() {
                                     chosen_out = Some(out);
                                 }
                             }
                         });
-                        ui.add_space(6.0);
-
-                        ui.label(w::text_medium(t!("Mouse"), 12.0, t.text_dim));
+                    } else {
+                        ui.label(w::text_semibold(t!("Gamepad button / trigger"), 12.0, t.text_dim));
+                        ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                            for &c in Control::ALL.iter().filter(|c| c.pad_output() && !c.vector()) {
+                                let out = Output::Pad(c);
+                                if editor_keycap(ui, t, c.name(), current_out == out, 42.0).clicked() {
+                                    chosen_out = Some(out);
+                                }
+                            }
+                        });
+                        ui.add_space(10.0);
+
+                        ui.label(w::text_semibold(t!("Mouse"), 12.0, t.text_dim));
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                             for out in [
                                 Output::MouseButton(1),
                                 Output::MouseButton(2),
@@ -971,56 +1009,67 @@ impl ControllerPage {
                                 Output::Wheel(1),
                                 Output::Wheel(-1),
                             ] {
-                                let kind = if current_out == out { w::Kind::Primary } else { w::Kind::Secondary };
-                                if w::button(ui, t, None, &out.display_label(), kind, w::Size::Sm).clicked() {
+                                if editor_keycap(ui, t, &out.display_label(), current_out == out, 64.0).clicked() {
                                     chosen_out = Some(out);
                                 }
                             }
                         });
-                        ui.add_space(6.0);
+                        ui.add_space(10.0);
 
-                        ui.label(w::text_medium(t!("Keyboard"), 12.0, t.text_dim));
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                            for &vk in EDITOR_KEYS {
-                                let out = Output::Key(vk);
-                                let kind = if current_out == out { w::Kind::Primary } else { w::Kind::Secondary };
-                                if w::button(ui, t, None, &client::controller_key_name(vk), kind, w::Size::Sm).clicked() {
-                                    chosen_out = Some(out);
+                        ui.label(w::text_semibold(t!("Keyboard"), 12.0, t.text_dim));
+                        ui.add_space(4.0);
+                        for (sub, keys) in [
+                            (t!("Letters"), EDITOR_KEYS_LETTERS),
+                            (t!("Modifiers & Navigation"), EDITOR_KEYS_MODIFIERS),
+                            (t!("Numbers"), EDITOR_KEYS_NUMBERS),
+                            (t!("Function keys"), EDITOR_KEYS_FUNCTION),
+                        ] {
+                            ui.label(w::text(sub, 11.0, t.text_faint));
+                            ui.add_space(2.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = vec2(5.0, 5.0);
+                                for &vk in keys {
+                                    let out = Output::Key(vk);
+                                    if editor_keycap(ui, t, &client::controller_key_name(vk), current_out == out, 36.0)
+                                        .clicked()
+                                    {
+                                        chosen_out = Some(out);
+                                    }
                                 }
-                            }
-                        });
+                            });
+                            ui.add_space(6.0);
+                        }
 
                         if !native_actions.is_empty() {
-                            ui.add_space(6.0);
-                            ui.label(w::text_medium(t!("Game actions"), 12.0, t.text_dim));
+                            ui.add_space(4.0);
+                            ui.label(w::text_semibold(t!("Game actions"), 12.0, t.text_dim));
+                            ui.add_space(4.0);
                             ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                                 for (set, act) in native_actions.iter().take(32) {
                                     let out = Output::Native(set.clone(), act.clone());
-                                    let kind = if current_out == out { w::Kind::Primary } else { w::Kind::Secondary };
-                                    if w::button(ui, t, None, &format!("{set} · {act}"), kind, w::Size::Sm).clicked() {
+                                    if editor_keycap(ui, t, &format!("{set} · {act}"), current_out == out, 64.0).clicked() {
                                         chosen_out = Some(out);
                                     }
                                 }
                             });
                         }
-                    });
-                }
+                    }
 
-                if clear_override {
-                    doc.clear_binding(selected);
-                    self.editor_dirty = true;
-                } else if let Some(out) = chosen_out {
-                    doc.set_binding(selected, &out);
-                    self.editor_dirty = true;
-                }
+                    if clear_override {
+                        doc.clear_binding(selected);
+                        self.editor_dirty = true;
+                    } else if let Some(out) = chosen_out {
+                        doc.set_binding(selected, &out);
+                        self.editor_dirty = true;
+                    }
+                });
             });
 
             doc.set_title(&self.editor_title);
             self.editor_doc = Some(doc.clone());
 
-            ui.add_space(10.0);
+            ui.add_space(12.0);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                 if w::button(ui, t, Some(icons::CONTROLLER), t!("Save & Apply"), w::Kind::Primary, w::Size::Sm).clicked() {
@@ -1036,7 +1085,7 @@ impl ControllerPage {
                         }
                     }
                 }
-                if w::button(ui, t, Some(icons::FOLDER), t!("Export .vdf…"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                if editor_action_button(ui, t, Some(icons::FOLDER), t!("Export .vdf…"), false).clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .set_file_name(format!("aurora_{app_id}.vdf"))
                         .add_filter("Steam Input VDF", &["vdf"])
@@ -1221,18 +1270,160 @@ fn controller_status_line(c: &DetectedController) -> String {
     parts.join("  ·  ")
 }
 
-const EDITOR_KEYS: &[u16] = &[
+const EDITOR_KEYS_LETTERS: &[u16] = &[
     b'W' as u16, b'A' as u16, b'S' as u16, b'D' as u16,
     b'E' as u16, b'R' as u16, b'F' as u16, b'Q' as u16,
     b'C' as u16, b'V' as u16, b'G' as u16, b'X' as u16,
     b'Z' as u16, b'T' as u16, b'I' as u16, b'M' as u16,
+];
+
+const EDITOR_KEYS_MODIFIERS: &[u16] = &[
     0x20, 0x10, 0x11, 0x12, 0x09, 0x0D, 0x1B, 0x08,
     0x26, 0x28, 0x25, 0x27,
-    b'1' as u16, b'2' as u16, b'3' as u16, b'4' as u16,
-    b'5' as u16, b'6' as u16, b'7' as u16, b'8' as u16,
-    b'9' as u16, b'0' as u16,
+];
+
+const EDITOR_KEYS_NUMBERS: &[u16] = &[
+    b'1' as u16, b'2' as u16, b'3' as u16, b'4' as u16, b'5' as u16,
+    b'6' as u16, b'7' as u16, b'8' as u16, b'9' as u16, b'0' as u16,
+];
+
+const EDITOR_KEYS_FUNCTION: &[u16] = &[
     0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B,
 ];
+
+fn editor_button_border(t: &Theme) -> egui::Color32 {
+    w::mix(t.border, t.text_faint, 0.45)
+}
+
+fn editor_workspace_frame(t: &Theme) -> egui::Frame {
+    egui::Frame::new()
+        .fill(t.chrome)
+        .stroke(Stroke::new(1.0, t.border))
+        .corner_radius(t.corner_small())
+        .inner_margin(Margin::same(14))
+}
+
+fn editor_section_card(t: &Theme) -> egui::Frame {
+    egui::Frame::new()
+        .fill(t.surface)
+        .stroke(Stroke::new(1.0, t.border))
+        .corner_radius(t.corner_small())
+        .inner_margin(Margin::same(12))
+}
+
+fn editor_action_button(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, selected: bool) -> egui::Response {
+    let text = match icon {
+        Some(i) => format!("{i}  {label}"),
+        None => label.to_string(),
+    };
+    editor_keycap(ui, t, &text, selected, 0.0)
+}
+
+fn editor_keycap(ui: &mut Ui, t: &Theme, label: &str, selected: bool, min_width: f32) -> egui::Response {
+    let font = if selected { w::font_semibold(12.5) } else { w::font_medium(12.5) };
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font, egui::Color32::PLACEHOLDER);
+    let width = (galley.size().x + 20.0).max(min_width);
+    let height = 30.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.10);
+        let pressed = resp.is_pointer_button_down_on();
+        let base_fill = w::mix(t.raised, t.surface_hover, 0.28);
+        let mut fill = if selected {
+            w::mix(t.accent, egui::Color32::WHITE, hover * 0.08)
+        } else {
+            w::mix(base_fill, t.surface_hover, hover)
+        };
+        if pressed {
+            fill = w::mix(fill, egui::Color32::BLACK, 0.12);
+        }
+        let border = if selected {
+            t.accent
+        } else {
+            w::mix(editor_button_border(t), t.accent, hover * 0.7)
+        };
+        let fg = if selected { t.on_accent } else { t.text };
+        let radius = CornerRadius::same(6);
+        let p = ui.painter();
+        p.rect_filled(rect, radius, fill);
+        p.rect_stroke(rect, radius, Stroke::new(if selected { 1.4 } else { 1.0 }, border), StrokeKind::Inside);
+        p.galley(rect.center() - galley.size() / 2.0, galley, fg);
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn editor_control_tile(
+    ui: &mut Ui,
+    t: &Theme,
+    control_name: &str,
+    mapped: Option<&str>,
+    selected: bool,
+) -> egui::Response {
+    let name_galley = ui.painter().layout_no_wrap(
+        control_name.to_string(),
+        w::font_semibold(12.5),
+        egui::Color32::PLACEHOLDER,
+    );
+    let map_galley = mapped.map(|m| {
+        ui.painter().layout_no_wrap(format!("→ {m}"), w::font_medium(11.5), egui::Color32::PLACEHOLDER)
+    });
+    let gap = if map_galley.is_some() { 8.0 } else { 0.0 };
+    let content_w = name_galley.size().x + gap + map_galley.as_ref().map_or(0.0, |g| g.size().x + 12.0);
+    let width = (content_w + 22.0).max(56.0);
+    let height = 32.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.10);
+        let pressed = resp.is_pointer_button_down_on();
+        let has_map = map_galley.is_some();
+        let base_fill = if has_map {
+            w::mix(t.raised, t.accent, 0.10)
+        } else {
+            w::mix(t.raised, t.surface_hover, 0.28)
+        };
+        let mut fill = if selected {
+            w::mix(t.accent, egui::Color32::WHITE, hover * 0.08)
+        } else {
+            w::mix(base_fill, t.surface_hover, hover)
+        };
+        if pressed {
+            fill = w::mix(fill, egui::Color32::BLACK, 0.12);
+        }
+        let border = if selected {
+            t.accent
+        } else if has_map {
+            w::mix(t.accent.gamma_multiply(0.55), t.accent, hover * 0.6)
+        } else {
+            w::mix(editor_button_border(t), t.accent, hover * 0.7)
+        };
+        let radius = CornerRadius::same(7);
+        let p = ui.painter();
+        p.rect_filled(rect, radius, fill);
+        p.rect_stroke(rect, radius, Stroke::new(if selected { 1.5 } else { 1.0 }, border), StrokeKind::Inside);
+
+        let name_fg = if selected { t.on_accent } else { t.text };
+        if let Some(mg) = map_galley {
+            let x = rect.left() + 11.0;
+            p.galley(pos2(x, rect.center().y - name_galley.size().y / 2.0), name_galley, name_fg);
+            let badge_left = x + content_w - (mg.size().x + 12.0);
+            let badge_rect = Rect::from_min_size(
+                pos2(badge_left, rect.center().y - 10.0),
+                vec2(mg.size().x + 12.0, 20.0),
+            );
+            let badge_bg = if selected {
+                egui::Color32::from_black_alpha(55)
+            } else {
+                t.accent.gamma_multiply(0.16)
+            };
+            let badge_fg = if selected { t.on_accent } else { t.accent };
+            p.rect_filled(badge_rect, CornerRadius::same(5), badge_bg);
+            p.galley(badge_rect.center() - mg.size() / 2.0, mg, badge_fg);
+        } else {
+            p.galley(rect.center() - name_galley.size() / 2.0, name_galley, name_fg);
+        }
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
 
 fn builtin_template_short_label(tmpl: BuiltInTemplate) -> &'static str {
     match tmpl {
