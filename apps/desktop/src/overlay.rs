@@ -315,6 +315,20 @@ fn foreground_window() -> isize {
     0
 }
 
+/// Check whether a Windows executable path is strictly inside `dir` (respecting
+/// path-component boundaries so `C:\Games\App` never matches `C:\Games\App2\...`).
+#[cfg(any(windows, test))]
+fn win_exe_in_dir(exe: &str, dir: &str) -> bool {
+    let exe = exe.to_lowercase().replace('/', "\\");
+    let dir = dir.to_lowercase().replace('/', "\\");
+    let trimmed = dir.trim_end_matches('\\');
+    if trimmed.is_empty() {
+        return false;
+    }
+    let prefix = format!("{trimmed}\\");
+    exe.starts_with(&prefix)
+}
+
 /// The focused window belongs to a program inside `dir` (the game's folder).
 #[cfg(windows)]
 fn foreground_is_in(dir: &std::path::Path) -> bool {
@@ -342,9 +356,8 @@ fn foreground_is_in(dir: &std::path::Path) -> bool {
         if !ok {
             return false;
         }
-        let exe = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase().replace('/', "\\");
-        let dir = dir.display().to_string().to_lowercase().replace('/', "\\");
-        exe.starts_with(dir.trim_end_matches('\\'))
+        let exe = String::from_utf16_lossy(&buf[..len as usize]);
+        win_exe_in_dir(&exe, &dir.display().to_string())
     }
 }
 /// Linux: the focused X window (games run on X11 or XWayland) belongs to a
@@ -1546,6 +1559,20 @@ fn fps_hud(app: &SteamApp, ctx: &egui::Context, t: &Theme) {
                     );
                 });
         });
+}
+
+#[cfg(test)]
+mod win_path_tests {
+    use super::win_exe_in_dir;
+
+    #[test]
+    fn respects_path_component_boundaries() {
+        assert!(win_exe_in_dir(r"C:\Games\App\game.exe", r"C:\Games\App"));
+        assert!(win_exe_in_dir(r"c:/games/app/sub/game.exe", r"C:\Games\App\"));
+        assert!(!win_exe_in_dir(r"C:\Games\App2\game.exe", r"C:\Games\App"));
+        assert!(!win_exe_in_dir(r"C:\Games\App", r"C:\Games\App"));
+        assert!(!win_exe_in_dir(r"C:\Games\App\game.exe", ""));
+    }
 }
 
 fn toasts_hud(app: &SteamApp, ctx: &egui::Context, t: &Theme) {

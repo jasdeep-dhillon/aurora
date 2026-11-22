@@ -156,19 +156,49 @@ pub fn verify(steam_root: &Path, game: &InstalledGame, progress: &Progress) -> V
     progress.total_bytes.store(work.iter().map(|f| f.size).sum(), Ordering::Relaxed);
     report.files = work.len();
 
+    let canon_install = ensure_real_dir(&game.install_dir, "install_dir").ok();
     let mut buf = vec![0u8; 256 * 1024];
     for f in work {
         if progress.cancel.load(Ordering::Relaxed) {
             report.cancelled = true;
             break;
         }
-        let full = game.install_dir.join(&f.path);
+        let Ok(rel) = validate_rel_path(&f.path) else {
+            report.corrupt.push(f.path);
+            progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
+            continue;
+        };
+        let Some(ref canon_root) = canon_install else {
+            report.corrupt.push(f.path);
+            progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
+            continue;
+        };
+        let Ok(full) = resolve_inside_no_symlinks(&game.install_dir, canon_root, &rel) else {
+            report.corrupt.push(f.path);
+            progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
+            continue;
+        };
+        let Ok(meta_pre) = fs::symlink_metadata(&full) else {
+            report.missing.push(f.path);
+            progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
+            continue;
+        };
+        if crate::is_symlink_or_reparse(&meta_pre) || !meta_pre.is_file() {
+            report.corrupt.push(f.path);
+            progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
+            continue;
+        }
         let Ok(mut file) = fs::File::open(&full) else {
             report.missing.push(f.path);
             progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
             continue;
         };
-        if file.metadata().map(|m| m.len()).unwrap_or(0) != f.size {
+        let Ok(fmeta) = file.metadata() else {
+            report.corrupt.push(f.path);
+            progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
+            continue;
+        };
+        if !fmeta.is_file() || fmeta.len() != f.size {
             report.corrupt.push(f.path);
             progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
             continue;
@@ -1388,6 +1418,21 @@ pub fn backup_game(game: &InstalledGame, backup_dir: &Path, progress: &Progress)
         let appmanifest_sha256 = write_bytes_new_verified(&stage_root.join(&acf_name), &src.manifest_bytes)?;
         progress.done_bytes.fetch_add(src.manifest_bytes.len() as u64, Ordering::Relaxed);
 
+        let mut seen_files = HashSet::with_capacity(files.len());
+        for f in &files {
+            let rel = validate_rel_path(&f.path)?;
+            if !seen_files.insert(dedup_rel_key(&rel)) {
+                return Err(format!("cannot create cross-platform backup: case-colliding file path {:?}", f.path));
+            }
+        }
+        let mut seen_ws = HashSet::with_capacity(workshop_files.len());
+        for f in &workshop_files {
+            let rel = validate_rel_path(&f.path)?;
+            if !seen_ws.insert(dedup_rel_key(&rel)) {
+                return Err(format!("cannot create cross-platform backup: case-colliding workshop path {:?}", f.path));
+            }
+        }
+
         let created_at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let manifest = BackupManifest {
             version: 1,
@@ -1407,6 +1452,9 @@ pub fn backup_game(game: &InstalledGame, backup_dir: &Path, progress: &Progress)
             workshop_files,
         };
         let json = serde_json::to_vec_pretty(&manifest).map_err(|e| format!("could not serialize backup manifest: {e}"))?;
+        if json.len() as u64 > MAX_BACKUP_MANIFEST_BYTES {
+            return Err(format!("backup manifest exceeds {} byte limit", MAX_BACKUP_MANIFEST_BYTES));
+        }
         write_bytes_new_verified(&stage_root.join("aurora-backup.json"), &json)?;
 
         if progress.cancel.load(Ordering::Relaxed) {
@@ -1492,10 +1540,24 @@ enum BackupLayout {
     },
 }
 
+const MAX_BACKUP_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+
+fn dedup_rel_key(rel: &Path) -> String {
+    rel.to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
 fn read_and_validate_aurora_backup(backup_dir: &Path) -> Result<BackupLayout, String> {
     let meta_path = backup_dir.join("aurora-backup.json");
     let _ = ensure_real_file(&meta_path, "aurora-backup.json")?;
-    let raw = fs::read_to_string(&meta_path).map_err(|e| format!("could not read aurora-backup.json: {e}"))?;
+    let file = fs::File::open(&meta_path).map_err(|e| format!("could not read aurora-backup.json: {e}"))?;
+    let mut raw_bytes = Vec::new();
+    file.take(MAX_BACKUP_MANIFEST_BYTES + 1)
+        .read_to_end(&mut raw_bytes)
+        .map_err(|e| format!("could not read aurora-backup.json: {e}"))?;
+    if raw_bytes.len() as u64 > MAX_BACKUP_MANIFEST_BYTES {
+        return Err(format!("aurora-backup.json exceeds {} byte limit", MAX_BACKUP_MANIFEST_BYTES));
+    }
+    let raw = String::from_utf8(raw_bytes).map_err(|e| format!("invalid UTF-8 in aurora-backup.json: {e}"))?;
     let manifest: BackupManifest = serde_json::from_str(&raw).map_err(|e| format!("invalid aurora-backup.json: {e}"))?;
 
     if manifest.version != 1 {
@@ -1545,11 +1607,11 @@ fn read_and_validate_aurora_backup(backup_dir: &Path) -> Result<BackupLayout, St
     }
     let mut seen = HashSet::with_capacity(manifest.files.len());
     for f in &manifest.files {
-        validate_rel_path(&f.path)?;
+        let rel = validate_rel_path(&f.path)?;
         if !is_valid_sha256_hex(&f.sha256) {
             return Err(format!("invalid sha256 for {:?} in aurora-backup.json", f.path));
         }
-        if !seen.insert(f.path.clone()) {
+        if !seen.insert(dedup_rel_key(&rel)) {
             return Err(format!("duplicate file entry {:?} in aurora-backup.json", f.path));
         }
     }
@@ -1580,11 +1642,11 @@ fn read_and_validate_aurora_backup(backup_dir: &Path) -> Result<BackupLayout, St
         }
         let mut ws_seen = HashSet::with_capacity(manifest.workshop_files.len());
         for f in &manifest.workshop_files {
-            validate_rel_path(&f.path)?;
+            let rel = validate_rel_path(&f.path)?;
             if !is_valid_sha256_hex(&f.sha256) {
                 return Err(format!("invalid workshop sha256 for {:?}", f.path));
             }
-            if !ws_seen.insert(f.path.clone()) {
+            if !ws_seen.insert(dedup_rel_key(&rel)) {
                 return Err(format!("duplicate workshop file {:?}", f.path));
             }
         }
@@ -1655,10 +1717,14 @@ fn find_standard_backup(backup_dir: &Path) -> Result<BackupLayout, String> {
                         ws_acf = Some((wp, bytes));
                     }
                 }
-                let wc = ws_root.join("content").join(parsed_id.to_string());
-                if fs::symlink_metadata(&wc).is_ok() {
-                    let _ = ensure_real_dir(&wc, "workshop content")?;
-                    ws_content_dir = Some(wc);
+                let ws_content_root = ws_root.join("content");
+                if fs::symlink_metadata(&ws_content_root).is_ok() {
+                    let _ = ensure_real_dir(&ws_content_root, "workshop content root")?;
+                    let wc = ws_content_root.join(parsed_id.to_string());
+                    if fs::symlink_metadata(&wc).is_ok() {
+                        let _ = ensure_real_dir(&wc, "workshop content")?;
+                        ws_content_dir = Some(wc);
+                    }
                 }
             }
             let estimated_bytes = vdf::parse(std::str::from_utf8(&acf_bytes).unwrap_or(""))

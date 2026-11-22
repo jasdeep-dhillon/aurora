@@ -137,25 +137,39 @@ pub fn player_config_dir(steam_root: &Path, account: u32, app_id: AppId) -> Path
 
 /// All Xbox-style / controller_mappings `.vdf` files under `dir`, best rank first.
 fn all_in(dir: &Path, depth: u32) -> Vec<(usize, String, PathBuf)> {
+    const MAX_SCAN_FILES: usize = 256;
+    let Ok(root_meta) = std::fs::symlink_metadata(dir) else { return Vec::new() };
+    if root_meta.file_type().is_symlink() || !root_meta.is_dir() {
+        return Vec::new();
+    }
     let mut found: Vec<(usize, String, PathBuf)> = Vec::new();
-    fn walk(dir: &Path, depth: u32, found: &mut Vec<(usize, String, PathBuf)>) {
+    let mut scanned = 0usize;
+    fn walk(dir: &Path, depth: u32, scanned: &mut usize, found: &mut Vec<(usize, String, PathBuf)>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
+            if *scanned >= MAX_SCAN_FILES {
+                return;
+            }
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
             let p = e.path();
-            if p.is_dir() {
+            if ft.is_dir() {
                 if depth > 0 {
-                    walk(&p, depth - 1, found);
+                    walk(&p, depth - 1, scanned, found);
                 }
-            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("vdf"))
-                && e.metadata().map(|m| m.len() < 2_000_000).unwrap_or(false)
-                && let Ok(t) = std::fs::read_to_string(&p)
-                && is_mappings(&t)
-            {
-                found.push((rank(&t), t, p));
+            } else if ft.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("vdf")) {
+                *scanned += 1;
+                if let Some(t) = read_bounded_config_file(&p)
+                    && is_mappings(&t)
+                {
+                    found.push((rank(&t), t, p));
+                }
             }
         }
     }
-    walk(dir, depth, &mut found);
+    walk(dir, depth, &mut scanned, &mut found);
     found.sort_by_key(|f| f.0);
     found
 }
@@ -184,6 +198,7 @@ fn player_workshop_choices(steam_root: &Path, account: u32, app_id: AppId, xbox_
     let mut sets: Vec<(u8, String, PathBuf)> = std::fs::read_dir(&dir)
         .map(|rd| {
             rd.flatten()
+                .filter(|e| e.file_type().is_ok_and(|ft| !ft.is_symlink() && ft.is_file()))
                 .map(|e| e.path())
                 .filter_map(|p| {
                     let n = p.file_name()?.to_str()?.to_ascii_lowercase();
@@ -207,7 +222,8 @@ fn player_workshop_choices(steam_root: &Path, account: u32, app_id: AppId, xbox_
     sets.sort();
     sets.into_iter()
         .filter_map(|(_, n, p)| {
-            let id = vdf::parse(&std::fs::read_to_string(&p).ok()?)
+            let text = read_bounded_config_file(&p)?;
+            let id = vdf::parse(&text)
                 .ok()?
                 .obj("controller_config")?
                 .obj(&app_id.to_string())?
@@ -215,6 +231,105 @@ fn player_workshop_choices(steam_root: &Path, account: u32, app_id: AppId, xbox_
             Some((id, n))
         })
         .collect()
+}
+
+const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+const WORKSHOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+fn is_trusted_steam_ugc_host(host: &str) -> bool {
+    let h = host.trim_end_matches('.').to_ascii_lowercase();
+    matches!(
+        h.as_str(),
+        "steamusercontent-a.akamaihd.net"
+            | "steamuserimages-a.akamaihd.net"
+            | "steamcdn-a.akamaihd.net"
+            | "media.steampowered.com"
+            | "store.steampowered.com"
+            | "steamcommunity.com"
+    ) || h.ends_with(".steamusercontent.com")
+        || h.ends_with(".steamstatic.com")
+        || h.ends_with(".steamcontent.com")
+}
+
+fn validate_workshop_config_url(url: &str) -> Result<reqwest::Url, String> {
+    if url.is_empty() || url.contains('\\') || url.chars().any(|c| c.is_control()) {
+        return Err("invalid Workshop config URL".into());
+    }
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid Workshop config URL: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("refusing non-HTTPS Workshop config URL".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("refusing credentials in Workshop config URL".into());
+    }
+    let host = parsed.host_str().filter(|h| !h.is_empty()).ok_or_else(|| "missing host in Workshop config URL".to_string())?;
+    if !is_trusted_steam_ugc_host(host) {
+        return Err(format!("refusing untrusted Workshop config host: {host}"));
+    }
+    Ok(parsed)
+}
+
+fn workshop_http() -> &'static reqwest::Client {
+    static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+    HTTP.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(WORKSHOP_TIMEOUT)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    attempt.error("too many redirects")
+                } else if attempt.url().scheme() != "https" {
+                    attempt.error("refusing non-HTTPS redirect")
+                } else if attempt.url().host_str().is_none_or(|h| !is_trusted_steam_ugc_host(h)) {
+                    attempt.error("refusing redirect to untrusted host")
+                } else {
+                    attempt.follow()
+                }
+            }))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+fn read_bounded_config_file(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let f = opts.open(path).ok()?;
+    let fmeta = f.metadata().ok()?;
+    if !fmeta.is_file() {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if (fmeta.file_attributes() & 0x0400) != 0 {
+            return None;
+        }
+    }
+    let mut buf = Vec::new();
+    f.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut buf).ok()?;
+    if buf.len() as u64 > MAX_CONFIG_BYTES {
+        tracing::warn!("input_config: refusing local config exceeding {} bytes: {}", MAX_CONFIG_BYTES, path.display());
+        return None;
+    }
+    String::from_utf8(buf).ok()
 }
 
 /// A configuration from the Workshop (they belong to Steam's controller
@@ -226,8 +341,22 @@ async fn workshop_file(conn: &Connection, _app_id: AppId, id: u64) -> Option<Str
         .await
         .ok()?;
     let d = r.publishedfiledetails.first()?;
-    let url = Some(d.file_url().to_string()).filter(|u| !u.is_empty())?;
-    let text = reqwest::get(&url).await.ok()?.text().await.ok()?;
+    let url = validate_workshop_config_url(d.file_url()).ok()?;
+    let mut resp = workshop_http().get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    if resp.content_length().is_some_and(|n| n > MAX_CONFIG_BYTES) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if (bytes.len() as u64).saturating_add(chunk.len() as u64) > MAX_CONFIG_BYTES {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let text = String::from_utf8(bytes).ok()?;
     is_mappings(&text).then_some(text)
 }
 
@@ -263,8 +392,7 @@ pub async fn config(conn: &Connection, app_id: AppId, me: u64, steam_root: &Path
     let account = (me & 0xFFFF_FFFF) as u32;
     let override_choice = app_binding(app_id);
     let chosen = match &override_choice {
-        BindingChoice::LocalFile(path) => std::fs::read_to_string(path)
-            .ok()
+        BindingChoice::LocalFile(path) => read_bounded_config_file(path)
             .filter(|t| is_mappings(t))
             .map(|t| (t, format!("selected file ({})", path.display()))),
         BindingChoice::Workshop(id) => workshop_file(conn, app_id, *id)
@@ -308,11 +436,20 @@ pub async fn config(conn: &Connection, app_id: AppId, me: u64, steam_root: &Path
     }
 }
 
+const MAX_SUMMARY_SETS: usize = 64;
+const MAX_SUMMARY_BINDINGS_PER_SET: usize = 256;
+const MAX_SUMMARY_TOTAL_BINDINGS: usize = 2048;
+const MAX_SUMMARY_TOTAL_ACTIONS: usize = 4096;
+const MAX_ACTIONS_PER_INPUT: usize = 64;
+
 fn game_actions_in(input: &vdf::Obj) -> Vec<String> {
     let mut out = Vec::new();
     for (_, act) in input.obj("activators").map(|a| a.iter().collect::<Vec<_>>()).unwrap_or_default() {
         let Some(bindings) = act.as_obj().and_then(|a| a.obj("bindings")) else { continue };
         for (k, v) in bindings.iter() {
+            if out.len() >= MAX_ACTIONS_PER_INPUT {
+                return out;
+            }
             let Some(b) = v.as_str().filter(|_| k == "binding") else { continue };
             let mut words = b.split(',').next().unwrap_or_default().split_whitespace();
             if words.next() == Some("game_action")
@@ -360,6 +497,8 @@ pub fn parse_vdf_summary(text: &str) -> (String, Vec<ActionSetSummary>) {
     }
     let mut groups: HashMap<String, GroupInfo> = HashMap::new();
     let mut sets: Vec<ActionSetSummary> = Vec::new();
+    let mut total_bindings = 0usize;
+    let mut total_actions = 0usize;
 
     for (k, v) in m.iter() {
         let Some(o) = v.as_obj() else { continue };
@@ -370,6 +509,9 @@ pub fn parse_vdf_summary(text: &str) -> (String, Vec<ActionSetSummary>) {
                 let mut inputs = Vec::new();
                 if let Some(inp) = o.obj("inputs") {
                     for (name, item) in inp.iter() {
+                        if inputs.len() >= MAX_SUMMARY_BINDINGS_PER_SET {
+                            break;
+                        }
                         if let Some(item) = item.as_obj() {
                             let acts = game_actions_in(item);
                             if !acts.is_empty() {
@@ -380,17 +522,24 @@ pub fn parse_vdf_summary(text: &str) -> (String, Vec<ActionSetSummary>) {
                 }
                 let analog = o
                     .obj("gameactions")
-                    .map(|ga| ga.iter().filter_map(|(_, a)| a.as_str()).map(str::to_string).collect())
+                    .map(|ga| ga.iter().filter_map(|(_, a)| a.as_str()).take(MAX_ACTIONS_PER_INPUT).map(str::to_string).collect())
                     .unwrap_or_default();
                 groups.insert(id, GroupInfo { mode, inputs, analog });
             }
             "preset" => {
+                if sets.len() >= MAX_SUMMARY_SETS {
+                    break;
+                }
                 let name = o.str("name").unwrap_or_default().to_string();
                 let is_layer = layer_names.iter().any(|(n, _)| n == &name);
                 let title = set_titles.get(&name).cloned().unwrap_or_else(|| name.clone());
                 let mut bindings = Vec::new();
+                let mut seen_gids = std::collections::HashSet::new();
                 if let Some(gsb) = o.obj("group_source_bindings") {
-                    for (gid, val) in gsb.iter() {
+                    'gsb: for (gid, val) in gsb.iter() {
+                        if !seen_gids.insert(gid) {
+                            continue;
+                        }
                         let Some(raw) = val.as_str() else { continue };
                         let mut w = raw.split_whitespace();
                         let Some(source) = w.next() else { continue };
@@ -399,9 +548,25 @@ pub fn parse_vdf_summary(text: &str) -> (String, Vec<ActionSetSummary>) {
                         }
                         if let Some(g) = groups.get(gid) {
                             if !g.analog.is_empty() {
+                                if bindings.len() >= MAX_SUMMARY_BINDINGS_PER_SET
+                                    || total_bindings >= MAX_SUMMARY_TOTAL_BINDINGS
+                                    || total_actions.saturating_add(g.analog.len()) > MAX_SUMMARY_TOTAL_ACTIONS
+                                {
+                                    break 'gsb;
+                                }
+                                total_bindings += 1;
+                                total_actions += g.analog.len();
                                 bindings.push((source.to_string(), g.mode.clone(), g.analog.clone()));
                             }
                             for (input_name, acts) in &g.inputs {
+                                if bindings.len() >= MAX_SUMMARY_BINDINGS_PER_SET
+                                    || total_bindings >= MAX_SUMMARY_TOTAL_BINDINGS
+                                    || total_actions.saturating_add(acts.len()) > MAX_SUMMARY_TOTAL_ACTIONS
+                                {
+                                    break 'gsb;
+                                }
+                                total_bindings += 1;
+                                total_actions += acts.len();
                                 bindings.push((source.to_string(), input_name.clone(), acts.clone()));
                             }
                         }
@@ -478,8 +643,9 @@ pub fn inspect_local(steam_root: &Path, account: u32, app_id: AppId, install_dir
 
     match &active_choice {
         BindingChoice::LocalFile(p) => {
+            let local_text = read_bounded_config_file(p);
             if !available.iter().any(|o| o.path.as_ref() == Some(p)) {
-                let ct = std::fs::read_to_string(p).ok().map(|t| controller_type_in(&t)).unwrap_or_default();
+                let ct = local_text.as_deref().map(controller_type_in).unwrap_or_default();
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 available.push(BindingOption {
                     choice: BindingChoice::LocalFile(p.clone()),
@@ -490,7 +656,7 @@ pub fn inspect_local(steam_root: &Path, account: u32, app_id: AppId, install_dir
                     workshop_id: None,
                 });
             }
-            if let Ok(t) = std::fs::read_to_string(p)
+            if let Some(t) = local_text
                 && is_mappings(&t)
             {
                 active_source = format!("Selected file ({})", p.display());
@@ -650,5 +816,31 @@ mod tests {
 
         set_app_binding(620, BindingChoice::Auto);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validates_workshop_config_urls_and_bounds_summary() {
+        assert!(validate_workshop_config_url("https://steamusercontent-a.akamaihd.net/ugc/123/cfg").is_ok());
+        assert!(validate_workshop_config_url("https://images.steamusercontent.com/ugc/1/a").is_ok());
+        assert!(validate_workshop_config_url("http://steamusercontent-a.akamaihd.net/ugc/1/a").is_err());
+        assert!(validate_workshop_config_url("https://evil.example.com/cfg").is_err());
+        assert!(validate_workshop_config_url("https://user:pass@steamusercontent-a.akamaihd.net/ugc/1").is_err());
+        assert!(validate_workshop_config_url("https://steamusercontent-a.akamaihd.net.evil.com/x").is_err());
+
+        // Memory amplification guard: repeating the same group across many presets is capped.
+        let mut vdf = String::from("\"controller_mappings\" { \"controller_type\" \"controller_xboxone\" ");
+        vdf.push_str("\"group\" { \"id\" \"0\" \"mode\" \"four_buttons\" \"inputs\" { ");
+        for i in 0..40 {
+            vdf.push_str(&format!("\"btn_{i}\" {{ \"activators\" {{ \"Full\" {{ \"bindings\" {{ \"binding\" \"game_action InGame act_{i}, , \" }} }} }} }} "));
+        }
+        vdf.push_str("} } ");
+        for p in 0..100 {
+            vdf.push_str(&format!("\"preset\" {{ \"id\" \"{p}\" \"name\" \"Set{p}\" \"group_source_bindings\" {{ \"0\" \"button_diamond active\" \"0\" \"button_diamond active\" }} }} "));
+        }
+        vdf.push('}');
+        let (_, sets) = parse_vdf_summary(&vdf);
+        assert!(sets.len() <= MAX_SUMMARY_SETS);
+        let total_bindings: usize = sets.iter().map(|s| s.bindings.len()).sum();
+        assert!(total_bindings <= MAX_SUMMARY_TOTAL_BINDINGS);
     }
 }
