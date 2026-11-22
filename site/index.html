@@ -3,17 +3,55 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Aurora Steam Client</title>
-<meta name="claude:viewport-fit-sides" content="cover">
-<meta name="description" content="Aurora is a Steam client written in Rust. Store, library, downloads, friends and Workshop in one native window, with no Chromium inside. Linux and Windows.">
+<title>Aurora Steam Client — Fast Native Rust Steam Client for Linux &amp; Windows</title>
+<meta name="description" content="Aurora Steam Client is a lightweight, open-source Steam desktop client written in Rust (egui) for Linux and Windows. Replace Chromium and steamwebhelper with 1 native process (~166 MB idle RAM), Proton, Steam DRM, and a Vulkan in-game overlay.">
 <meta name="theme-color" content="#161D25">
-<meta property="og:title" content="Aurora: your Steam library, none of the bloat">
-<meta property="og:description" content="A Steam client written in Rust. One process, 166 MB idle, no Chromium. Linux and Windows.">
+<link rel="canonical" href="https://mollie2999.github.io/Aurora/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Aurora Steam Client">
+<meta property="og:title" content="Aurora Steam Client — Your Steam library, none of the bloat">
+<meta property="og:description" content="Lightweight native Steam client written in Rust for Linux and Windows. One process, 166 MB idle RAM, no Chromium or steamwebhelper.">
 <meta property="og:image" content="https://mollie2999.github.io/Aurora/assets/img/social.png">
+<meta property="og:image:alt" content="Aurora Steam Client running natively in Rust on Linux and Windows">
 <meta property="og:url" content="https://mollie2999.github.io/Aurora/">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Aurora Steam Client — Fast Native Rust Steam Client for Linux &amp; Windows">
+<meta name="twitter:description" content="Replace Chromium and steamwebhelper with one 166 MB native Rust process on Linux and Windows.">
+<meta name="twitter:image" content="https://mollie2999.github.io/Aurora/assets/img/social.png">
 <link rel="icon" href="assets/img/favicon.svg" type="image/svg+xml">
 <link rel="preload" href="assets/fonts/Geist.woff2" as="font" type="font/woff2" crossorigin>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "name": "Aurora Steam Client",
+      "alternateName": ["Aurora", "Aurora Client", "Aurora Rust Steam Client"],
+      "url": "https://mollie2999.github.io/Aurora/"
+    },
+    {
+      "@type": "SoftwareApplication",
+      "name": "Aurora Steam Client",
+      "alternateName": ["Aurora", "Aurora Rust Steam Client"],
+      "applicationCategory": "GameApplication",
+      "operatingSystem": "Linux, Windows 10, Windows 11",
+      "softwareVersion": "1.0.0-rc2",
+      "description": "Lightweight, open-source native Steam desktop client written in Rust (egui) for Linux and Windows with no Chromium or steamwebhelper.",
+      "url": "https://mollie2999.github.io/Aurora/",
+      "downloadUrl": "https://github.com/mollie2999/Aurora/releases/latest",
+      "codeRepository": "https://github.com/mollie2999/Aurora",
+      "license": "https://opensource.org/licenses/MIT",
+      "isBasedOn": "https://github.com/madonchik123/SteamInRust",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      }
+    }
+  ]
+}
+</script>
 <style>
 /* Layout: the page is built from the launcher's own parts. Its top bar and
    pill tabs, the library's "Continue playing" card as the hero, the library
@@ -271,7 +309,7 @@ code { font-family: var(--mono); font-size: .88em; background: var(--raised); pa
 .dl .go { margin-top: var(--s-2); color: var(--active); font: 700 var(--t-sm)/1 var(--font); display: inline-flex; gap: var(--s-1); align-items: center; }
 .dl-foot { margin-top: var(--s-3); color: var(--text-dim); font-size: var(--t-sm); }
 @media (min-width: 560px) { .dl { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (min-width: 1000px) { .dl { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (min-width: 1000px) { .dl { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 
 .source { margin-top: var(--s-12); display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s-6); align-items: center; }
 @media (min-width: 860px) { .source { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: var(--s-8); } }
@@ -332,9 +370,10 @@ footer { background: var(--chrome); border-top: 1px solid var(--border); }
     <nav class="tabs" aria-label="Sections">
       <a class="pill" href="#main"><i class="i" aria-hidden="true">&#xE2C2;</i>Home</a>
       <a class="pill" href="#screens"><i class="i" aria-hidden="true">&#xE2CA;</i>Screens</a>
-      <a class="pill" href="#games"><i class="i" aria-hidden="true">&#xE26E;</i>Games</a>
-      <a class="pill" href="#benchmarks"><i class="i" aria-hidden="true">&#xE2DE;</i>Benchmarks</a>
-      <a class="pill" href="#download"><i class="i" aria-hidden="true">&#xE20C;</i>Download</a>
+      <a class="pill" href="linux/"><i class="i" aria-hidden="true">&#xE26E;</i>Linux &amp; Proton</a>
+      <a class="pill" href="benchmarks/"><i class="i" aria-hidden="true">&#xE2DE;</i>Benchmarks</a>
+      <a class="pill" href="install/"><i class="i" aria-hidden="true">&#xE20C;</i>Install</a>
+      <a class="pill" href="faq/"><i class="i" aria-hidden="true">&#xE2CE;</i>FAQ</a>
     </nav>
     <span class="spacer"></span>
     <a class="pill gh" href="https://github.com/mollie2999/Aurora" aria-label="Source on GitHub"><i class="i" aria-hidden="true">&#xE278;</i><span>GitHub</span></a>
@@ -346,9 +385,9 @@ footer { background: var(--chrome); border-top: 1px solid var(--border); }
   <section aria-labelledby="hero-h">
     <div class="hero">
       <div class="hero-copy">
-        <p class="eyebrow">Steam client · written in Rust</p>
-        <h1 id="hero-h">Your Steam library. <span>None of the bloat.</span></h1>
-        <p class="lede">Store, library, downloads, friends, Workshop and Market in one native window. No steamwebhelper, no Chromium.</p>
+        <p class="eyebrow">Aurora Steam Client · Native Rust · Linux &amp; Windows</p>
+        <h1 id="hero-h">Aurora Steam Client. <span>None of the bloat.</span></h1>
+        <p class="lede">Lightweight open-source Steam client in Rust. Store, library, downloads, friends, Workshop and Market in one native window—no <code>steamwebhelper</code>, no Chromium.</p>
         <div class="play-row">
           <a class="btn btn-brand btn-lg" href="#download"><i class="i" aria-hidden="true">&#xE20C;</i><span id="dl-main-text">Get Aurora</span></a>
           <p class="meta"><span id="dl-version">Latest release</span>Linux &amp; Windows · 46 MB</p>
@@ -456,7 +495,7 @@ footer { background: var(--chrome); border-top: 1px solid var(--border); }
     </div>
     <div class="card note">
       <i class="i" aria-hidden="true">&#xE2CE;</i>
-      <p>The windowless Steam host is your installed Steam's engine without its interface: no <code>steamwebhelper</code>, no Chromium. It checks ownership itself, so it can't start a game you don't own. <b>Running anti-cheat games on it (Settings › Library) is experimental:</b> the anti-cheat may count it as an unsupported setup and ban you.</p>
+      <p>The windowless Steam host is your installed Steam's engine without its interface: no <code>steamwebhelper</code>, no Chromium. It checks ownership itself, so it can't start a game you don't own. <b>Running anti-cheat games on it (Settings › Library) is experimental:</b> the anti-cheat may count it as an unsupported setup and ban you. <a class="link" href="linux/">Read the full Linux &amp; Proton guide</a> · <a class="link" href="faq/">Anti-cheat FAQ</a></p>
     </div>
   </section>
 
@@ -508,7 +547,8 @@ footer { background: var(--chrome); border-top: 1px solid var(--border); }
           <li><i class="i" aria-hidden="true">&#xE108;</i>Measured<span class="v">16 Nov 2026</span></li>
         </ul>
         <p>Memory is PSS across all of a client's processes, 45 s after the main window opened; CPU over the next 30 s, as a share of one core. Steam's size leaves out games, user data, caches and compatibility tools.</p>
-        <a class="link" href="https://github.com/mollie2999/Aurora/blob/main/docs/benchmarks-linux.md">Method, script and every run <i class="i" aria-hidden="true">&#xE5DE;</i></a>
+        <a class="link" href="benchmarks/">Full benchmark breakdown &amp; every run <i class="i" aria-hidden="true">&#xE5DE;</i></a>
+        <a class="link" href="https://github.com/mollie2999/Aurora/blob/main/docs/benchmarks-linux.md">Raw report &amp; script on GitHub <i class="i" aria-hidden="true">&#xE5DE;</i></a>
       </aside>
     </div>
   </section>
@@ -517,30 +557,30 @@ footer { background: var(--chrome); border-top: 1px solid var(--border); }
     <div class="sec-head"><h2 id="status-h">What works</h2></div>
     <div class="status">
       <div class="card works">
-        <h3>Works <span>12</span></h3>
+        <h3>Works <span>14</span></h3>
         <ul>
           <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Sign-in</b> with password, Steam Guard or QR code</span></li>
-          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Store</b> with trailers, wishlist and cart</span></li>
-          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Library</b> with collections and non-Steam games</span></li>
-          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Downloads</b> and updates</span></li>
-          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Friends and chat</b></span></li>
+          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Store</b> with search, Discovery Queue, Points Shop and trailers</span></li>
+          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Library</b> with collections, reviews, move/backup and non-Steam games</span></li>
+          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Fast parallel downloads</b> and updates</span></li>
+          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Friends, activity feed, chat</b> and <b>live Steam Broadcasts</b></span></li>
           <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Community pages</b> and <b>Workshop</b></span></li>
-          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Inventory and Market</b></span></li>
-          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Steam Cloud</b> saves</span></li>
-          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Offline mode</b> and <b>plugins</b></span></li>
-          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Six themes</b>: NEVKO, Midnight, Aurora, Classic, OLED, Daylight</span></li>
-          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>English and Russian</b></span></li>
-          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Updates itself</b> on Windows</span></li>
+          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Inventory, Market</b> and <b>trading</b></span></li>
+          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Steam Cloud</b> saves and <b>Steam Input</b> controller settings</span></li>
+          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Shift+Tab in-game overlay</b> (Vulkan on Linux, D3D11/12 on Windows) with FPS HUD, notes and F12 screenshots</span></li>
+          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>System tray</b> on Wayland, X11 and Windows</span></li>
+          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Offline mode</b> and <b>Rhai plugins</b></span></li>
+          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Declarative custom themes</b>: NEVKO, Native Adwaita, Steam Desktop Replica, Midnight, OLED, Daylight</span></li>
+          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>English, Russian, French and Spanish</b></span></li>
+          <li><i class="i" aria-hidden="true">&#xE182;</i><span><b>Self-updater</b> on Windows</span></li>
         </ul>
       </div>
       <div class="card missing">
-        <h3>Not yet <span>5</span></h3>
+        <h3>Not yet <span>3</span></h3>
         <ul>
-          <li><i class="i" aria-hidden="true">&#xE32A;</i><span><b>Linux:</b> tray icon, <code>steam://</code> links, the Shift+Tab overlay in games</span></li>
           <li><i class="i" aria-hidden="true">&#xE32A;</i><span><b>Big Picture</b> and <b>Remote Play</b></span></li>
-          <li><i class="i" aria-hidden="true">&#xE32A;</i><span><b>Group chats</b> and <b>voice chat</b></span></li>
-          <li><i class="i" aria-hidden="true">&#xE32A;</i><span><b>Writing reviews.</b> Checkout and trade offers open Steam's website.</span></li>
-          <li><i class="i" aria-hidden="true">&#xE4F6;</i><span><b>Known bug, Linux:</b> the first launch of a Windows game with a new Proton prefix can fail when the game needs Steam. The second launch works.</span></li>
+          <li><i class="i" aria-hidden="true">&#xE32A;</i><span><b>Voice chat</b></span></li>
+          <li><i class="i" aria-hidden="true">&#xE32A;</i><span><b>Checkout</b> opens Steam's website, as Valve requires.</span></li>
         </ul>
       </div>
     </div>
@@ -549,17 +589,27 @@ footer { background: var(--chrome); border-top: 1px solid var(--border); }
   <section id="download" aria-labelledby="dl-h">
     <div class="sec-head">
       <h2 id="dl-h">Get Aurora</h2>
-      <p>Every build is on the latest GitHub release. On Linux, Aurora needs Steam installed for Proton and the Steam host; store trailers need <code>ffmpeg</code>, and <code>libpulse</code> for sound.</p>
+      <p>Every build is on the latest GitHub release. On Linux, Aurora needs Steam installed for Proton and the Steam host; store trailers need <code>ffmpeg</code>, and <code>libpulse</code> for sound. <a class="link" href="install/">Full install instructions →</a></p>
     </div>
     <div class="dl">
       <a href="https://github.com/mollie2999/Aurora/releases/latest">
-        <i class="i os" aria-hidden="true">&#xEB02;</i><h3>Linux</h3><span class="ext">.tar.gz · x86_64</span>
-        <p>Unpack anywhere and run it.</p>
+        <i class="i os" aria-hidden="true">&#xE390;</i><h3>Arch Linux</h3><span class="ext">.pkg.tar.zst</span>
+        <p>Install with <code>sudo pacman -U</code>.</p>
         <span class="go">Latest release <i class="i" aria-hidden="true">&#xE06C;</i></span>
       </a>
       <a href="https://github.com/mollie2999/Aurora/releases/latest">
-        <i class="i os" aria-hidden="true">&#xE390;</i><h3>Arch Linux</h3><span class="ext">.pkg.tar.zst</span>
-        <p>Install with <code>sudo pacman -U</code>.</p>
+        <i class="i os" aria-hidden="true">&#xEB02;</i><h3>Debian &amp; Ubuntu</h3><span class="ext">.deb · amd64</span>
+        <p>Install with <code>sudo apt install</code>.</p>
+        <span class="go">Latest release <i class="i" aria-hidden="true">&#xE06C;</i></span>
+      </a>
+      <a href="https://github.com/mollie2999/Aurora/releases/latest">
+        <i class="i os" aria-hidden="true">&#xEB02;</i><h3>Fedora</h3><span class="ext">.rpm · x86_64</span>
+        <p>Install with <code>sudo dnf install</code>.</p>
+        <span class="go">Latest release <i class="i" aria-hidden="true">&#xE06C;</i></span>
+      </a>
+      <a href="https://github.com/mollie2999/Aurora/releases/latest">
+        <i class="i os" aria-hidden="true">&#xEB02;</i><h3>Linux tarball</h3><span class="ext">.tar.gz · x86_64</span>
+        <p>Unpack anywhere and run it.</p>
         <span class="go">Latest release <i class="i" aria-hidden="true">&#xE06C;</i></span>
       </a>
       <a href="https://github.com/mollie2999/Aurora/releases/latest">
@@ -604,6 +654,10 @@ footer { background: var(--chrome); border-top: 1px solid var(--border); }
     <div class="wrap">
       <a class="dl-state" href="https://github.com/mollie2999/Aurora/releases/latest"><i class="i" aria-hidden="true">&#xE20C;</i><span id="bar-version">Latest release</span></a>
       <nav aria-label="Project links">
+        <a href="linux/">Linux &amp; Proton</a>
+        <a href="benchmarks/">Benchmarks</a>
+        <a href="install/">Install</a>
+        <a href="faq/">FAQ</a>
         <a href="https://github.com/mollie2999/Aurora/blob/main/CHANGELOG.md"><i class="i" aria-hidden="true">&#xE19A;</i>Changelog</a>
         <a href="https://github.com/mollie2999/Aurora/issues"><i class="i" aria-hidden="true">&#xE17C;</i>Report a bug</a>
       </nav>
@@ -634,7 +688,7 @@ footer { background: var(--chrome); border-top: 1px solid var(--border); }
   });
 
   // Top bar: highlight the section being read, like the active tab in the app.
-  const links = [...document.querySelectorAll('.tabs .pill')];
+  const links = [...document.querySelectorAll('.tabs .pill')].filter(a => a.getAttribute('href').startsWith('#'));
   if ('IntersectionObserver' in window) {
     const io = new IntersectionObserver(entries => entries.forEach(en => {
       if (!en.isIntersecting) return;
