@@ -42,6 +42,9 @@ const MAX_SRVS: usize = 256;
 
 /// Captured Direct command queues keyed by `ID3D12Device` raw pointer.
 static QUEUES: LazyLock<Mutex<HashMap<usize, ID3D12CommandQueue>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Lock-free fast-path pointer for a already-captured Direct command queue.
+/// Safe against ABA reuse because `QUEUES` holds a strong COM reference to it.
+static KNOWN_DIRECT_QUEUE: AtomicUsize = AtomicUsize::new(0);
 static RENDERER: Mutex<Option<D3d12Renderer>> = Mutex::new(None);
 
 /// Install the `ID3D12CommandQueue::ExecuteCommandLists` vtable hook if
@@ -86,20 +89,24 @@ pub fn install_if_loaded() -> bool {
 }
 
 unsafe extern "system" fn hook_execute_command_lists(this: *mut c_void, count: u32, lists: *const *mut c_void) {
-    let _ = std::panic::catch_unwind(|| unsafe {
-        if let Some(q) = ID3D12CommandQueue::from_raw_borrowed(&this) {
-            if q.GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT {
-                let mut dev: Option<ID3D12Device> = None;
-                if q.GetDevice(&mut dev).is_ok() {
-                    if let Some(dev) = dev {
-                        if let Ok(mut map) = QUEUES.lock() {
-                            map.entry(dev.as_raw() as usize).or_insert_with(|| q.clone());
+    let this_addr = this as usize;
+    if this_addr != 0 && KNOWN_DIRECT_QUEUE.load(Ordering::Acquire) != this_addr {
+        let _ = std::panic::catch_unwind(|| unsafe {
+            if let Some(q) = ID3D12CommandQueue::from_raw_borrowed(&this) {
+                if q.GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT {
+                    let mut dev: Option<ID3D12Device> = None;
+                    if q.GetDevice(&mut dev).is_ok() {
+                        if let Some(dev) = dev {
+                            if let Ok(mut map) = QUEUES.lock() {
+                                let stored = map.entry(dev.as_raw() as usize).or_insert_with(|| q.clone());
+                                KNOWN_DIRECT_QUEUE.store(stored.as_raw() as usize, Ordering::Release);
+                            }
                         }
                     }
                 }
             }
-        }
-    });
+        });
+    }
     let real: ExecuteCommandListsFn = unsafe { std::mem::transmute(REAL_EXECUTE.load(Ordering::Acquire)) };
     unsafe { real(this, count, lists) }
 }

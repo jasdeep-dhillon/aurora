@@ -35,7 +35,7 @@ mod layer {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex};
     use std::time::Instant;
 
     #[derive(Clone, Copy)]
@@ -80,7 +80,7 @@ mod layer {
     static DEVICES: LazyLock<Mutex<HashMap<usize, DeviceState>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
     static QUEUES: LazyLock<Mutex<HashMap<usize, QueueInfo>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
     static SURFACES: LazyLock<Mutex<HashMap<VkSurfaceKHR, SurfaceTarget>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-    static SWAPCHAINS: LazyLock<Mutex<HashMap<VkSwapchainKHR, SwapchainState>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    static SWAPCHAINS: LazyLock<Mutex<HashMap<VkSwapchainKHR, (usize, Arc<Mutex<SwapchainState>>)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
     static FPS: LazyLock<Mutex<Option<FpsTracker>>> = LazyLock::new(|| Mutex::new(None));
     static LAST_FPS: AtomicU32 = AtomicU32::new(0);
 
@@ -393,19 +393,20 @@ mod layer {
 
     unsafe extern "C" fn hooked_destroy_device(device: VkDevice, p_allocator: *const c_void) {
         let key = unsafe { dispatch_key(device) };
-        // Destroy any swapchain renderers belonging to this device first.
-        {
+        // Remove matching swapchains under the map lock, then destroy their renderers outside it.
+        let removed: Vec<Arc<Mutex<SwapchainState>>> = {
             let mut sws = SWAPCHAINS.lock().unwrap_or_else(|e| e.into_inner());
-            sws.retain(|_, s| {
-                if s.device_key == key {
-                    if let Some(mut r) = s.renderer.take() {
-                        r.destroy();
-                    }
-                    false
-                } else {
-                    true
-                }
-            });
+            let keys: Vec<VkSwapchainKHR> = sws
+                .iter()
+                .filter_map(|(&k, (dev_key, _))| (*dev_key == key).then_some(k))
+                .collect();
+            keys.into_iter().filter_map(|k| sws.remove(&k).map(|(_, entry)| entry)).collect()
+        };
+        for entry in removed {
+            let mut s = entry.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(mut r) = s.renderer.take() {
+                r.destroy();
+            }
         }
         QUEUES.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, info| info.device_key != key);
         let state = DEVICES.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
@@ -488,17 +489,20 @@ mod layer {
             let sw = unsafe { *p_swapchain };
             SWAPCHAINS.lock().unwrap_or_else(|e| e.into_inner()).insert(
                 sw,
-                SwapchainState {
-                    device,
-                    device_key: dev_key,
-                    surface: ci.surface,
-                    format: ci.imageFormat,
-                    can_copy_src: (ci.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0,
-                    width: ci.imageExtent.width,
-                    height: ci.imageExtent.height,
-                    renderer: None,
-                    init_failed: false,
-                },
+                (
+                    dev_key,
+                    Arc::new(Mutex::new(SwapchainState {
+                        device,
+                        device_key: dev_key,
+                        surface: ci.surface,
+                        format: ci.imageFormat,
+                        can_copy_src: (ci.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0,
+                        width: ci.imageExtent.width,
+                        height: ci.imageExtent.height,
+                        renderer: None,
+                        init_failed: false,
+                    })),
+                ),
             );
         }
         res
@@ -509,7 +513,9 @@ mod layer {
         swapchain: VkSwapchainKHR,
         p_allocator: *const c_void,
     ) {
-        if let Some(mut s) = SWAPCHAINS.lock().unwrap_or_else(|e| e.into_inner()).remove(&swapchain) {
+        let removed = SWAPCHAINS.lock().unwrap_or_else(|e| e.into_inner()).remove(&swapchain);
+        if let Some((_, entry)) = removed {
+            let mut s = entry.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(mut r) = s.renderer.take() {
                 r.destroy();
             }
@@ -553,8 +559,12 @@ mod layer {
                 .get(&(queue as usize))
                 .map(|i| i.family);
 
-            let mut sws = SWAPCHAINS.lock().unwrap_or_else(|e| e.into_inner());
-            let sw = sws.get_mut(&sw_handle)?;
+            let sw_entry = SWAPCHAINS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&sw_handle)
+                .map(|(_, entry)| entry.clone())?;
+            let mut sw = sw_entry.lock().unwrap_or_else(|e| e.into_inner());
 
             // Ignore tiny helper/dummy swapchains (e.g. launcher splash windows).
             if sw.width < 128 || sw.height < 128 {
