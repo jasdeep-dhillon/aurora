@@ -190,15 +190,31 @@ impl Shared {
     }
 
     fn apply_shadow(&self, set: &[TexSet], free: &[u64]) {
+        const MAX_SHADOW_TEXTURES: usize = 256;
+        const MAX_SHADOW_BYTES: usize = 128 << 20;
         let mut map = self.tex_shadow.lock().unwrap_or_else(|e| e.into_inner());
+        for id in free {
+            map.remove(id);
+        }
+        let mut total_bytes: usize = map.values().map(|t| t.rgba.len()).sum();
         for ts in set {
-            let expected = (ts.size[0] as usize).saturating_mul(ts.size[1] as usize).saturating_mul(4);
+            let Some(expected) = (ts.size[0] as usize)
+                .checked_mul(ts.size[1] as usize)
+                .and_then(|px| px.checked_mul(4))
+            else {
+                continue;
+            };
             if ts.size[0] == 0 || ts.size[1] == 0 || ts.rgba.len() != expected {
                 continue;
             }
             match ts.pos {
                 None => {
-                    map.insert(ts.id, ts.clone());
+                    let prev_bytes = map.get(&ts.id).map_or(0, |t| t.rgba.len());
+                    let next_total = total_bytes.saturating_sub(prev_bytes).saturating_add(ts.rgba.len());
+                    if (map.contains_key(&ts.id) || map.len() < MAX_SHADOW_TEXTURES) && next_total <= MAX_SHADOW_BYTES {
+                        map.insert(ts.id, ts.clone());
+                        total_bytes = next_total;
+                    }
                 }
                 Some([px, py]) => {
                     if let Some(dst) = map.get_mut(&ts.id) {
@@ -208,19 +224,20 @@ impl Shared {
                         let sh = ts.size[1] as usize;
                         let px = px as usize;
                         let py = py as usize;
-                        if px + sw <= dw && py + sh <= dh {
+                        let in_bounds = px.checked_add(sw).is_some_and(|x| x <= dw)
+                            && py.checked_add(sh).is_some_and(|y| y <= dh)
+                            && dw.checked_mul(dh).and_then(|n| n.checked_mul(4)) == Some(dst.rgba.len());
+                        if in_bounds {
+                            let row_bytes = sw * 4;
                             for row in 0..sh {
-                                let src_off = row * sw * 4;
+                                let src_off = row * row_bytes;
                                 let dst_off = ((py + row) * dw + px) * 4;
-                                dst.rgba[dst_off..dst_off + sw * 4].copy_from_slice(&ts.rgba[src_off..src_off + sw * 4]);
+                                dst.rgba[dst_off..dst_off + row_bytes].copy_from_slice(&ts.rgba[src_off..src_off + row_bytes]);
                             }
                         }
                     }
                 }
             }
-        }
-        for id in free {
-            map.remove(id);
         }
     }
 

@@ -1279,6 +1279,8 @@ fn sync_texture(
     path: Option<&std::path::Path>,
     name: &str,
 ) {
+    const MAX_THEME_IMG_DIM: u32 = 8192;
+    const MAX_THEME_IMG_ALLOC: u64 = 64 << 20;
     match path {
         None => {
             *slot = None;
@@ -1287,7 +1289,25 @@ fn sync_texture(
             if slot.as_ref().is_some_and(|(cached, _)| cached.as_path() == p) {
                 return;
             }
-            match image::open(p) {
+            if std::fs::symlink_metadata(p).is_err_and(|_| true)
+                || std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink() || !m.is_file())
+            {
+                tracing::warn!("theme image {}: refused non-regular file or symlink", p.display());
+                *slot = None;
+                return;
+            }
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(MAX_THEME_IMG_DIM);
+            limits.max_image_height = Some(MAX_THEME_IMG_DIM);
+            limits.max_alloc = Some(MAX_THEME_IMG_ALLOC);
+            let decoded = image::ImageReader::open(p)
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.with_guessed_format().map_err(|e| e.to_string()))
+                .and_then(|mut r| {
+                    r.limits(limits);
+                    r.decode().map_err(|e| e.to_string())
+                });
+            match decoded {
                 Ok(img) => {
                     let rgba = img.to_rgba8();
                     let size = [rgba.width() as usize, rgba.height() as usize];

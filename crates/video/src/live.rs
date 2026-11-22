@@ -23,6 +23,53 @@ const AUDIO_RATE: u32 = 48_000;
 const AUDIO_CHANNELS: usize = 2;
 const AUDIO_CHUNK_SAMPLES: usize = (AUDIO_RATE as usize / DVR_FPS as usize) * AUDIO_CHANNELS; // 9600 f32 = 0.1s
 
+/// Validate a live HLS URL before handing it to `ffmpeg`:
+/// requires `https://`, no control characters, and rejects loopback/private/link-local hosts.
+pub fn validate_live_hls_url(raw: &str) -> Result<String, String> {
+    let s = raw.trim();
+    if s.is_empty() || s.starts_with('-') || s.chars().any(|c| c.is_control()) {
+        return Err("Unsupported broadcast stream URL.".into());
+    }
+    let parsed = reqwest::Url::parse(s).map_err(|_| "Invalid broadcast stream URL.".to_string())?;
+    if parsed.scheme() != "https" {
+        return Err("Broadcast stream must use HTTPS.".into());
+    }
+    let Some(host) = parsed.host_str().filter(|h| !h.is_empty()) else {
+        return Err("Broadcast stream URL has no host.".into());
+    };
+    let host_unbracketed = host.trim_start_matches('[').trim_end_matches(']');
+    let is_private_host = if let Ok(ip) = host_unbracketed.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+                    || v4.is_multicast()
+                    || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
+                    || v6.to_ipv4_mapped().is_some_and(|v4| {
+                        v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+                    })
+            }
+        }
+    } else {
+        let dl = host_unbracketed.to_ascii_lowercase();
+        dl == "localhost" || dl.ends_with(".localhost") || dl.ends_with(".local") || dl.ends_with(".internal")
+    };
+    if is_private_host {
+        return Err("Broadcast stream URL points to a disallowed local or private address.".into());
+    }
+    Ok(parsed.to_string())
+}
+
 struct DvrState {
     /// Latest full-res 960×540 RGB24 frame for live playback.
     live_frame: Option<Vec<u8>>,
@@ -163,8 +210,16 @@ impl LivePlayer {
         #[cfg(not(windows))]
         let procs: Arc<Mutex<Vec<std::process::Child>>> = Arc::new(Mutex::new(Vec::new()));
 
+        let validated_url = match validate_live_hls_url(&url) {
+            Ok(u) => Some(u),
+            Err(e) => {
+                *error.lock().unwrap() = Some(e);
+                None
+            }
+        };
+
         #[cfg(not(windows))]
-        {
+        if let Some(url) = validated_url {
             use std::io::Read;
             use std::process::{Command, Stdio};
 
@@ -192,6 +247,8 @@ impl LivePlayer {
                             "error",
                             "-nostdin",
                             "-re",
+                            "-protocol_whitelist",
+                            "https,tls,tcp,crypto",
                             "-extension_picky",
                             "0",
                             "-allowed_extensions",
@@ -231,10 +288,19 @@ impl LivePlayer {
                     };
                     let Some(mut stdout) = child.stdout.take() else {
                         let _ = child.kill();
+                        let _ = child.wait();
                         return;
                     };
                     let stderr_pipe = child.stderr.take();
-                    procs_v.lock().unwrap().push(child);
+                    {
+                        let mut list = procs_v.lock().unwrap();
+                        if stop_v.load(Ordering::Acquire) {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return;
+                        }
+                        list.push(child);
+                    }
 
                     let mut frame_idx: u32 = 0;
                     while !stop_v.load(Ordering::Relaxed) {
@@ -299,6 +365,8 @@ impl LivePlayer {
                             "error",
                             "-nostdin",
                             "-re",
+                            "-protocol_whitelist",
+                            "https,tls,tcp,crypto",
                             "-extension_picky",
                             "0",
                             "-allowed_extensions",
@@ -331,9 +399,18 @@ impl LivePlayer {
                     };
                     let Some(mut stdout) = child.stdout.take() else {
                         let _ = child.kill();
+                        let _ = child.wait();
                         return;
                     };
-                    procs_a.lock().unwrap().push(child);
+                    {
+                        let mut list = procs_a.lock().unwrap();
+                        if stop_a.load(Ordering::Acquire) {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return;
+                        }
+                        list.push(child);
+                    }
 
                     let mut raw = vec![0u8; AUDIO_CHUNK_SAMPLES * 4];
                     let mut scaled = vec![0.0f32; AUDIO_CHUNK_SAMPLES];
@@ -382,7 +459,7 @@ impl LivePlayer {
 
         #[cfg(windows)]
         {
-            let _ = (ctx, url);
+            let _ = (ctx, validated_url);
             *error.lock().unwrap() = Some("Live broadcast playback is currently supported on Linux (ffmpeg).".into());
         }
 
@@ -545,5 +622,25 @@ mod tests {
         assert!(st.push_audio_and_pick(vec![30.0; 8]).is_none());
         let (_, data) = st.current_frame().unwrap();
         assert_eq!(data[0], 19);
+    }
+
+    #[test]
+    fn validates_live_hls_urls_against_ssrf_and_flag_injection() {
+        assert!(validate_live_hls_url("https://video.akamai.steamstatic.com/hls/master.m3u8").is_ok());
+        for bad in [
+            "",
+            "-f",
+            "file:///etc/passwd",
+            "http://video.akamai.steamstatic.com/hls/master.m3u8",
+            "https://localhost/master.m3u8",
+            "https://127.0.0.1/master.m3u8",
+            "https://10.0.0.1/master.m3u8",
+            "https://192.168.1.5/master.m3u8",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[::1]/master.m3u8",
+            "https://example.com/\nfoo",
+        ] {
+            assert!(validate_live_hls_url(bad).is_err(), "expected rejection for {bad:?}");
+        }
     }
 }

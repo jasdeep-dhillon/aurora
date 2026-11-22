@@ -92,6 +92,48 @@ pub fn release_memory() {
 }
 
 
+/// Open `aurora.log` safely (0700 dir, 0600 file, never following symlinks).
+fn open_log_file(dir: &std::path::Path) -> Option<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+        let mut b = std::fs::DirBuilder::new();
+        b.recursive(true).mode(0o700);
+        b.create(dir).ok()?;
+        let dm = std::fs::symlink_metadata(dir).ok()?;
+        if dm.file_type().is_symlink() || !dm.is_dir() {
+            return None;
+        }
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        let path = dir.join("aurora.log");
+        let old = dir.join("aurora.old.log");
+        if std::fs::symlink_metadata(&old).is_ok_and(|m| m.file_type().is_symlink()) {
+            return None;
+        }
+        if let Ok(m) = std::fs::symlink_metadata(&path) {
+            if m.file_type().is_symlink() {
+                return None;
+            }
+            let _ = std::fs::rename(&path, &old);
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let f = opts.open(&path).ok()?;
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+        Some(f)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir).ok()?;
+        let path = dir.join("aurora.log");
+        let old = dir.join("aurora.old.log");
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink()) {
+            let _ = std::fs::rename(&path, &old);
+        }
+        std::fs::File::create(path).ok()
+    }
+}
+
 /// Log to the terminal and to `aurora.log` in the settings folder (the
 /// last run's log is kept as `aurora.old.log`). On Windows the app has no
 /// console, so the file is the only log a player can send.
@@ -99,11 +141,34 @@ fn init_logging() {
     use tracing_subscriber::prelude::*;
     let filter = || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,eframe=warn,egui_glow=warn".into());
     let dir = client::store::config_dir();
-    let file = std::fs::create_dir_all(&dir).ok().and_then(|()| {
-        let path = dir.join("aurora.log");
-        let _ = std::fs::rename(&path, dir.join("aurora.old.log"));
-        std::fs::File::create(path).ok()
-    });
+    let file = open_log_file(&dir);
     let to_file = file.map(|f| tracing_subscriber::fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(f)).with_filter(filter()));
     tracing_subscriber::registry().with(tracing_subscriber::fmt::layer().with_filter(filter())).with(to_file).init();
+}
+
+#[cfg(all(test, unix))]
+mod log_tests {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn open_log_file_sets_0600_and_refuses_symlinks() {
+        let base = std::env::temp_dir().join(format!("aurora-log-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("cfg");
+        let f = super::open_log_file(&dir).expect("creates aurora.log");
+        drop(f);
+        let dmode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        let fmode = std::fs::metadata(dir.join("aurora.log")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dmode, 0o700);
+        assert_eq!(fmode, 0o600);
+
+        // Refuses symlink at aurora.log.
+        std::fs::remove_file(dir.join("aurora.log")).unwrap();
+        let outside = base.join("outside.txt");
+        std::fs::write(&outside, b"keep").unwrap();
+        symlink(&outside, dir.join("aurora.log")).unwrap();
+        assert!(super::open_log_file(&dir).is_none());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

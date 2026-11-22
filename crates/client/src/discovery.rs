@@ -37,23 +37,18 @@ pub async fn skip(conn: &Connection, app_id: AppId) -> Result<(), String> {
         appid: Some(app_id),
         ..Default::default()
     };
-    conn.call::<_, proto::CStoreSkipDiscoveryQueueItemResponse>("Store.SkipDiscoveryQueueItem#1", &req).await.map(|_| ()).map_err(|e| e.to_string())
+    match conn.call::<_, proto::CStoreSkipDiscoveryQueueItemResponse>("Store.SkipDiscoveryQueueItem#1", &req).await {
+        Ok(_) => Ok(()),
+        // EResult::DuplicateRequest (29) means this queue item was already marked skipped (e.g. Previous -> Next).
+        Err(e) if e.to_string().contains("Steam error 29") => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Build the form parameters for Steam's "Not interested" endpoint.
-pub(crate) fn ignore_form(session_id: &str, app_id: AppId, ignore: bool) -> [(&'static str, String); 4] {
-    [
+pub(crate) fn ignore_form(session_id: &str, app_id: AppId, ignore: bool) -> Vec<(&'static str, String)> {
+    let mut form = vec![
         ("sessionid", session_id.to_string()),
-        ("appid", app_id.to_string()),
-        ("remove", if ignore { "0" } else { "1" }.to_string()),
-        ("snr", "1_4_4__100".to_string()),
-    ]
-}
-
-/// "Not interested" (or undo it): Steam stops recommending the game.
-pub async fn ignore(web: &crate::market::Web, app_id: AppId, ignore: bool) -> Result<(), String> {
-    let mut form: Vec<(&'static str, String)> = vec![
-        ("sessionid", web.session_id.clone()),
         ("appid", app_id.to_string()),
         ("snr", "1_4_4__100".to_string()),
     ];
@@ -62,6 +57,12 @@ pub async fn ignore(web: &crate::market::Web, app_id: AppId, ignore: bool) -> Re
     } else {
         form.push(("remove", "1".to_string()));
     }
+    form
+}
+
+/// "Not interested" (or undo it): Steam stops recommending the game.
+pub async fn ignore(web: &crate::market::Web, app_id: AppId, ignore: bool) -> Result<(), String> {
+    let form = ignore_form(&web.session_id, app_id, ignore);
     let r = web
         .http
         .post("https://store.steampowered.com/recommended/ignorerecommendation/")
@@ -107,6 +108,9 @@ pub async fn follow(web: &crate::market::Web, app_id: AppId, follow: bool) -> Re
     let r = web
         .http
         .post("https://store.steampowered.com/explore/followgame/")
+        .header("Origin", "https://store.steampowered.com")
+        .header("Referer", format!("https://store.steampowered.com/app/{app_id}/"))
+        .header("X-Requested-With", "XMLHttpRequest")
         .form(&form)
         .send()
         .await
@@ -131,9 +135,9 @@ mod tests {
     fn builds_ignore_and_follow_forms() {
         let ig = ignore_form("sess", 730, true);
         assert_eq!(ig[1], ("appid", "730".to_string()));
-        assert_eq!(ig[2], ("remove", "0".to_string()));
+        assert_eq!(ig[3], ("ignore_reason", "0".to_string()));
         let unig = ignore_form("sess", 730, false);
-        assert_eq!(unig[2], ("remove", "1".to_string()));
+        assert_eq!(unig[3], ("remove", "1".to_string()));
 
         assert_eq!(follow_form("sess", 570, true), vec![("sessionid", "sess".to_string()), ("appid", "570".to_string())]);
         assert_eq!(

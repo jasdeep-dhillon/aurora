@@ -189,7 +189,9 @@ pub fn install_folder(src_dir: &Path, themes_dir: &Path) -> Result<ThemeMeta, Er
     let manifest_text = fs::read_to_string(&manifest_path)?;
     let manifest = ThemeManifest::parse(&manifest_text)?;
 
-    let layout_path = src_dir.join(manifest.layout_file.as_deref().unwrap_or("layout.toml"));
+    let layout_rel = manifest.layout_file.as_deref().unwrap_or("layout.toml");
+    let layout_path = crate::manifest::safe_rel_path(src_dir, layout_rel)
+        .ok_or_else(|| Error::UnsafePath(layout_rel.to_string()))?;
     if layout_path.is_file() {
         let layout_text = fs::read_to_string(&layout_path)?;
         LayoutTree::parse(&layout_text).map_err(Error::InvalidLayout)?;
@@ -253,7 +255,6 @@ fn copy_dir_safe(
 ) -> Result<(), Error> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
-        let meta = entry.metadata()?;
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
             continue;
@@ -263,6 +264,10 @@ fn copy_dir_safe(
             fs::create_dir_all(&target)?;
             copy_dir_safe(&entry.path(), &target, file_count, total_bytes)?;
         } else if file_type.is_file() {
+            let meta = fs::symlink_metadata(entry.path())?;
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                continue;
+            }
             *file_count += 1;
             if *file_count > MAX_FILE_COUNT {
                 return Err(Error::PackageLimit(format!(

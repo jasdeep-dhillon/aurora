@@ -26,8 +26,8 @@ pub fn validate_id(id: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// Resolve a relative asset path inside `base_dir`, rejecting absolute paths
-/// and `..` traversal segments.
+/// Resolve a relative asset path inside `base_dir`, rejecting absolute paths,
+/// `..` traversal segments, and symlinks that escape `base_dir`.
 pub fn safe_rel_path(base_dir: &Path, rel: &str) -> Option<PathBuf> {
     let p = Path::new(rel);
     if p.is_absolute() {
@@ -44,7 +44,25 @@ pub fn safe_rel_path(base_dir: &Path, rel: &str) -> Option<PathBuf> {
     if clean.as_os_str().is_empty() {
         return None;
     }
-    Some(base_dir.join(clean))
+    let joined = base_dir.join(&clean);
+    // Reject symlinks anywhere along the resolved path if it exists on disk.
+    let mut cur = base_dir.to_path_buf();
+    for seg in clean.components() {
+        cur.push(seg);
+        if let Ok(m) = std::fs::symlink_metadata(&cur) {
+            if m.file_type().is_symlink() {
+                return None;
+            }
+        }
+    }
+    if joined.exists() {
+        let canon_base = base_dir.canonicalize().ok()?;
+        let canon_target = joined.canonicalize().ok()?;
+        if !canon_target.starts_with(&canon_base) || canon_target == canon_base {
+            return None;
+        }
+    }
+    Some(joined)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
