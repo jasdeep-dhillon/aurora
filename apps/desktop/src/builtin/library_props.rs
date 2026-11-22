@@ -62,14 +62,58 @@ pub enum WsSort {
     Size,
 }
 
-/// Custom art the user picked for a game (capsule, hero, logo).
-pub fn custom_art(app: AppId, kind: &str) -> Option<String> {
+fn custom_art_kind_id(kind: &str) -> Option<u8> {
+    match kind {
+        "capsule" => Some(0),
+        "hero" => Some(1),
+        "logo" => Some(2),
+        _ => None,
+    }
+}
+
+const CUSTOM_ART_REVALIDATE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+static CUSTOM_ART_CACHE: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<(AppId, u8), (Option<String>, std::time::Instant)>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+fn invalidate_custom_art(app: AppId, kind: &str) {
+    if let Some(k) = custom_art_kind_id(kind) {
+        if let Ok(mut map) = CUSTOM_ART_CACHE.lock() {
+            map.remove(&(app, k));
+        }
+    }
+}
+
+fn probe_custom_art(app: AppId, kind: &str) -> Option<String> {
     let dir = client::store::config_dir().join("custom-art").join(app.to_string());
     ["png", "jpg", "jpeg", "webp"]
         .iter()
         .map(|ext| dir.join(format!("{kind}.{ext}")))
         .find(|p| p.exists())
         .map(|p| format!("file://{}", p.display().to_string().replace('\\', "/")))
+}
+
+/// Custom art the user picked for a game (capsule, hero, logo).
+/// Cached in memory per `(AppId, kind)` with a short revalidation TTL and
+/// invalidated immediately on Change/Reset to eliminate per-frame `stat()` calls
+/// while still picking up edits made from another Aurora instance.
+pub fn custom_art(app: AppId, kind: &str) -> Option<String> {
+    let Some(k) = custom_art_kind_id(kind) else {
+        return probe_custom_art(app, kind);
+    };
+    if let Ok(map) = CUSTOM_ART_CACHE.lock() {
+        if let Some((cached, at)) = map.get(&(app, k))
+            && at.elapsed() < CUSTOM_ART_REVALIDATE_TTL
+        {
+            return cached.clone();
+        }
+    }
+    let found = probe_custom_art(app, kind);
+    if let Ok(mut map) = CUSTOM_ART_CACHE.lock() {
+        map.insert((app, k), (found.clone(), std::time::Instant::now()));
+    }
+    found
 }
 
 pub fn capsule(app: AppId) -> String {
@@ -952,6 +996,7 @@ impl Library {
                                     let kind = kind.to_string();
                                     std::thread::spawn(move || {
                                         if install_custom_art(&src, app, &kind).is_ok() {
+                                            invalidate_custom_art(app, &kind);
                                             ctx_clone.forget_all_images();
                                             ctx_clone.request_repaint();
                                         }
@@ -964,6 +1009,7 @@ impl Library {
                                 let kind = kind.to_string();
                                 std::thread::spawn(move || {
                                     reset_custom_art(app, &kind);
+                                    invalidate_custom_art(app, &kind);
                                     ctx_clone.forget_all_images();
                                     ctx_clone.request_repaint();
                                 });

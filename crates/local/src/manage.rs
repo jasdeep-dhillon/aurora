@@ -156,19 +156,49 @@ pub fn verify(steam_root: &Path, game: &InstalledGame, progress: &Progress) -> V
     progress.total_bytes.store(work.iter().map(|f| f.size).sum(), Ordering::Relaxed);
     report.files = work.len();
 
+    let canon_install = ensure_real_dir(&game.install_dir, "install_dir").ok();
     let mut buf = vec![0u8; 256 * 1024];
     for f in work {
         if progress.cancel.load(Ordering::Relaxed) {
             report.cancelled = true;
             break;
         }
-        let full = game.install_dir.join(&f.path);
+        let Ok(rel) = validate_rel_path(&f.path) else {
+            report.corrupt.push(f.path);
+            progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
+            continue;
+        };
+        let Some(ref canon_root) = canon_install else {
+            report.corrupt.push(f.path);
+            progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
+            continue;
+        };
+        let Ok(full) = resolve_inside_no_symlinks(&game.install_dir, canon_root, &rel) else {
+            report.corrupt.push(f.path);
+            progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
+            continue;
+        };
+        let Ok(meta_pre) = fs::symlink_metadata(&full) else {
+            report.missing.push(f.path);
+            progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
+            continue;
+        };
+        if crate::is_symlink_or_reparse(&meta_pre) || !meta_pre.is_file() {
+            report.corrupt.push(f.path);
+            progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
+            continue;
+        }
         let Ok(mut file) = fs::File::open(&full) else {
             report.missing.push(f.path);
             progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
             continue;
         };
-        if file.metadata().map(|m| m.len()).unwrap_or(0) != f.size {
+        let Ok(fmeta) = file.metadata() else {
+            report.corrupt.push(f.path);
+            progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
+            continue;
+        };
+        if !fmeta.is_file() || fmeta.len() != f.size {
             report.corrupt.push(f.path);
             progress.done_bytes.fetch_add(f.size, Ordering::Relaxed);
             continue;
@@ -607,17 +637,23 @@ fn walk_dir_no_symlinks(root: &Path) -> Result<WalkedTree, String> {
     Ok(WalkedTree { dirs, files, total_bytes })
 }
 
+const IO_BUF_BYTES: usize = 256 * 1024;
+
 fn sha256_file(path: &Path) -> Result<(u64, String), String> {
+    let mut buf = vec![0u8; IO_BUF_BYTES];
+    sha256_file_with_buf(path, &mut buf)
+}
+
+fn sha256_file_with_buf(path: &Path, buf: &mut [u8]) -> Result<(u64, String), String> {
     let meta = fs::symlink_metadata(path).map_err(|e| format!("could not inspect {}: {e}", path.display()))?;
     if crate::is_symlink_or_reparse(&meta) || !meta.is_file() {
         return Err(format!("refusing non-regular file or symlink at {}", path.display()));
     }
     let mut f = fs::File::open(path).map_err(|e| format!("could not open {}: {e}", path.display()))?;
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 256 * 1024];
     let mut len = 0u64;
     loop {
-        let n = f.read(&mut buf).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        let n = f.read(buf).map_err(|e| format!("could not read {}: {e}", path.display()))?;
         if n == 0 {
             break;
         }
@@ -627,12 +663,13 @@ fn sha256_file(path: &Path) -> Result<(u64, String), String> {
     Ok((len, hex_encode(&hasher.finalize())))
 }
 
-fn copy_file_verified(
+fn copy_file_verified_with_buf(
     src: &Path,
     dst: &Path,
     expected_len: u64,
     executable: bool,
     progress: &Progress,
+    buf: &mut [u8],
 ) -> Result<String, String> {
     if progress.cancel.load(Ordering::Relaxed) {
         return Err("Operation cancelled.".into());
@@ -652,7 +689,6 @@ fn copy_file_verified(
         .map_err(|e| format!("could not create {}: {e}", dst.display()))?;
 
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 256 * 1024];
     let mut copied = 0u64;
     loop {
         if progress.cancel.load(Ordering::Relaxed) {
@@ -660,7 +696,7 @@ fn copy_file_verified(
             let _ = fs::remove_file(dst);
             return Err("Operation cancelled.".into());
         }
-        let n = src_file.read(&mut buf).map_err(|e| format!("could not read {}: {e}", src.display()))?;
+        let n = src_file.read(buf).map_err(|e| format!("could not read {}: {e}", src.display()))?;
         if n == 0 {
             break;
         }
@@ -689,7 +725,7 @@ fn copy_file_verified(
         return Err(format!("short copy for {} ({copied} of {expected_len} bytes)", dst.display()));
     }
     let src_sha = hex_encode(&hasher.finalize());
-    let (dst_len, dst_sha) = sha256_file(dst)?;
+    let (dst_len, dst_sha) = sha256_file_with_buf(dst, buf)?;
     if dst_len != expected_len || dst_sha != src_sha {
         let _ = fs::remove_file(dst);
         return Err(format!("destination verification failed for {}", dst.display()));
@@ -946,6 +982,7 @@ fn copy_walked_tree(
         }
         create_dirs_inside(dst_root, &canon_dst, rel_dir)?;
     }
+    let mut io_buf = vec![0u8; IO_BUF_BYTES];
     for (rel_file, size, exec) in &tree.files {
         let src_file = src_root.join(rel_file);
         let dst_file = resolve_inside_no_symlinks(dst_root, &canon_dst, rel_file)?;
@@ -954,7 +991,7 @@ fn copy_walked_tree(
         {
             create_dirs_inside(dst_root, &canon_dst, parent)?;
         }
-        copy_file_verified(&src_file, &dst_file, *size, *exec, progress)?;
+        copy_file_verified_with_buf(&src_file, &dst_file, *size, *exec, progress, &mut io_buf)?;
     }
     Ok(())
 }
@@ -1328,6 +1365,7 @@ pub fn backup_game(game: &InstalledGame, backup_dir: &Path, progress: &Progress)
             dirs.push(rel_dir.to_string_lossy().replace('\\', "/"));
         }
 
+        let mut io_buf = vec![0u8; IO_BUF_BYTES];
         let mut files = Vec::with_capacity(src.game_tree.files.len());
         for (rel_file, size, exec) in &src.game_tree.files {
             if let Some(p) = rel_file.parent()
@@ -1337,7 +1375,7 @@ pub fn backup_game(game: &InstalledGame, backup_dir: &Path, progress: &Progress)
             }
             let src_file = game.install_dir.join(rel_file);
             let dst_file = resolve_inside_no_symlinks(&stage_game, &canon_stage_game, rel_file)?;
-            let sha256 = copy_file_verified(&src_file, &dst_file, *size, *exec, progress)?;
+            let sha256 = copy_file_verified_with_buf(&src_file, &dst_file, *size, *exec, progress, &mut io_buf)?;
             files.push(BackupFile {
                 path: rel_file.to_string_lossy().replace('\\', "/"),
                 size: *size,
@@ -1374,7 +1412,7 @@ pub fn backup_game(game: &InstalledGame, backup_dir: &Path, progress: &Progress)
                     }
                     let src_file = src_ws_dir.join(rel_file);
                     let dst_file = resolve_inside_no_symlinks(&stage_ws_app, &canon_ws_app, rel_file)?;
-                    let sha256 = copy_file_verified(&src_file, &dst_file, *size, *exec, progress)?;
+                    let sha256 = copy_file_verified_with_buf(&src_file, &dst_file, *size, *exec, progress, &mut io_buf)?;
                     workshop_files.push(BackupFile {
                         path: rel_file.to_string_lossy().replace('\\', "/"),
                         size: *size,
@@ -1387,6 +1425,21 @@ pub fn backup_game(game: &InstalledGame, backup_dir: &Path, progress: &Progress)
 
         let appmanifest_sha256 = write_bytes_new_verified(&stage_root.join(&acf_name), &src.manifest_bytes)?;
         progress.done_bytes.fetch_add(src.manifest_bytes.len() as u64, Ordering::Relaxed);
+
+        let mut seen_files = HashSet::with_capacity(files.len());
+        for f in &files {
+            let rel = validate_rel_path(&f.path)?;
+            if !seen_files.insert(dedup_rel_key(&rel)) {
+                return Err(format!("cannot create cross-platform backup: case-colliding file path {:?}", f.path));
+            }
+        }
+        let mut seen_ws = HashSet::with_capacity(workshop_files.len());
+        for f in &workshop_files {
+            let rel = validate_rel_path(&f.path)?;
+            if !seen_ws.insert(dedup_rel_key(&rel)) {
+                return Err(format!("cannot create cross-platform backup: case-colliding workshop path {:?}", f.path));
+            }
+        }
 
         let created_at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let manifest = BackupManifest {
@@ -1407,6 +1460,9 @@ pub fn backup_game(game: &InstalledGame, backup_dir: &Path, progress: &Progress)
             workshop_files,
         };
         let json = serde_json::to_vec_pretty(&manifest).map_err(|e| format!("could not serialize backup manifest: {e}"))?;
+        if json.len() as u64 > MAX_BACKUP_MANIFEST_BYTES {
+            return Err(format!("backup manifest exceeds {} byte limit", MAX_BACKUP_MANIFEST_BYTES));
+        }
         write_bytes_new_verified(&stage_root.join("aurora-backup.json"), &json)?;
 
         if progress.cancel.load(Ordering::Relaxed) {
@@ -1492,10 +1548,24 @@ enum BackupLayout {
     },
 }
 
+const MAX_BACKUP_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+
+fn dedup_rel_key(rel: &Path) -> String {
+    rel.to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
 fn read_and_validate_aurora_backup(backup_dir: &Path) -> Result<BackupLayout, String> {
     let meta_path = backup_dir.join("aurora-backup.json");
     let _ = ensure_real_file(&meta_path, "aurora-backup.json")?;
-    let raw = fs::read_to_string(&meta_path).map_err(|e| format!("could not read aurora-backup.json: {e}"))?;
+    let file = fs::File::open(&meta_path).map_err(|e| format!("could not read aurora-backup.json: {e}"))?;
+    let mut raw_bytes = Vec::new();
+    file.take(MAX_BACKUP_MANIFEST_BYTES + 1)
+        .read_to_end(&mut raw_bytes)
+        .map_err(|e| format!("could not read aurora-backup.json: {e}"))?;
+    if raw_bytes.len() as u64 > MAX_BACKUP_MANIFEST_BYTES {
+        return Err(format!("aurora-backup.json exceeds {} byte limit", MAX_BACKUP_MANIFEST_BYTES));
+    }
+    let raw = String::from_utf8(raw_bytes).map_err(|e| format!("invalid UTF-8 in aurora-backup.json: {e}"))?;
     let manifest: BackupManifest = serde_json::from_str(&raw).map_err(|e| format!("invalid aurora-backup.json: {e}"))?;
 
     if manifest.version != 1 {
@@ -1545,11 +1615,11 @@ fn read_and_validate_aurora_backup(backup_dir: &Path) -> Result<BackupLayout, St
     }
     let mut seen = HashSet::with_capacity(manifest.files.len());
     for f in &manifest.files {
-        validate_rel_path(&f.path)?;
+        let rel = validate_rel_path(&f.path)?;
         if !is_valid_sha256_hex(&f.sha256) {
             return Err(format!("invalid sha256 for {:?} in aurora-backup.json", f.path));
         }
-        if !seen.insert(f.path.clone()) {
+        if !seen.insert(dedup_rel_key(&rel)) {
             return Err(format!("duplicate file entry {:?} in aurora-backup.json", f.path));
         }
     }
@@ -1580,11 +1650,11 @@ fn read_and_validate_aurora_backup(backup_dir: &Path) -> Result<BackupLayout, St
         }
         let mut ws_seen = HashSet::with_capacity(manifest.workshop_files.len());
         for f in &manifest.workshop_files {
-            validate_rel_path(&f.path)?;
+            let rel = validate_rel_path(&f.path)?;
             if !is_valid_sha256_hex(&f.sha256) {
                 return Err(format!("invalid workshop sha256 for {:?}", f.path));
             }
-            if !ws_seen.insert(f.path.clone()) {
+            if !ws_seen.insert(dedup_rel_key(&rel)) {
                 return Err(format!("duplicate workshop file {:?}", f.path));
             }
         }
@@ -1655,10 +1725,14 @@ fn find_standard_backup(backup_dir: &Path) -> Result<BackupLayout, String> {
                         ws_acf = Some((wp, bytes));
                     }
                 }
-                let wc = ws_root.join("content").join(parsed_id.to_string());
-                if fs::symlink_metadata(&wc).is_ok() {
-                    let _ = ensure_real_dir(&wc, "workshop content")?;
-                    ws_content_dir = Some(wc);
+                let ws_content_root = ws_root.join("content");
+                if fs::symlink_metadata(&ws_content_root).is_ok() {
+                    let _ = ensure_real_dir(&ws_content_root, "workshop content root")?;
+                    let wc = ws_content_root.join(parsed_id.to_string());
+                    if fs::symlink_metadata(&wc).is_ok() {
+                        let _ = ensure_real_dir(&wc, "workshop content")?;
+                        ws_content_dir = Some(wc);
+                    }
                 }
             }
             let estimated_bytes = vdf::parse(std::str::from_utf8(&acf_bytes).unwrap_or(""))
@@ -1784,6 +1858,7 @@ pub fn restore_game(backup_dir: &Path, dst_library: &Path, progress: &Progress) 
                     let rel = validate_rel_path(d)?;
                     create_dirs_inside(&staged.stage_game, &canon_stage, &rel)?;
                 }
+                let mut io_buf = vec![0u8; IO_BUF_BYTES];
                 for f in &manifest.files {
                     let rel = validate_rel_path(&f.path)?;
                     if let Some(p) = rel.parent()
@@ -1793,7 +1868,7 @@ pub fn restore_game(backup_dir: &Path, dst_library: &Path, progress: &Progress) 
                     }
                     let src_file = resolve_inside_no_symlinks(&game_dir, &canon_backup_game, &rel)?;
                     let dst_file = resolve_inside_no_symlinks(&staged.stage_game, &canon_stage, &rel)?;
-                    let got_sha = copy_file_verified(&src_file, &dst_file, f.size, f.executable, progress)?;
+                    let got_sha = copy_file_verified_with_buf(&src_file, &dst_file, f.size, f.executable, progress, &mut io_buf)?;
                     if !got_sha.eq_ignore_ascii_case(&f.sha256) {
                         return Err(format!("Backup integrity check failed for {}: SHA-256 mismatch.", f.path));
                     }
@@ -1815,7 +1890,7 @@ pub fn restore_game(backup_dir: &Path, dst_library: &Path, progress: &Progress) 
                         }
                         let src_file = resolve_inside_no_symlinks(src_ws_dir, &canon_ws_src, &rel)?;
                         let dst_file = resolve_inside_no_symlinks(sws, &canon_sws, &rel)?;
-                        let got_sha = copy_file_verified(&src_file, &dst_file, f.size, f.executable, progress)?;
+                        let got_sha = copy_file_verified_with_buf(&src_file, &dst_file, f.size, f.executable, progress, &mut io_buf)?;
                         if !got_sha.eq_ignore_ascii_case(&f.sha256) {
                             return Err(format!("Backup integrity check failed for workshop {}: SHA-256 mismatch.", f.path));
                         }

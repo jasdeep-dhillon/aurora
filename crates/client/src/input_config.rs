@@ -325,6 +325,9 @@ fn player_workshop_choices(steam_root: &Path, account: u32, app_id: AppId, xbox_
         .join("Steam Controller Configs")
         .join(account.to_string())
         .join("config");
+    if !std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir() && !storage::is_link(&meta)) {
+        return Vec::new();
+    }
     let mut sets: Vec<(u8, String, PathBuf)> = std::fs::read_dir(&dir)
         .map(|rd| {
             rd.take(256).flatten()
@@ -484,11 +487,20 @@ pub fn binding_document(choice: &BindingChoice, steam_root: &Path, account: u32,
     LayoutDocument::parse(&explicit_local(choice, steam_root, account, app_id)?.text).ok()
 }
 
+const MAX_SUMMARY_SETS: usize = 64;
+const MAX_SUMMARY_BINDINGS_PER_SET: usize = 256;
+const MAX_SUMMARY_TOTAL_BINDINGS: usize = 2048;
+const MAX_SUMMARY_TOTAL_ACTIONS: usize = 4096;
+const MAX_ACTIONS_PER_INPUT: usize = 64;
+
 fn game_actions_in(input: &vdf::Obj) -> Vec<String> {
     let mut out = Vec::new();
     for (_, act) in input.obj("activators").map(|a| a.iter().collect::<Vec<_>>()).unwrap_or_default() {
         let Some(bindings) = act.as_obj().and_then(|a| a.obj("bindings")) else { continue };
         for (k, v) in bindings.iter() {
+            if out.len() >= MAX_ACTIONS_PER_INPUT {
+                return out;
+            }
             let Some(b) = v.as_str().filter(|_| k == "binding") else { continue };
             let mut words = b.split(',').next().unwrap_or_default().split_whitespace();
             if words.next() == Some("game_action")
@@ -534,6 +546,8 @@ pub fn parse_vdf_summary(text: &str) -> (String, Vec<ActionSetSummary>) {
     }
     let mut groups: HashMap<String, GroupInfo> = HashMap::new();
     let mut sets: Vec<ActionSetSummary> = Vec::new();
+    let mut total_bindings = 0usize;
+    let mut total_actions = 0usize;
 
     for (k, v) in m.iter() {
         let Some(o) = v.as_obj() else { continue };
@@ -544,6 +558,9 @@ pub fn parse_vdf_summary(text: &str) -> (String, Vec<ActionSetSummary>) {
                 let mut inputs = Vec::new();
                 if let Some(inp) = o.obj("inputs") {
                     for (name, item) in inp.iter() {
+                        if inputs.len() >= MAX_SUMMARY_BINDINGS_PER_SET {
+                            break;
+                        }
                         if let Some(item) = item.as_obj() {
                             let acts = game_actions_in(item);
                             if !acts.is_empty() {
@@ -554,17 +571,24 @@ pub fn parse_vdf_summary(text: &str) -> (String, Vec<ActionSetSummary>) {
                 }
                 let analog = o
                     .obj("gameactions")
-                    .map(|ga| ga.iter().filter_map(|(_, a)| a.as_str()).map(str::to_string).collect())
+                    .map(|ga| ga.iter().filter_map(|(_, a)| a.as_str()).take(MAX_ACTIONS_PER_INPUT).map(str::to_string).collect())
                     .unwrap_or_default();
                 groups.insert(id, GroupInfo { mode, inputs, analog });
             }
             "preset" => {
+                if sets.len() >= MAX_SUMMARY_SETS {
+                    break;
+                }
                 let name = o.str("name").unwrap_or_default().to_string();
                 let is_layer = layer_names.iter().any(|(n, _)| n == &name);
                 let title = set_titles.get(&name).cloned().unwrap_or_else(|| name.clone());
                 let mut bindings = Vec::new();
+                let mut seen_gids = std::collections::HashSet::new();
                 if let Some(gsb) = o.obj("group_source_bindings") {
-                    for (gid, val) in gsb.iter() {
+                    'gsb: for (gid, val) in gsb.iter() {
+                        if !seen_gids.insert(gid) {
+                            continue;
+                        }
                         let Some(raw) = val.as_str() else { continue };
                         let mut w = raw.split_whitespace();
                         let Some(source) = w.next() else { continue };
@@ -573,9 +597,25 @@ pub fn parse_vdf_summary(text: &str) -> (String, Vec<ActionSetSummary>) {
                         }
                         if let Some(g) = groups.get(gid) {
                             if !g.analog.is_empty() {
+                                if bindings.len() >= MAX_SUMMARY_BINDINGS_PER_SET
+                                    || total_bindings >= MAX_SUMMARY_TOTAL_BINDINGS
+                                    || total_actions.saturating_add(g.analog.len()) > MAX_SUMMARY_TOTAL_ACTIONS
+                                {
+                                    break 'gsb;
+                                }
+                                total_bindings += 1;
+                                total_actions += g.analog.len();
                                 bindings.push((source.to_string(), g.mode.clone(), g.analog.clone()));
                             }
                             for (input_name, acts) in &g.inputs {
+                                if bindings.len() >= MAX_SUMMARY_BINDINGS_PER_SET
+                                    || total_bindings >= MAX_SUMMARY_TOTAL_BINDINGS
+                                    || total_actions.saturating_add(acts.len()) > MAX_SUMMARY_TOTAL_ACTIONS
+                                {
+                                    break 'gsb;
+                                }
+                                total_bindings += 1;
+                                total_actions += acts.len();
                                 bindings.push((source.to_string(), input_name.clone(), acts.clone()));
                             }
                         }
@@ -866,5 +906,24 @@ mod tests {
             "duplicate Flick Stick: {labels:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bounds_repeated_group_references_in_summary() {
+        // Memory amplification guard: repeating the same group across many presets is capped.
+        let mut vdf = String::from("\"controller_mappings\" { \"controller_type\" \"controller_xboxone\" ");
+        vdf.push_str("\"group\" { \"id\" \"0\" \"mode\" \"four_buttons\" \"inputs\" { ");
+        for i in 0..40 {
+            vdf.push_str(&format!("\"btn_{i}\" {{ \"activators\" {{ \"Full\" {{ \"bindings\" {{ \"binding\" \"game_action InGame act_{i}, , \" }} }} }} }} "));
+        }
+        vdf.push_str("} } ");
+        for p in 0..100 {
+            vdf.push_str(&format!("\"preset\" {{ \"id\" \"{p}\" \"name\" \"Set{p}\" \"group_source_bindings\" {{ \"0\" \"button_diamond active\" \"0\" \"button_diamond active\" }} }} "));
+        }
+        vdf.push('}');
+        let (_, sets) = parse_vdf_summary(&vdf);
+        assert!(sets.len() <= MAX_SUMMARY_SETS);
+        let total_bindings: usize = sets.iter().map(|s| s.bindings.len()).sum();
+        assert!(total_bindings <= MAX_SUMMARY_TOTAL_BINDINGS);
     }
 }

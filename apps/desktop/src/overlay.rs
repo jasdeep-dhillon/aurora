@@ -115,6 +115,8 @@ pub struct Overlay {
     /// Cached list of local screenshots for the running game.
     screenshots: Vec<client::ingame::LocalScreenshot>,
     screenshots_dirty: bool,
+    /// In-flight background screenshot encode/save tasks (off the UI thread).
+    screenshot_saves: Vec<(AppId, tokio::sync::oneshot::Receiver<Result<std::path::PathBuf, String>>)>,
     /// Pending screenshot request from the overlay UI button.
     take_shot_requested: bool,
     /// App ID whose notes are currently loaded, and debounce timestamp for saving.
@@ -177,6 +179,7 @@ impl Overlay {
             fps: None,
             screenshots: Vec::new(),
             screenshots_dirty: true,
+            screenshot_saves: Vec::new(),
             take_shot_requested: false,
             notes_app: None,
             notes_dirty: None,
@@ -349,6 +352,20 @@ fn foreground_window() -> isize {
     0
 }
 
+/// Check whether a Windows executable path is strictly inside `dir` (respecting
+/// path-component boundaries so `C:\Games\App` never matches `C:\Games\App2\...`).
+#[cfg(any(windows, test))]
+fn win_exe_in_dir(exe: &str, dir: &str) -> bool {
+    let exe = exe.to_lowercase().replace('/', "\\");
+    let dir = dir.to_lowercase().replace('/', "\\");
+    let trimmed = dir.trim_end_matches('\\');
+    if trimmed.is_empty() {
+        return false;
+    }
+    let prefix = format!("{trimmed}\\");
+    exe.starts_with(&prefix)
+}
+
 /// The focused window belongs to a program inside `dir` (the game's folder).
 #[cfg(windows)]
 fn foreground_is_in(dir: &std::path::Path) -> bool {
@@ -376,9 +393,8 @@ fn foreground_is_in(dir: &std::path::Path) -> bool {
         if !ok {
             return false;
         }
-        let exe = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase().replace('/', "\\");
-        let dir = dir.display().to_string().to_lowercase().replace('/', "\\");
-        exe.starts_with(dir.trim_end_matches('\\'))
+        let exe = String::from_utf16_lossy(&buf[..len as usize]);
+        win_exe_in_dir(&exe, &dir.display().to_string())
     }
 }
 /// Linux: the focused X window (games run on X11 or XWayland) belongs to a
@@ -517,6 +533,32 @@ mod linux_tests {
 
 /// Pick up games that draw the overlay themselves and read what they sent.
 fn poll_ingame(app: &mut SteamApp, ctx: &egui::Context) {
+    // Always drain completed background screenshot saves even if the game has
+    // already disconnected, associating gallery invalidation with the originating game.
+    let now = ctx.input(|i| i.time);
+    let mut completed_saves = Vec::new();
+    app.overlay.screenshot_saves.retain_mut(|(origin_app, rx)| match rx.try_recv() {
+        Ok(res) => {
+            completed_saves.push((*origin_app, res));
+            false
+        }
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => true,
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => false,
+    });
+    for (origin_app, saved) in completed_saves {
+        match saved {
+            Ok(_) => {
+                if app.overlay.game.is_some_and(|(id, _)| id == origin_app) {
+                    app.overlay.screenshots_dirty = true;
+                }
+                app.toast(now, t!("Screenshot saved"), "");
+            }
+            Err(e) => {
+                tracing::warn!("saving streamed screenshot failed: {e}");
+                app.toast(now, t!("Couldn't save screenshot"), e);
+            }
+        }
+    }
     for conn in client::ingame::take_new() {
         if app.overlay.game.is_some_and(|(id, _)| id != conn.app_id) {
             tracing::info!("in-game overlay from app {} while {:?} runs; using it anyway", conn.app_id, app.overlay.game);
@@ -554,7 +596,6 @@ fn poll_ingame(app: &mut SteamApp, ctx: &egui::Context) {
         }
         None => {}
     }
-    let now = ctx.input(|i| i.time);
     if let Some(ok) = res.screenshot_saved {
         if ok {
             app.overlay.screenshots_dirty = true;
@@ -566,16 +607,15 @@ fn poll_ingame(app: &mut SteamApp, ctx: &egui::Context) {
     if let Some((w, h, rgb)) = res.screenshot_rgb {
         let app_id = app.overlay.game.map(|(id, _)| id).or_else(|| app.overlay.ingame.as_ref().map(|s| s.conn.app_id)).unwrap_or(0);
         let account_id = (app.state.steam_id & 0xFFFF_FFFF) as u32;
-        match client::ingame::save_screenshot_rgb(&app.local.steam_root, account_id, app_id, w, h, rgb) {
-            Ok(_) => {
-                app.overlay.screenshots_dirty = true;
-                app.toast(now, t!("Screenshot saved"), "");
-            }
-            Err(e) => {
-                tracing::warn!("saving streamed screenshot failed: {e}");
-                app.toast(now, t!("Couldn't save screenshot"), e);
-            }
-        }
+        let steam_root = app.local.steam_root.clone();
+        let ctx_clone = ctx.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.overlay.screenshot_saves.push((app_id, rx));
+        app._rt.spawn_blocking(move || {
+            let res = client::ingame::save_screenshot_rgb(&steam_root, account_id, app_id, w, h, rgb);
+            let _ = tx.send(res);
+            ctx_clone.request_repaint();
+        });
     }
 }
 
@@ -1707,6 +1747,20 @@ fn fps_hud(app: &SteamApp, ctx: &egui::Context, t: &Theme) {
                     );
                 });
         });
+}
+
+#[cfg(test)]
+mod win_path_tests {
+    use super::win_exe_in_dir;
+
+    #[test]
+    fn respects_path_component_boundaries() {
+        assert!(win_exe_in_dir(r"C:\Games\App\game.exe", r"C:\Games\App"));
+        assert!(win_exe_in_dir(r"c:/games/app/sub/game.exe", r"C:\Games\App\"));
+        assert!(!win_exe_in_dir(r"C:\Games\App2\game.exe", r"C:\Games\App"));
+        assert!(!win_exe_in_dir(r"C:\Games\App", r"C:\Games\App"));
+        assert!(!win_exe_in_dir(r"C:\Games\App\game.exe", ""));
+    }
 }
 
 fn toasts_hud(app: &SteamApp, ctx: &egui::Context, t: &Theme) {
