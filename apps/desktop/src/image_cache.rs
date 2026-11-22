@@ -31,12 +31,18 @@ const PARALLEL: usize = 8;
 /// Textures not drawn (or prefetched) for this long are unloaded.
 const MAX_TEXTURE_BYTES: usize = 96 * 1024 * 1024;
 const UNUSED_FOR: Duration = Duration::from_secs(5);
+/// Failed in-memory entries expire after this TTL so transient errors can retry,
+/// and the failed-entry set is capped to avoid unbounded growth in long sessions.
+const FAILED_TTL: Duration = Duration::from_secs(120);
+const MAX_FAILED_ENTRIES: usize = 2048;
 
 #[derive(Clone)]
 enum Entry {
     Pending,
     Ready(Bytes, Option<String>),
-    Failed(String),
+    /// `disk_cached`: true for persistent 403/404/410 `.missing` markers; false
+    /// for transient failures that should auto-retry after `FAILED_TTL`.
+    Failed { err: String, at: std::time::Instant, disk_cached: bool },
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -124,11 +130,21 @@ impl BytesLoader for ImageCache {
         {
             let mut map = self.entries.lock().unwrap();
             if let Some(e) = map.get(uri) {
-                return match e {
-                    Entry::Pending => Ok(BytesPoll::Pending { size: None }),
-                    Entry::Ready(bytes, mime) => Ok(BytesPoll::Ready { size: None, bytes: bytes.clone(), mime: mime.clone() }),
-                    Entry::Failed(err) => Err(LoadError::Loading(err.clone())),
-                };
+                match e {
+                    Entry::Pending => return Ok(BytesPoll::Pending { size: None }),
+                    Entry::Ready(bytes, mime) => return Ok(BytesPoll::Ready { size: None, bytes: bytes.clone(), mime: mime.clone() }),
+                    Entry::Failed { err, at, disk_cached } => {
+                        let ttl = if *disk_cached { FRESH_FOR } else { FAILED_TTL };
+                        let elapsed = at.elapsed();
+                        if elapsed < ttl {
+                            if !*disk_cached {
+                                ctx.request_repaint_after(ttl.saturating_sub(elapsed).max(Duration::from_millis(100)));
+                            }
+                            return Err(LoadError::Loading(err.clone()));
+                        }
+                        map.remove(uri);
+                    }
+                }
             }
             if let Err(err) = validate_image_url(uri) {
                 return Err(LoadError::Loading(err));
@@ -140,7 +156,33 @@ impl BytesLoader for ImageCache {
         let (http, slots, entries) = (self.http.clone(), self.slots.clone(), self.entries.clone());
         self.rt.spawn(async move {
             let done = |e: Entry| {
-                entries.lock().unwrap().insert(uri.clone(), e);
+                let mut map = entries.lock().unwrap();
+                if matches!(e, Entry::Failed { .. }) {
+                    let failed_count = map.values().filter(|v| matches!(v, Entry::Failed { .. })).count();
+                    if failed_count >= MAX_FAILED_ENTRIES {
+                        let now = std::time::Instant::now();
+                        map.retain(|_, v| {
+                            !matches!(v, Entry::Failed { at, disk_cached, .. }
+                                if now.duration_since(*at) >= if *disk_cached { FRESH_FOR } else { FAILED_TTL })
+                        });
+                        let remaining_failed = map.values().filter(|v| matches!(v, Entry::Failed { .. })).count();
+                        if remaining_failed >= MAX_FAILED_ENTRIES {
+                            let mut oldest: Vec<(std::time::Instant, String)> = map
+                                .iter()
+                                .filter_map(|(k, v)| match v {
+                                    Entry::Failed { at, .. } => Some((*at, k.clone())),
+                                    _ => None,
+                                })
+                                .collect();
+                            oldest.sort_unstable_by_key(|(at, _)| *at);
+                            let drop_n = remaining_failed - (MAX_FAILED_ENTRIES / 2);
+                            for (_, k) in oldest.into_iter().take(drop_n) {
+                                map.remove(&k);
+                            }
+                        }
+                    }
+                }
+                map.insert(uri.clone(), e);
                 ctx.request_repaint();
             };
             // 1. Check disk cache off the async worker threads so bursts of cached
@@ -179,7 +221,7 @@ impl BytesLoader for ImageCache {
                     return;
                 }
                 DiskHit::KnownMissing(status) => {
-                    done(Entry::Failed(format!("HTTP {}", status.trim())));
+                    done(Entry::Failed { err: format!("HTTP {}", status.trim()), at: std::time::Instant::now(), disk_cached: true });
                     return;
                 }
                 DiskHit::Stale(bytes, meta) => {
@@ -203,7 +245,7 @@ impl BytesLoader for ImageCache {
             match req.send().await {
                 Ok(resp) if resp.remote_addr().is_some_and(|a| !is_public_ip(a.ip())) => {
                     if !has_saved {
-                        done(Entry::Failed("blocked non-public image host".into()));
+                        done(Entry::Failed { err: "blocked non-public image host".into(), at: std::time::Instant::now(), disk_cached: false });
                     }
                 }
                 Ok(resp) if resp.status() == reqwest::StatusCode::NOT_MODIFIED => {
@@ -234,14 +276,15 @@ impl BytesLoader for ImageCache {
                             })
                             .await;
                         }
-                        Err(e) if !has_saved => done(Entry::Failed(e)),
+                        Err(e) if !has_saved => done(Entry::Failed { err: e, at: std::time::Instant::now(), disk_cached: false }),
                         Err(_) => {}
                     }
                 }
                 Ok(resp) if !has_saved => {
                     let status = resp.status();
                     // Remember pictures that don't exist (not server hiccups).
-                    if matches!(status.as_u16(), 403 | 404 | 410) {
+                    let disk_cached = matches!(status.as_u16(), 403 | 404 | 410);
+                    if disk_cached {
                         let missing = path.with_extension("missing");
                         let text = status.to_string();
                         let _ = tokio::task::spawn_blocking(move || {
@@ -249,9 +292,9 @@ impl BytesLoader for ImageCache {
                         })
                         .await;
                     }
-                    done(Entry::Failed(format!("HTTP {status}")));
+                    done(Entry::Failed { err: format!("HTTP {status}"), at: std::time::Instant::now(), disk_cached });
                 }
-                Err(e) if !has_saved => done(Entry::Failed(e.to_string())),
+                Err(e) if !has_saved => done(Entry::Failed { err: e.to_string(), at: std::time::Instant::now(), disk_cached: false }),
                 // Offline or the server hiccuped: keep showing the saved copy.
                 _ => {}
             }

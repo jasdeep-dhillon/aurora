@@ -213,7 +213,7 @@ fn screenshot_dirs_for(steam_root: &std::path::Path, account_id: u32, app_id: Ap
     dirs
 }
 
-fn screenshot_filename(dir: &std::path::Path) -> std::path::PathBuf {
+fn reserve_screenshot_file(dir: &std::path::Path) -> Result<(std::path::PathBuf, std::fs::File), String> {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
     let z = days + 719_468;
@@ -226,7 +226,15 @@ fn screenshot_filename(dir: &std::path::Path) -> std::path::PathBuf {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + (m <= 2) as i64;
     let stamp = format!("{y:04}{m:02}{d:02}{:02}{:02}{:02}", rem / 3600, rem / 60 % 60, rem % 60);
-    (1..).map(|n| dir.join(format!("{stamp}_{n}.jpg"))).find(|p| !p.exists()).unwrap_or_else(|| dir.join(format!("{stamp}.jpg")))
+    for n in 1..=10_000u32 {
+        let path = dir.join(format!("{stamp}_{n}.jpg"));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err("could not allocate unique screenshot filename".into())
 }
 
 /// Encode an RGB frame as JPEG + 200px wide thumbnail into Steam's screenshot library.
@@ -235,6 +243,7 @@ pub fn save_screenshot_rgb(steam_root: &std::path::Path, account_id: u32, app_id
 }
 
 fn save_screenshot_rgb_in(dir: &std::path::Path, width: u32, height: u32, rgb: Vec<u8>) -> Result<std::path::PathBuf, String> {
+    use std::io::Write;
     const THUMB_WIDTH: u32 = 200;
     if width == 0 || height == 0 {
         return Err("empty screenshot dimensions".into());
@@ -245,8 +254,16 @@ fn save_screenshot_rgb_in(dir: &std::path::Path, width: u32, height: u32, rgb: V
     }
     std::fs::create_dir_all(dir.join("thumbnails")).map_err(|e| e.to_string())?;
     let img = image::RgbImage::from_raw(width, height, rgb).ok_or("bad image size")?;
-    let path = screenshot_filename(dir);
-    img.save_with_format(&path, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?;
+    let (path, file) = reserve_screenshot_file(dir)?;
+    let write_res = (|| -> Result<(), String> {
+        let mut writer = std::io::BufWriter::new(file);
+        img.write_to(&mut writer, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())
+    })();
+    if let Err(e) = write_res {
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
     let th = THUMB_WIDTH.min(width).max(1);
     let thumb = image::imageops::thumbnail(&img, th, (height as u64 * th as u64 / width.max(1) as u64).max(1) as u32);
     let _ = thumb.save_with_format(dir.join("thumbnails").join(path.file_name().unwrap_or_default()), image::ImageFormat::Jpeg);

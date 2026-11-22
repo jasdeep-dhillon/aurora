@@ -103,6 +103,8 @@ pub struct Overlay {
     /// Cached list of local screenshots for the running game.
     screenshots: Vec<client::ingame::LocalScreenshot>,
     screenshots_dirty: bool,
+    /// In-flight background screenshot encode/save tasks (off the UI thread).
+    screenshot_saves: Vec<(AppId, tokio::sync::oneshot::Receiver<Result<std::path::PathBuf, String>>)>,
     /// Pending screenshot request from the overlay UI button.
     take_shot_requested: bool,
     /// App ID whose notes are currently loaded, and debounce timestamp for saving.
@@ -161,6 +163,7 @@ impl Overlay {
             fps: None,
             screenshots: Vec::new(),
             screenshots_dirty: true,
+            screenshot_saves: Vec::new(),
             take_shot_requested: false,
             notes_app: None,
             notes_dirty: None,
@@ -483,6 +486,32 @@ mod linux_tests {
 
 /// Pick up games that draw the overlay themselves and read what they sent.
 fn poll_ingame(app: &mut SteamApp, ctx: &egui::Context) {
+    // Always drain completed background screenshot saves even if the game has
+    // already disconnected, associating gallery invalidation with the originating game.
+    let now = ctx.input(|i| i.time);
+    let mut completed_saves = Vec::new();
+    app.overlay.screenshot_saves.retain_mut(|(origin_app, rx)| match rx.try_recv() {
+        Ok(res) => {
+            completed_saves.push((*origin_app, res));
+            false
+        }
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => true,
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => false,
+    });
+    for (origin_app, saved) in completed_saves {
+        match saved {
+            Ok(_) => {
+                if app.overlay.game.is_some_and(|(id, _)| id == origin_app) {
+                    app.overlay.screenshots_dirty = true;
+                }
+                app.toast(now, t!("Screenshot saved"), "");
+            }
+            Err(e) => {
+                tracing::warn!("saving streamed screenshot failed: {e}");
+                app.toast(now, t!("Couldn't save screenshot"), e);
+            }
+        }
+    }
     for conn in client::ingame::take_new() {
         if app.overlay.game.is_some_and(|(id, _)| id != conn.app_id) {
             tracing::info!("in-game overlay from app {} while {:?} runs; using it anyway", conn.app_id, app.overlay.game);
@@ -520,7 +549,6 @@ fn poll_ingame(app: &mut SteamApp, ctx: &egui::Context) {
         }
         None => {}
     }
-    let now = ctx.input(|i| i.time);
     if let Some(ok) = res.screenshot_saved {
         if ok {
             app.overlay.screenshots_dirty = true;
@@ -532,16 +560,15 @@ fn poll_ingame(app: &mut SteamApp, ctx: &egui::Context) {
     if let Some((w, h, rgb)) = res.screenshot_rgb {
         let app_id = app.overlay.game.map(|(id, _)| id).or_else(|| app.overlay.ingame.as_ref().map(|s| s.conn.app_id)).unwrap_or(0);
         let account_id = (app.state.steam_id & 0xFFFF_FFFF) as u32;
-        match client::ingame::save_screenshot_rgb(&app.local.steam_root, account_id, app_id, w, h, rgb) {
-            Ok(_) => {
-                app.overlay.screenshots_dirty = true;
-                app.toast(now, t!("Screenshot saved"), "");
-            }
-            Err(e) => {
-                tracing::warn!("saving streamed screenshot failed: {e}");
-                app.toast(now, t!("Couldn't save screenshot"), e);
-            }
-        }
+        let steam_root = app.local.steam_root.clone();
+        let ctx_clone = ctx.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.overlay.screenshot_saves.push((app_id, rx));
+        app._rt.spawn_blocking(move || {
+            let res = client::ingame::save_screenshot_rgb(&steam_root, account_id, app_id, w, h, rgb);
+            let _ = tx.send(res);
+            ctx_clone.request_repaint();
+        });
     }
 }
 

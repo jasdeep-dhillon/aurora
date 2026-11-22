@@ -591,6 +591,8 @@ mod linux_fonts {
     }
 
     fn query_fc_match() -> Vec<DiscoveredFont> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         const LANG_QUERIES: &[&str] = &[
             "sans-serif:lang=zh-cn",
             "sans-serif:lang=zh-tw",
@@ -608,37 +610,66 @@ mod linux_fonts {
             ("Noto Color Emoji", &["noto color emoji", "emoji"], true),
         ];
 
+        let missing = AtomicBool::new(false);
         let run = |pattern: &str| -> Option<String> {
-            let out = Command::new("fc-match")
-                .args(["-f", "%{file}\t%{index}\t%{family}\n", pattern])
-                .output()
-                .ok()?;
-            if !out.status.success() {
+            if missing.load(Ordering::Relaxed) {
                 return None;
             }
-            String::from_utf8(out.stdout).ok()
+            match Command::new("fc-match")
+                .args(["-f", "%{file}\t%{index}\t%{family}\n", pattern])
+                .output()
+            {
+                Ok(out) if out.status.success() => String::from_utf8(out.stdout).ok(),
+                Ok(_) => None,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        missing.store(true, Ordering::Relaxed);
+                    }
+                    None
+                }
+            }
         };
 
-        let mut out = Vec::new();
-        for q in LANG_QUERIES {
-            if let Some(stdout) = run(q) {
-                if let Some(line) = stdout.lines().next() {
-                    if let Some(font) = parse_fc_match_line(line, None, false) {
-                        out.push(font);
-                    }
+        // Run fontconfig lookups concurrently with bounded, fallible worker
+        // threads (falling back to inline execution if the OS refuses a thread)
+        // while preserving deterministic priority order.
+        enum Slot<'a> {
+            Pending(std::thread::ScopedJoinHandle<'a, Option<DiscoveredFont>>),
+            Ready(Option<DiscoveredFont>),
+        }
+        let mut results: Vec<Option<DiscoveredFont>> = std::thread::scope(|s| {
+            let mut slots = Vec::with_capacity(LANG_QUERIES.len() + FAMILY_QUERIES.len());
+            for &q in LANG_QUERIES {
+                let job = move || {
+                    let stdout = run(q)?;
+                    let line = stdout.lines().next()?;
+                    parse_fc_match_line(line, None, false)
+                };
+                match std::thread::Builder::new().name("aurora-fc-match".into()).spawn_scoped(s, job) {
+                    Ok(h) => slots.push(Slot::Pending(h)),
+                    Err(_) => slots.push(Slot::Ready(job())),
                 }
             }
-        }
-        for &(pattern, expected, is_emoji) in FAMILY_QUERIES {
-            if let Some(stdout) = run(pattern) {
-                if let Some(line) = stdout.lines().next() {
-                    if let Some(font) = parse_fc_match_line(line, Some(expected), is_emoji) {
-                        out.push(font);
-                    }
+            for &(pattern, expected, is_emoji) in FAMILY_QUERIES {
+                let job = move || {
+                    let stdout = run(pattern)?;
+                    let line = stdout.lines().next()?;
+                    parse_fc_match_line(line, Some(expected), is_emoji)
+                };
+                match std::thread::Builder::new().name("aurora-fc-match".into()).spawn_scoped(s, job) {
+                    Ok(h) => slots.push(Slot::Pending(h)),
+                    Err(_) => slots.push(Slot::Ready(job())),
                 }
             }
-        }
-        out
+            slots
+                .into_iter()
+                .map(|slot| match slot {
+                    Slot::Pending(h) => h.join().ok().flatten(),
+                    Slot::Ready(v) => v,
+                })
+                .collect()
+        });
+        results.drain(..).flatten().collect()
     }
 
     fn is_font_ext(path: &Path) -> bool {

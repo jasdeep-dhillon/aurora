@@ -221,8 +221,8 @@ pub struct SteamApp {
     synced_revision: u64,
     preferences_revision: Option<u64>,
     applied_fonts_key: Option<String>,
-    bg_tex: Option<(PathBuf, egui::TextureHandle)>,
-    logo_tex: Option<(PathBuf, egui::TextureHandle)>,
+    bg_tex: Option<(PathBuf, egui::TextureWrapMode, egui::TextureHandle)>,
+    logo_tex: Option<(PathBuf, egui::TextureWrapMode, egui::TextureHandle)>,
     last_hot_reload_check: f64,
     native_appearance: Option<themes::native::NativeAppearanceWatcher>,
     applied_native_artwork: Option<Arc<ui::native_style::NativeControlArtwork>>,
@@ -729,13 +729,19 @@ impl SteamApp {
 
     fn sync_theme_state(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
-        let (active_theme, fonts_key, custom_fonts, bg_path, logo_path, new_snapshot, new_lib_nodes, rev) = {
+        let (active_theme, fonts_key, custom_fonts, bg_path, bg_wrap, logo_path, new_snapshot, new_lib_nodes, rev) = {
             let mut st = self.themes.lock().unwrap();
             let native = st.manager.uses_native_appearance();
             if !st.dirty && st.revision == self.synced_revision && !native && !st.hot_reload
                 && !self.prefs.hot_reload_themes && self.applied_theme.as_ref() == Some(&self.prefs.theme)
                 && st.manager.resolved.as_ref().is_none_or(|theme| {
-                    (theme.background_path.is_none() || self.bg_tex.is_some())
+                    let want_wrap = if theme.background_fit == themes::BackgroundFit::Tile {
+                        egui::TextureWrapMode::Repeat
+                    } else {
+                        egui::TextureWrapMode::ClampToEdge
+                    };
+                    (theme.background_path.is_none()
+                        || self.bg_tex.as_ref().is_some_and(|(_, w, _)| *w == want_wrap))
                         && (theme.logo_path.is_none() || self.logo_tex.is_some())
                 })
             {
@@ -791,13 +797,18 @@ impl SteamApp {
                 let custom_fonts = if self.applied_fonts_key != fonts_key { res.custom_fonts.clone() } else { None };
                 let snap = changed.then(|| Some(snapshot_resolved(res)));
                 let lib_nodes = changed.then(|| res.layout.library.clone());
-                (theme, fonts_key, custom_fonts, res.background_path.clone(), res.logo_path.clone(), snap, lib_nodes, rev)
+                let bg_wrap = if res.background_fit == themes::BackgroundFit::Tile {
+                    egui::TextureWrapMode::Repeat
+                } else {
+                    egui::TextureWrapMode::ClampToEdge
+                };
+                (theme, fonts_key, custom_fonts, res.background_path.clone(), bg_wrap, res.logo_path.clone(), snap, lib_nodes, rev)
             } else {
                 let theme = Theme::default();
                 let fonts_key = Some(format!("{:?}", theme.weight_preset));
                 let snap = changed.then_some(None);
                 let lib_nodes = changed.then(Vec::new);
-                (theme, fonts_key, None, None, None, snap, lib_nodes, rev)
+                (theme, fonts_key, None, None, egui::TextureWrapMode::ClampToEdge, None, snap, lib_nodes, rev)
             }
         };
 
@@ -818,8 +829,8 @@ impl SteamApp {
             ui::install_fonts_for_theme(ctx, lcd_subpixel_enabled(), self.prefs.theme.weight_preset, custom_fonts.as_ref());
             self.applied_fonts_key = fonts_key;
         }
-        sync_texture(ctx, &mut self.bg_tex, bg_path.as_deref(), "theme-bg");
-        sync_texture(ctx, &mut self.logo_tex, logo_path.as_deref(), "theme-logo");
+        sync_texture(ctx, &mut self.bg_tex, bg_path.as_deref(), bg_wrap, "theme-bg");
+        sync_texture(ctx, &mut self.logo_tex, logo_path.as_deref(), egui::TextureWrapMode::ClampToEdge, "theme-logo");
     }
 
     fn show_window(&mut self, ctx: &egui::Context) {
@@ -1175,8 +1186,8 @@ impl eframe::App for SteamApp {
         }
         if signed_in {
             let snapshot = self.resolved_snapshot.take();
-            let bg_tex = self.bg_tex.as_ref().map(|(_, h)| h.clone());
-            let logo_tex = self.logo_tex.as_ref().map(|(_, h)| h.clone());
+            let bg_tex = self.bg_tex.as_ref().map(|(_, _, h)| h.clone());
+            let logo_tex = self.logo_tex.as_ref().map(|(_, _, h)| h.clone());
             let now = ctx.input(|i| i.time);
             let (has_bg_script, has_chrome_script) = {
                 let st = self.themes.lock().unwrap();
@@ -1264,6 +1275,9 @@ impl eframe::App for SteamApp {
     /// left an invisible process behind, and the next launch handed itself to
     /// that stuck copy. Give the tasks a moment and stop waiting for them.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(mut watcher) = self.native_appearance.take() {
+            watcher.shutdown();
+        }
         let idle = tokio::runtime::Builder::new_current_thread().build().expect("tokio runtime");
         std::mem::replace(&mut self._rt, idle).shutdown_timeout(std::time::Duration::from_secs(2));
     }
@@ -1297,8 +1311,9 @@ fn snapshot_resolved(res: &themes::ResolvedTheme) -> themes::ResolvedTheme {
 
 fn sync_texture(
     ctx: &egui::Context,
-    slot: &mut Option<(PathBuf, egui::TextureHandle)>,
+    slot: &mut Option<(PathBuf, egui::TextureWrapMode, egui::TextureHandle)>,
     path: Option<&std::path::Path>,
+    wrap_mode: egui::TextureWrapMode,
     name: &str,
 ) {
     const MAX_THEME_IMG_DIM: u32 = 8192;
@@ -1308,7 +1323,7 @@ fn sync_texture(
             *slot = None;
         }
         Some(p) => {
-            if slot.as_ref().is_some_and(|(cached, _)| cached.as_path() == p) {
+            if slot.as_ref().is_some_and(|(cached, w, _)| cached.as_path() == p && *w == wrap_mode) {
                 return;
             }
             if std::fs::symlink_metadata(p).is_err_and(|_| true)
@@ -1334,8 +1349,12 @@ fn sync_texture(
                     let rgba = img.to_rgba8();
                     let size = [rgba.width() as usize, rgba.height() as usize];
                     let color_img = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                    let handle = ctx.load_texture(name, color_img, egui::TextureOptions::LINEAR);
-                    *slot = Some((p.to_path_buf(), handle));
+                    let opts = egui::TextureOptions {
+                        wrap_mode,
+                        ..egui::TextureOptions::LINEAR
+                    };
+                    let handle = ctx.load_texture(name, color_img, opts);
+                    *slot = Some((p.to_path_buf(), wrap_mode, handle));
                 }
                 Err(e) => {
                     tracing::warn!("theme image {}: {e}", p.display());
