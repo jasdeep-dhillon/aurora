@@ -242,7 +242,7 @@ fn is_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
 fn safe_manifest_rel(entry: &str) -> Option<PathBuf> {
     use std::path::Component;
     let trimmed = entry.trim();
-    if trimmed.is_empty() || trimmed.contains('\0') {
+    if trimmed.is_empty() || trimmed.contains(['\0', '\\']) {
         return None;
     }
     let rel = Path::new(trimmed);
