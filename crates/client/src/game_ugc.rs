@@ -273,8 +273,36 @@ pub async fn get_vote(conn: &Connection, id: u64) -> Reply {
     }
 }
 
+const MAX_DIR_DEPTH: usize = 32;
+
 fn dir_size(p: &Path) -> u64 {
-    std::fs::read_dir(p).map(|rd| rd.flatten().map(|e| if e.path().is_dir() { dir_size(&e.path()) } else { e.metadata().map(|m| m.len()).unwrap_or(0) }).sum()).unwrap_or(0)
+    fn walk(p: &Path, depth: usize) -> u64 {
+        if depth > MAX_DIR_DEPTH {
+            return 0;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(p) else { return 0 };
+        if is_symlink_or_reparse(&meta) || !meta.is_dir() {
+            return 0;
+        }
+        let Ok(rd) = std::fs::read_dir(p) else { return 0 };
+        let mut total = 0u64;
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                total = total.saturating_add(walk(&e.path(), depth + 1));
+            } else if ft.is_file() {
+                let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
+                if !is_symlink_or_reparse(&m) && m.is_file() {
+                    total = total.saturating_add(m.len());
+                }
+            }
+        }
+        total
+    }
+    walk(p, 0)
 }
 
 /// Download (or update) one item for the game, through the same path (and
@@ -287,11 +315,17 @@ pub async fn download(conn: &Connection, app_id: AppId, me: u64, id: u64, instal
     let Some(library) = crate::workshop::library_of(install_dir) else { return failed("the game isn't in a Steam library folder".into()) };
     match crate::workshop::sync(conn, me, app_id, &library, cell_id, vec![id]).await {
         Ok(r) if r.failed.is_empty() => {
-            let dir = library.join("steamapps").join("workshop").join("content").join(app_id.to_string()).join(id.to_string());
-            if !dir.is_dir() {
-                return failed("not available".into());
+            let mut dir = library.clone();
+            for seg in ["steamapps", "workshop", "content", &app_id.to_string(), &id.to_string()] {
+                dir.push(seg);
+                let Ok(m) = std::fs::symlink_metadata(&dir) else {
+                    return failed("not available".into());
+                };
+                if is_symlink_or_reparse(&m) || !m.is_dir() {
+                    return failed("refusing symlinked workshop folder".into());
+                }
             }
-            let updated = std::fs::metadata(&dir).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as u32).unwrap_or(0);
+            let updated = std::fs::symlink_metadata(&dir).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as u32).unwrap_or(0);
             Reply::UgcDownloaded { eresult: eresult::OK, folder: dir.to_string_lossy().into_owned(), size: dir_size(&dir), updated }
         }
         Ok(r) => failed(r.failed.iter().map(|f| f.2.clone()).collect::<Vec<_>>().join("; ")),
@@ -303,62 +337,270 @@ pub async fn download(conn: &Connection, app_id: AppId, me: u64, id: u64, instal
 const MAX_UGC_PREVIEW_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_UGC_CONTENT_BYTES: u64 = 100 * 1024 * 1024;
 
-/// Read a local file for Workshop upload after verifying it is a regular file
-/// (not a symlink) within `max_bytes`.
-fn read_upload_file(path: &Path, max_bytes: u64) -> Result<(String, Vec<u8>), String> {
-    let meta = std::fs::symlink_metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+fn is_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
     if meta.file_type().is_symlink() {
-        return Err("refusing to upload symlinked file".into());
+        return true;
     }
-    if !meta.is_file() {
-        return Err(format!("{} is not a regular file", path.display()));
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if (meta.file_attributes() & 0x0400) != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Verify no existing path component (ancestors or leaf) is a symlink/reparse point.
+#[cfg(not(unix))]
+fn reject_symlink_ancestors(path: &Path) -> Result<(), String> {
+    let mut cur = std::path::PathBuf::new();
+    for comp in path.components() {
+        cur.push(comp);
+        if matches!(comp, std::path::Component::RootDir | std::path::Component::Prefix(_)) {
+            continue;
+        }
+        let meta = std::fs::symlink_metadata(&cur).map_err(|e| format!("cannot stat {}: {e}", cur.display()))?;
+        if is_symlink_or_reparse(&meta) {
+            return Err(format!("refusing symlink/reparse point in path: {}", cur.display()));
+        }
+    }
+    Ok(())
+}
+
+/// Open `path` on Unix by walking every component with `openat(..., O_NOFOLLOW)`,
+/// preventing ancestor-swap symlink races, and passing `O_NONBLOCK` on the leaf
+/// so opening a FIFO never blocks the upload worker.
+#[cfg(unix)]
+fn open_no_symlinks_unix(path: &Path) -> Result<std::fs::File, String> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+
+    let mut comps: Vec<Component<'_>> = Vec::new();
+    let mut is_abs = false;
+    for c in path.components() {
+        match c {
+            Component::RootDir => is_abs = true,
+            Component::CurDir => {}
+            Component::ParentDir | Component::Normal(_) => comps.push(c),
+            Component::Prefix(_) => return Err("unsupported path prefix".into()),
+        }
+    }
+    if comps.is_empty() {
+        return Err("empty upload path".into());
+    }
+    let start_c = if is_abs { c"/" } else { c"." };
+    let fd = unsafe { libc::open(start_c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(format!("cannot open root for {}: {}", path.display(), std::io::Error::last_os_error()));
+    }
+    let mut dirfd = unsafe { OwnedFd::from_raw_fd(fd) };
+
+    for (idx, comp) in comps.iter().enumerate() {
+        let is_last = idx + 1 == comps.len();
+        let cseg = match comp {
+            Component::ParentDir => CString::new("..").unwrap(),
+            Component::Normal(s) => CString::new(s.as_bytes()).map_err(|_| "invalid NUL in upload path".to_string())?,
+            _ => continue,
+        };
+        let flags = if is_last {
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC
+        } else {
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+        };
+        let next = unsafe { libc::openat(dirfd.as_raw_fd(), cseg.as_ptr(), flags) };
+        if next < 0 {
+            let err = std::io::Error::last_os_error();
+            return Err(format!("cannot open {} without following symlinks: {err}", path.display()));
+        }
+        let owned = unsafe { OwnedFd::from_raw_fd(next) };
+        if is_last {
+            return Ok(std::fs::File::from(owned));
+        }
+        dirfd = owned;
+    }
+    Err("empty upload path".into())
+}
+
+fn read_bounded_regular_file(file: std::fs::File, display: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let meta = file.metadata().map_err(|e| format!("cannot stat {}: {e}", display.display()))?;
+    if !meta.is_file() || is_symlink_or_reparse(&meta) {
+        return Err(format!("{} is not a regular file", display.display()));
     }
     if meta.len() > max_bytes {
         return Err(format!("file exceeds {} byte upload limit", max_bytes));
     }
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .filter(|n| !n.is_empty() && !n.contains('/') && !n.contains('\\') && *n != "." && *n != "..")
-        .ok_or_else(|| "invalid file name".to_string())?
-        .to_string();
-    let data = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut data = Vec::new();
+    file.take(max_bytes + 1)
+        .read_to_end(&mut data)
+        .map_err(|e| format!("cannot read {}: {e}", display.display()))?;
     if data.len() as u64 > max_bytes {
         return Err(format!("file exceeds {} byte upload limit", max_bytes));
     }
+    Ok(data)
+}
+
+fn valid_upload_name(path: &Path) -> Result<String, String> {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty() && !n.contains('/') && !n.contains('\\') && *n != "." && *n != "..")
+        .map(str::to_string)
+        .ok_or_else(|| "invalid file name".to_string())
+}
+
+/// Read a local file for Workshop upload without following symlinks in any
+/// ancestor or leaf, never blocking on FIFOs, and enforcing `max_bytes`
+/// atomically via a bounded `.take()` read on the opened descriptor.
+fn read_upload_file(path: &Path, max_bytes: u64) -> Result<(String, Vec<u8>), String> {
+    let name = valid_upload_name(path)?;
+    #[cfg(unix)]
+    let file = open_no_symlinks_unix(path)?;
+    #[cfg(not(unix))]
+    let file = {
+        reject_symlink_ancestors(path)?;
+        let pre = std::fs::symlink_metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+        if is_symlink_or_reparse(&pre) || !pre.is_file() {
+            return Err(format!("{} is not a regular file", path.display()));
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        let f = opts.open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+        reject_symlink_ancestors(path)?;
+        f
+    };
+    let data = read_bounded_regular_file(file, path, max_bytes)?;
     Ok((name, data))
 }
 
 /// Resolve a Workshop `SetItemContent` path: accepts either a single regular file
 /// or a directory containing a single regular file (legacy cloud-backed UGC).
 fn resolve_content_file(path: &Path) -> Result<(String, Vec<u8>), String> {
-    let meta = std::fs::symlink_metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
-    if meta.file_type().is_symlink() {
-        return Err("refusing to upload symlinked content path".into());
-    }
-    if meta.is_file() {
-        return read_upload_file(path, MAX_UGC_CONTENT_BYTES);
-    }
-    if meta.is_dir() {
-        let mut files = Vec::new();
-        for entry in std::fs::read_dir(path).map_err(|e| format!("cannot read {}: {e}", path.display()))? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let ft = entry.file_type().map_err(|e| e.to_string())?;
-            if ft.is_symlink() {
-                return Err("refusing to upload symlink inside content folder".into());
+    #[cfg(unix)]
+    {
+        use std::ffi::{CStr, CString};
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        let file = open_no_symlinks_unix(path)?;
+        let meta = file.metadata().map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+        if meta.is_file() {
+            let name = valid_upload_name(path)?;
+            let data = read_bounded_regular_file(file, path, MAX_UGC_CONTENT_BYTES)?;
+            return Ok((name, data));
+        }
+        if !meta.is_dir() {
+            return Err("unsupported Workshop content path".into());
+        }
+        // Enumerate entries via fdopendir(dup(dirfd)) and open the single child via openat(dirfd, ...).
+        let dup_fd = unsafe { libc::dup(file.as_raw_fd()) };
+        if dup_fd < 0 {
+            return Err(format!("cannot read {}: {}", path.display(), std::io::Error::last_os_error()));
+        }
+        let dirp = unsafe { libc::fdopendir(dup_fd) };
+        if dirp.is_null() {
+            unsafe { libc::close(dup_fd) };
+            return Err(format!("cannot read {}: {}", path.display(), std::io::Error::last_os_error()));
+        }
+        let mut names: Vec<CString> = Vec::new();
+        let mut err_msg: Option<String> = None;
+        loop {
+            let ent = unsafe { libc::readdir(dirp) };
+            if ent.is_null() {
+                break;
             }
-            if ft.is_file() {
-                files.push(entry.path());
-            } else if ft.is_dir() {
-                return Err("multi-directory Workshop depot uploads are not supported yet".into());
+            let cname = unsafe { CStr::from_ptr((*ent).d_name.as_ptr()) };
+            if cname.to_bytes() == b"." || cname.to_bytes() == b".." {
+                continue;
+            }
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            let rc = unsafe { libc::fstatat(file.as_raw_fd(), cname.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+            if rc != 0 {
+                err_msg = Some(format!("cannot stat entry in {}: {}", path.display(), std::io::Error::last_os_error()));
+                break;
+            }
+            let mode = st.st_mode & libc::S_IFMT;
+            if mode == libc::S_IFLNK {
+                err_msg = Some("refusing to upload symlink inside content folder".into());
+                break;
+            }
+            if mode == libc::S_IFDIR {
+                err_msg = Some("multi-directory Workshop depot uploads are not supported yet".into());
+                break;
+            }
+            if mode == libc::S_IFREG {
+                names.push(cname.to_owned());
+            } else {
+                err_msg = Some("refusing non-regular file inside content folder".into());
+                break;
             }
         }
-        if files.len() == 1 {
-            return read_upload_file(&files[0], MAX_UGC_CONTENT_BYTES);
+        unsafe { libc::closedir(dirp) };
+        if let Some(e) = err_msg {
+            return Err(e);
         }
-        return Err(format!("multi-file Workshop depot uploads ({} files) are not supported yet", files.len()));
+        if names.len() != 1 {
+            return Err(format!("multi-file Workshop depot uploads ({} files) are not supported yet", names.len()));
+        }
+        let cname = &names[0];
+        let name = cname
+            .to_str()
+            .ok()
+            .filter(|n| !n.is_empty() && !n.contains('/') && !n.contains('\\') && *n != "." && *n != "..")
+            .ok_or_else(|| "invalid file name".to_string())?
+            .to_string();
+        let child_fd = unsafe {
+            libc::openat(
+                file.as_raw_fd(),
+                cname.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if child_fd < 0 {
+            return Err(format!("cannot open {}: {}", path.join(&name).display(), std::io::Error::last_os_error()));
+        }
+        let child = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(child_fd) });
+        let data = read_bounded_regular_file(child, &path.join(&name), MAX_UGC_CONTENT_BYTES)?;
+        Ok((name, data))
     }
-    Err("unsupported Workshop content path".into())
+    #[cfg(not(unix))]
+    {
+        reject_symlink_ancestors(path)?;
+        let meta = std::fs::symlink_metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+        if is_symlink_or_reparse(&meta) {
+            return Err("refusing to upload symlinked content path".into());
+        }
+        if meta.is_file() {
+            return read_upload_file(path, MAX_UGC_CONTENT_BYTES);
+        }
+        if meta.is_dir() {
+            let mut files = Vec::new();
+            for entry in std::fs::read_dir(path).map_err(|e| format!("cannot read {}: {e}", path.display()))? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let m = std::fs::symlink_metadata(entry.path()).map_err(|e| e.to_string())?;
+                if is_symlink_or_reparse(&m) {
+                    return Err("refusing to upload symlink inside content folder".into());
+                }
+                if m.is_file() {
+                    files.push(entry.path());
+                } else if m.is_dir() {
+                    return Err("multi-directory Workshop depot uploads are not supported yet".into());
+                }
+            }
+            if files.len() == 1 {
+                return read_upload_file(&files[0], MAX_UGC_CONTENT_BYTES);
+            }
+            return Err(format!("multi-file Workshop depot uploads ({} files) are not supported yet", files.len()));
+        }
+        Err("unsupported Workshop content path".into())
+    }
 }
 
 /// Create a new Workshop item (`ISteamUGC::CreateItem`) via `PublishedFile.Publish#1`.
@@ -496,6 +738,20 @@ mod tests {
         // Multi-file folder fails cleanly.
         std::fs::write(dir.join("extra.bin"), b"x").unwrap();
         assert!(resolve_content_file(&dir).is_err());
+
+        // Symlinks (leaf and ancestor) are rejected for uploads and skipped by dir_size.
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.pak");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(read_upload_file(&link, 1024).is_err());
+            let dir_link = std::env::temp_dir().join(format!("aurora-test-ugc-link-{}", std::process::id()));
+            let _ = std::fs::remove_file(&dir_link);
+            std::os::unix::fs::symlink(&dir, &dir_link).unwrap();
+            assert!(read_upload_file(&dir_link.join("mod.pak"), 1024).is_err());
+            assert_eq!(dir_size(&dir_link), 0);
+            let _ = std::fs::remove_file(&dir_link);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

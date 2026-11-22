@@ -8,6 +8,23 @@ use std::time::{Duration, Instant};
 
 pub const APP_EXE: &str = "aurora.exe";
 pub const UNINSTALL_EXE: &str = "uninstall.exe";
+const INSTALL_MANIFEST: &str = "aurora-files.txt";
+/// Known Aurora-owned files in the install directory (used when uninstalling
+/// installs created before `aurora-files.txt` existed, or as an explicit
+/// allowlist so uninstall never wipes unrelated user files).
+const OWNED_FILES: &[&str] = &[
+    APP_EXE,
+    OLD_EXE,
+    "steamclient.dll",
+    "steamclient32.dll",
+    "steamclient64.dll",
+    "steamhost.exe",
+    "SDL3.dll",
+    "SDL3-LICENSE.txt",
+    "aurora.log",
+    "steamclient.log",
+    INSTALL_MANIFEST,
+];
 const UNINSTALL_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Aurora";
 const APP_PATHS_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\aurora.exe";
 /// Names from before the rename to Aurora (0.7.2 and older): an update
@@ -182,16 +199,7 @@ pub fn uninstall(dir: &Path, data: bool, p: &Shared) -> Result<(), String> {
         g.fraction = 0.4;
         g.file = i18n::tr_dyn("Removing files…");
     });
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for e in entries.flatten() {
-            let path = e.path();
-            if path.file_name().is_some_and(|n| n == UNINSTALL_EXE) {
-                continue;
-            }
-            let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
-            log(p, format!("Delete file: {}", path.display()));
-        }
-    }
+    remove_aurora_files(dir, p);
     if data {
         set(p, |g| {
             g.fraction = 0.7;
@@ -202,7 +210,7 @@ pub fn uninstall(dir: &Path, data: bool, p: &Shared) -> Result<(), String> {
         }
     }
     // This program can't delete itself while running: a short-lived helper
-    // removes the folder a moment after we exit.
+    // removes uninstall.exe and deletes `dir` ONLY if it is now empty.
     schedule_delete(dir);
     log(p, "Completed".into());
     set(p, |g| {
@@ -213,6 +221,147 @@ pub fn uninstall(dir: &Path, data: bool, p: &Shared) -> Result<(), String> {
     Ok(())
 }
 
+fn is_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Validate that a relative file path from the embedded payload has only plain
+/// normal components with no traversal (`..`), root, drive prefix (`:`), or
+/// embedded separators.
+fn safe_manifest_rel(entry: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let trimmed = entry.trim();
+    if trimmed.is_empty() || trimmed.contains(['\0', '\\']) {
+        return None;
+    }
+    let rel = Path::new(trimmed);
+    if rel.is_absolute() {
+        return None;
+    }
+    let mut clean = PathBuf::new();
+    for c in rel.components() {
+        match c {
+            Component::Normal(part) => {
+                let s = part.to_str()?;
+                if s.is_empty() || s.contains(':') || s.contains('/') || s.contains('\\') {
+                    return None;
+                }
+                clean.push(part);
+            }
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!clean.as_os_str().is_empty()).then_some(clean)
+}
+
+/// Return `true` only if `dir` and all of its existing ancestors are real
+/// non-reparse directories (refuses symlinks and Windows NTFS junctions).
+fn dir_and_ancestors_are_real(dir: &Path) -> bool {
+    use std::path::Component;
+    let mut cur = PathBuf::new();
+    for comp in dir.components() {
+        cur.push(comp);
+        if matches!(comp, Component::Prefix(_) | Component::RootDir) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&cur) else {
+            return false;
+        };
+        if is_symlink_or_reparse(&meta) || !meta.is_dir() {
+            return false;
+        }
+    }
+    std::fs::symlink_metadata(dir)
+        .is_ok_and(|m| !is_symlink_or_reparse(&m) && m.is_dir())
+}
+
+/// Build the trusted allowlist of Aurora-owned relative paths strictly from
+/// `OWNED_FILES` plus entries embedded in this binary's own `PAYLOAD` (never
+/// from any writable file inside the install directory).
+fn trusted_owned_rels() -> Vec<PathBuf> {
+    let mut rels: Vec<PathBuf> = OWNED_FILES.iter().map(PathBuf::from).collect();
+    if let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(PAYLOAD)) {
+        for i in 0..zip.len() {
+            let Ok(f) = zip.by_index(i) else { continue };
+            if f.is_dir() {
+                continue;
+            }
+            let Some(enclosed) = f.enclosed_name() else { continue };
+            let Some(raw) = enclosed.to_str() else { continue };
+            if let Some(rel) = safe_manifest_rel(raw)
+                && rel.file_name().is_none_or(|n| !n.eq_ignore_ascii_case(UNINSTALL_EXE))
+                && !rels.contains(&rel)
+            {
+                rels.push(rel);
+            }
+        }
+    }
+    rels
+}
+
+/// Delete only Aurora-owned files inside `dir`, verifying no ancestor or target
+/// is a symlink/reparse point, and remove only now-empty subdirectories.
+fn remove_aurora_files(dir: &Path, p: &Shared) {
+    if !dir_and_ancestors_are_real(dir) {
+        return;
+    }
+    let rels = trusted_owned_rels();
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    for rel in rels {
+        // Walk ancestors under `dir` and refuse to traverse any symlink/reparse point.
+        let mut cur = dir.to_path_buf();
+        let mut safe = true;
+        let comps: Vec<_> = rel.components().collect();
+        for (i, comp) in comps.iter().enumerate() {
+            cur.push(comp);
+            match std::fs::symlink_metadata(&cur) {
+                Ok(m) if is_symlink_or_reparse(&m) => {
+                    safe = false;
+                    break;
+                }
+                Ok(m) if i + 1 < comps.len() && !m.is_dir() => {
+                    safe = false;
+                    break;
+                }
+                Ok(_) => {
+                    if i + 1 < comps.len() {
+                        subdirs.push(cur.clone());
+                    }
+                }
+                Err(_) => {
+                    safe = false;
+                    break;
+                }
+            }
+        }
+        if safe && let Ok(m) = std::fs::symlink_metadata(&cur) && !is_symlink_or_reparse(&m) && m.is_file() {
+            if std::fs::remove_file(&cur).is_ok() {
+                log(p, format!("Delete file: {}", cur.display()));
+            }
+        }
+    }
+    // Remove only empty Aurora-owned subdirectories (deepest first).
+    subdirs.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+    subdirs.dedup();
+    for sd in subdirs {
+        if let Ok(m) = std::fs::symlink_metadata(&sd) && !is_symlink_or_reparse(&m) && m.is_dir() {
+            let _ = std::fs::remove_dir(&sd);
+        }
+    }
+}
+
 /// Settings, sign-ins and caches the app keeps outside its folder.
 fn data_dirs() -> Vec<PathBuf> {
     // %APPDATA%\SteamInRust and %LOCALAPPDATA%\SteamInRust (the program
@@ -220,22 +369,56 @@ fn data_dirs() -> Vec<PathBuf> {
     ["APPDATA", "LOCALAPPDATA"].iter().filter_map(|v| std::env::var_os(v)).map(|b| PathBuf::from(b).join("SteamInRust")).collect()
 }
 
-/// Write `data` to `path`, also when an old copy is in the way.
+/// Write `data` to `path` safely without following or truncating pre-existing
+/// symlinks/reparse points, also when an old copy is in the way.
 fn replace_file(path: &Path, data: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("new");
-    {
-        let mut f = std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        f.write_all(data).map_err(|e| e.to_string())?;
-    }
-    if path.exists() {
-        let old = path.with_extension("old");
-        let _ = std::fs::remove_file(&old);
-        if std::fs::rename(path, &old).is_err() {
-            std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    if let Ok(m) = std::fs::symlink_metadata(path) {
+        if is_symlink_or_reparse(&m) {
+            return Err(format!("refusing to overwrite symlink/reparse point: {}", path.display()));
         }
-        let _ = std::fs::remove_file(&old);
     }
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("aurora");
+    let pid = std::process::id();
+    let (tmp, mut file) = loop {
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{stem}.{pid}.{seq}.new"));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(f) => break (candidate, f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", candidate.display())),
+        }
+    };
+    if let Err(e) = file.write_all(data) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    drop(file);
+    if let Ok(m) = std::fs::symlink_metadata(path) {
+        if is_symlink_or_reparse(&m) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("refusing to overwrite symlink/reparse point: {}", path.display()));
+        }
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let old = parent.join(format!(".{stem}.{pid}.{seq}.old"));
+        if std::fs::rename(path, &old).is_err() {
+            if let Err(e) = std::fs::remove_file(path) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!("{}: {e}", path.display()));
+            }
+        } else {
+            let _ = std::fs::remove_file(&old);
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {e}", path.display()));
+    }
+    Ok(())
 }
 
 /// Wait until `exe` isn't running (it can be renamed again).
@@ -422,29 +605,68 @@ fn shortcut(link: &Path, target: &Path) -> Result<(), String> {
 }
 
 fn shortcut_powershell(link: &Path, target: &Path) -> Result<(), String> {
-    let q = |p: &Path| p.display().to_string().replace('\'', "''");
     let dir = target.parent().unwrap_or(target);
-    let script = format!(
-        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{}');$s.TargetPath='{}';$s.WorkingDirectory='{}';$s.IconLocation='{},0';$s.Description='Aurora';$s.Save()",
-        q(link),
-        q(target),
-        q(dir),
-        q(target)
-    );
-    powershell(&script).map(|_| ())
+    // Pass paths strictly via environment variables (never interpolated into
+    // single-quoted PowerShell literals, which are vulnerable to Unicode smart-quote
+    // delimiter injection like U+2018/U+2019).
+    let script = "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:AURORA_PS_LINK);$s.TargetPath=$env:AURORA_PS_TARGET;$s.WorkingDirectory=$env:AURORA_PS_DIR;$s.IconLocation=($env:AURORA_PS_TARGET + ',0');$s.Description='Aurora';$s.Save()";
+    powershell_with_env(
+        script,
+        &[
+            ("AURORA_PS_LINK", link.as_os_str()),
+            ("AURORA_PS_TARGET", target.as_os_str()),
+            ("AURORA_PS_DIR", dir.as_os_str()),
+        ],
+    )
+    .map(|_| ())
 }
 
 fn schedule_delete(dir: &Path) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // Waits until this uninstaller has closed, then removes the folder.
+        let uninstaller = dir.join(UNINSTALL_EXE);
+        // Waits until this uninstaller exits, verifies neither `dir`, any of its
+        // ancestors, nor `uninstall.exe` is a reparse point/junction, deletes
+        // ONLY uninstall.exe, and removes `dir` ONLY if it is now empty (never `-Recurse`).
         let script = format!(
-            "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; for ($i = 0; $i -lt 20; $i++) {{ Start-Sleep -Milliseconds 500; Remove-Item -LiteralPath '{dir}' -Recurse -Force -ErrorAction SilentlyContinue; if (-not (Test-Path -LiteralPath '{dir}')) {{ break }} }}",
+            "function Test-NoReparse($p) {{ \
+               $cur = $p; \
+               while ($cur) {{ \
+                 $it = Get-Item -LiteralPath $cur -Force -ErrorAction Stop; \
+                 if ($it.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {{ return $false }}; \
+                 $parent = Split-Path -Path $cur -Parent; \
+                 if (-not $parent -or $parent -eq $cur) {{ break }}; \
+                 $cur = $parent \
+               }}; \
+               return $true \
+             }}; \
+             Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
+             for ($i = 0; $i -lt 20; $i++) {{ \
+               Start-Sleep -Milliseconds 500; \
+               try {{ \
+                 if (-not (Test-NoReparse $env:AURORA_PS_DIR)) {{ exit 0 }}; \
+                 if (Test-Path -LiteralPath $env:AURORA_PS_UNINSTALLER) {{ \
+                   $u = Get-Item -LiteralPath $env:AURORA_PS_UNINSTALLER -Force -ErrorAction Stop; \
+                   if ($u.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {{ exit 0 }}; \
+                   Remove-Item -LiteralPath $env:AURORA_PS_UNINSTALLER -Force -ErrorAction SilentlyContinue \
+                 }}; \
+                 if (-not (Test-Path -LiteralPath $env:AURORA_PS_UNINSTALLER)) {{ break }} \
+               }} catch {{ exit 0 }} \
+             }}; \
+             try {{ \
+               if (Test-NoReparse $env:AURORA_PS_DIR) {{ \
+                 [System.IO.Directory]::Delete($env:AURORA_PS_DIR, $false) \
+               }} \
+             }} catch {{}}",
             pid = std::process::id(),
-            dir = dir.display().to_string().replace('\'', "''")
         );
-        let _ = std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]).creation_flags(0x0800_0000 | 0x0000_0008).spawn();
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
+            .env("AURORA_PS_UNINSTALLER", &uninstaller)
+            .env("AURORA_PS_DIR", dir)
+            .creation_flags(0x0800_0000 | 0x0000_0008)
+            .spawn();
     }
     #[cfg(not(windows))]
     let _ = dir;
@@ -473,7 +695,10 @@ pub fn free_space(dir: &Path) -> Option<u64> {
         }
     }
     let drive = dir.components().next()?.as_os_str().to_string_lossy().trim_end_matches(':').to_string();
-    let out = powershell(&format!("(Get-PSDrive -Name '{}').Free", drive.replace('\'', ""))).ok()?;
+    if !drive.chars().all(|c| c.is_ascii_alphanumeric()) || drive.is_empty() {
+        return None;
+    }
+    let out = powershell_with_env("(Get-PSDrive -Name $env:AURORA_PS_DRIVE).Free", &[("AURORA_PS_DRIVE", std::ffi::OsStr::new(&drive))]).ok()?;
     out.trim().parse().ok()
 }
 
@@ -496,16 +721,26 @@ fn reg(args: &[&str]) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn powershell(script: &str) -> Result<String, String> {
+fn powershell_with_env(script: &str, envs: &[(&str, &std::ffi::OsStr)]) -> Result<String, String> {
     // Fail on any cmdlet/COM error (default Continue exits 0!) and ignore
     // invalid console handles in GUI builds with CREATE_NO_WINDOW.
     let script = format!("$ErrorActionPreference = 'Stop'; try {{ [Console]::OutputEncoding = [Text.Encoding]::UTF8 }} catch {{}}; {script}");
-    let out = hidden(std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script])).output().map_err(|e| e.to_string())?;
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = hidden(&mut cmd).output().map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
+}
+
+#[cfg(windows)]
+fn powershell(script: &str) -> Result<String, String> {
+    powershell_with_env(script, &[])
 }
 
 #[cfg(windows)]
@@ -702,5 +937,45 @@ mod win_shell {
             check("IPersistFile::Save", (pf_vtbl.save)(pf.0, link_w.as_ptr(), 1))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_manifest_rel_rejects_traversal_roots_and_drives() {
+        assert_eq!(safe_manifest_rel("aurora.exe"), Some(PathBuf::from("aurora.exe")));
+        assert_eq!(safe_manifest_rel("sub/file.dll"), Some(PathBuf::from("sub/file.dll")));
+        assert!(safe_manifest_rel("").is_none());
+        assert!(safe_manifest_rel("../evil.exe").is_none());
+        assert!(safe_manifest_rel("sub/../../evil.exe").is_none());
+        assert!(safe_manifest_rel("/etc/passwd").is_none());
+        assert!(safe_manifest_rel("C:evil.exe").is_none());
+        assert!(safe_manifest_rel("sub/C:evil.exe").is_none());
+        assert!(safe_manifest_rel("file:ads.txt").is_none());
+        assert!(safe_manifest_rel("a\\b.txt").is_none());
+    }
+
+    #[test]
+    fn remove_aurora_files_preserves_unrelated_user_files() {
+        let dir = std::env::temp_dir().join(format!("aurora-installer-sec04-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(APP_EXE), b"app").unwrap();
+        std::fs::write(dir.join("steamclient64.dll"), b"dll").unwrap();
+        std::fs::write(dir.join("aurora-files.txt"), b"user-important.docx\n").unwrap();
+        std::fs::write(dir.join("user-important.docx"), b"keep me").unwrap();
+
+        let shared = Shared::default();
+        remove_aurora_files(&dir, &shared);
+
+        assert!(!dir.join(APP_EXE).exists());
+        assert!(!dir.join("steamclient64.dll").exists());
+        assert!(!dir.join("aurora-files.txt").exists());
+        // Untrusted manifest entry must NOT authorize deleting unrelated files.
+        assert!(dir.join("user-important.docx").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
