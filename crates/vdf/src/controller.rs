@@ -84,7 +84,29 @@ impl LayoutDocument {
     }
 
     pub fn title(&self) -> Option<&str> {
-        self.mappings().str("title").filter(|title| !title.is_empty())
+        let raw = self.mappings().str("title").filter(|title| !title.is_empty())?;
+        if let Some(token) = raw.strip_prefix('#') {
+            if let Some(loc) = self.mappings().obj("localization") {
+                if let Some(val) = loc
+                    .obj("english")
+                    .and_then(|lang| lang.str(token))
+                    .filter(|s| !s.is_empty())
+                {
+                    return Some(val);
+                }
+                for (_, lang_val) in loc.iter() {
+                    if let Some(val) = lang_val
+                        .as_obj()
+                        .and_then(|lang| lang.str(token))
+                        .filter(|s| !s.is_empty())
+                    {
+                        return Some(val);
+                    }
+                }
+            }
+            return None;
+        }
+        Some(raw)
     }
 
     pub fn set_title(&mut self, title: &str) {

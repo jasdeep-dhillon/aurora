@@ -661,10 +661,42 @@ pub fn inspect_local(steam_root: &Path, account: u32, app_id: AppId, install_dir
     report
 }
 
+fn is_desktop_steam_template(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    !(lower.starts_with("controller_android_")
+        || lower.starts_with("controller_apple_")
+        || lower.starts_with("controller_mobile_touch_")
+        || lower.contains("touchscreen")
+        || lower.contains("webbrowser"))
+}
+
+fn steam_template_rank(file_name: &str) -> u8 {
+    let lower = file_name.to_ascii_lowercase();
+    if !lower.starts_with("controller_") {
+        0 // Generic root templates (gamepad_*.vdf, wasd.vdf)
+    } else if lower.starts_with("controller_xboxone_") || lower.starts_with("controller_xbox360_") {
+        1
+    } else if lower.starts_with("controller_generic_") {
+        2
+    } else if lower.starts_with("controller_ps5_") || lower.starts_with("controller_ps4_") {
+        3
+    } else if lower.starts_with("controller_switch_pro_") {
+        4
+    } else if lower.starts_with("controller_neptune_") {
+        5
+    } else {
+        6
+    }
+}
+
 pub fn managed_options(steam_root: &Path, account: u32, app_id: AppId) -> Vec<BindingOption> {
     let mut options = Vec::new();
-    let mut add = |choice: BindingChoice, origin| {
+    let mut seen_template_titles = std::collections::HashSet::new();
+    let mut add = |choice: BindingChoice, origin: BindingOrigin| {
         if let Some(resolved) = explicit_local(&choice, steam_root, account, app_id) {
+            if origin == BindingOrigin::Template && !seen_template_titles.insert(resolved.source.to_ascii_lowercase()) {
+                return;
+            }
             options.push(BindingOption {
                 choice, origin, controller_type: controller_type_in(&resolved.text), label: resolved.source,
                 path: resolved.path, workshop_id: resolved.workshop_id,
@@ -675,7 +707,13 @@ pub fn managed_options(steam_root: &Path, account: u32, app_id: AppId) -> Vec<Bi
         add(BindingChoice::Template(TemplateChoice::BuiltIn(template)), BindingOrigin::Template);
     }
     if let Ok(dir) = templates(steam_root) {
-        for name in files(&dir).into_iter().filter_map(|n| TemplateFileName::try_from(n).ok()) {
+        let mut names: Vec<_> = files(&dir)
+            .into_iter()
+            .filter(|n| is_desktop_steam_template(n))
+            .filter_map(|n| TemplateFileName::try_from(n).ok())
+            .collect();
+        names.sort_by(|a, b| steam_template_rank(&a.0).cmp(&steam_template_rank(&b.0)).then_with(|| a.0.cmp(&b.0)));
+        for name in names {
             add(BindingChoice::Template(TemplateChoice::Installed(name)), BindingOrigin::Template);
         }
     }
@@ -795,6 +833,38 @@ mod tests {
         assert_eq!(picked.active_path.as_ref(), Some(&game_vdf));
 
         set_app_binding(620, BindingChoice::Auto);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolves_localized_template_titles_and_deduplicates_steam_templates() {
+        let root = std::env::temp_dir().join(format!("sir-input-templates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let tdir = root.join("controller_base").join("templates");
+        std::fs::create_dir_all(&tdir).unwrap();
+        let make_tpl = |en_title: &str| {
+            format!(
+                r##""controller_mappings" {{ "version" "3" "title" "#Title" "controller_type" "controller_xboxone" "localization" {{ "english" {{ "title" "{en_title}" }} }} }}"##
+            )
+        };
+        // Duplicate of built-in "Gamepad" should be deduplicated out.
+        std::fs::write(tdir.join("controller_xboxone_gamepad_joystick.vdf"), make_tpl("Gamepad")).unwrap();
+        // Mobile template should be filtered out.
+        std::fs::write(tdir.join("controller_android_gamepad_fps.vdf"), make_tpl("Android Pad")).unwrap();
+        // Two vendor copies of Flick Stick should collapse to one clean localized entry.
+        std::fs::write(tdir.join("controller_ps4_gamepad_flickstick.vdf"), make_tpl("Gamepad with Flick Stick")).unwrap();
+        std::fs::write(tdir.join("controller_ps5_gamepad_flickstick.vdf"), make_tpl("Gamepad with Flick Stick")).unwrap();
+
+        let opts = managed_options(&root, 42, 553850);
+        let labels: Vec<&str> = opts.iter().map(|o| o.label.as_str()).collect();
+        assert!(!labels.iter().any(|l| l.contains("#Title")), "raw #Title leaked: {labels:?}");
+        assert!(!labels.iter().any(|l| *l == "Android Pad"), "mobile template leaked: {labels:?}");
+        assert_eq!(labels.iter().filter(|l| **l == "Gamepad").count(), 1, "duplicate Gamepad: {labels:?}");
+        assert_eq!(
+            labels.iter().filter(|l| **l == "Gamepad with Flick Stick").count(),
+            1,
+            "duplicate Flick Stick: {labels:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
