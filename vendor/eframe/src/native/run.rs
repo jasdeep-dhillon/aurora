@@ -89,6 +89,26 @@ fn with_event_loop<R>(
     })
 }
 
+/// Repaints for `ViewportId::ROOT` while it has no native `WindowId`.
+#[derive(Default)]
+struct DetachedRootRepaint {
+    deadline: Option<Instant>,
+}
+
+impl DetachedRootRepaint {
+    fn schedule(&mut self, when: Instant) {
+        self.deadline = Some(self.deadline.map_or(when, |previous| previous.min(when)));
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        self.deadline.take_if(|when| *when <= now).is_some()
+    }
+}
+
+fn sleeping_control_flow(deadline: Option<Instant>) -> ControlFlow {
+    deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
+}
+
 /// Wraps a [`WinitApp`] to implement [`ApplicationHandler`]. This handles redrawing, exit states, and
 /// some events, but otherwise forwards events to the [`WinitApp`].
 struct WinitAppWrapper<T: WinitApp> {
@@ -97,6 +117,7 @@ struct WinitAppWrapper<T: WinitApp> {
     /// Windows we asked to redraw, and when to give up waiting for their `RedrawRequested`.
     windows_redraw_deadlines: HashMap<WindowId, Instant>,
 
+    detached_root_repaint: DetachedRootRepaint,
     winit_app: T,
     return_result: Result<(), crate::Error>,
     run_and_return: bool,
@@ -107,6 +128,7 @@ impl<T: WinitApp> WinitAppWrapper<T> {
         Self {
             windows_next_repaint_times: HashMap::default(),
             windows_redraw_deadlines: HashMap::default(),
+            detached_root_repaint: DetachedRootRepaint::default(),
             winit_app,
             return_result: Ok(()),
             run_and_return,
@@ -164,6 +186,25 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                 );
                 event_result
             }
+            EventResult::RepaintDetachedRoot(when) => {
+                self.detached_root_repaint.schedule(when);
+                event_result
+            }
+            EventResult::RootDetached(window_id) => {
+                let next = self.windows_next_repaint_times.remove(&window_id);
+                let redraw_pending = self.windows_redraw_deadlines.remove(&window_id).is_some();
+                self.detached_root_repaint.schedule(if redraw_pending {
+                    Instant::now()
+                } else {
+                    next.unwrap_or_else(Instant::now)
+                });
+                event_result
+            }
+            EventResult::CloseAndExit => {
+                self.winit_app.save_and_destroy();
+                exit = true;
+                event_result
+            }
             EventResult::Save => {
                 save = true;
                 event_result
@@ -204,11 +245,29 @@ impl<T: WinitApp> WinitAppWrapper<T> {
             }
         }
 
-        self.check_redraw_requests(event_loop);
+        if !exit {
+            self.check_redraw_requests(event_loop);
+        }
     }
 
     fn check_redraw_requests(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+
+        let root = egui::ViewportId::ROOT;
+        if !self.winit_app.is_detached(root) {
+            if let Some(when) = self.detached_root_repaint.deadline.take()
+                && let Some(window_id) = self.winit_app.window_id_from_viewport_id(root)
+            {
+                self.windows_next_repaint_times
+                    .entry(window_id)
+                    .and_modify(|previous| *previous = (*previous).min(when))
+                    .or_insert(when);
+            }
+        } else if self.detached_root_repaint.take_due(now) {
+            let result = self.winit_app.run_detached(event_loop, root);
+            self.handle_event_result(event_loop, result);
+            return;
+        }
 
         let mut invisible_window_ids = Vec::new();
 
@@ -297,12 +356,10 @@ impl<T: WinitApp> WinitAppWrapper<T> {
             self.windows_next_repaint_times.values(),
             self.windows_redraw_deadlines.values(),
         )
-        .min()
-        .copied();
-        event_loop.set_control_flow(match next_repaint_time {
-            Some(next_repaint_time) => ControlFlow::WaitUntil(next_repaint_time),
-            None => ControlFlow::Wait,
-        });
+        .copied()
+        .chain(self.detached_root_repaint.deadline)
+        .min();
+        event_loop.set_control_flow(sleeping_control_flow(next_repaint_time));
     }
 }
 
@@ -386,6 +443,8 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
                                 when
                             };
                             Ok(EventResult::RepaintAt(window_id, when))
+                        } else if self.winit_app.is_detached(viewport_id) {
+                            Ok(EventResult::RepaintDetachedRoot(when))
                         } else {
                             Ok(EventResult::Wait)
                         }
@@ -408,7 +467,9 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
             log::trace!("Woke up to check next_repaint_time");
         }
 
-        self.check_redraw_requests(event_loop);
+        event_loop_context::with_event_loop_context(event_loop, || {
+            self.check_redraw_requests(event_loop);
+        });
     }
 
     fn window_event(
@@ -638,4 +699,27 @@ pub enum EframePumpStatus {
 
     /// The exit code for the application
     Exit(i32),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detached_root_deadline_wakes_once_then_idles() {
+        let now = Instant::now();
+        let soon = now + Duration::from_millis(20);
+        let later = soon + Duration::from_millis(20);
+        let mut repaint = DetachedRootRepaint::default();
+        repaint.schedule(later);
+        repaint.schedule(soon);
+        assert!(!repaint.take_due(now));
+        assert_eq!(
+            sleeping_control_flow(repaint.deadline),
+            ControlFlow::WaitUntil(soon)
+        );
+        assert!(repaint.take_due(soon));
+        assert!(!repaint.take_due(later));
+        assert_eq!(sleeping_control_flow(repaint.deadline), ControlFlow::Wait);
+    }
 }

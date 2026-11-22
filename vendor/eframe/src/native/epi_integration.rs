@@ -240,6 +240,7 @@ impl EpiIntegration {
             raw_display_handle: window.display_handle().map(|h| h.as_raw()),
             raw_window_handle: window.window_handle().map(|h| h.as_raw()),
             activation_token: None,
+            window_activation_token: None,
         };
 
         let icon = native_options
@@ -297,6 +298,24 @@ impl EpiIntegration {
     }
 
     /// If `true`, it is time to close the native window.
+    #[cfg(feature = "glow")]
+    pub fn set_root_window(&mut self, window: Option<Arc<winit::window::Window>>) {
+        use raw_window_handle::HandleError;
+
+        self.frame.raw_window_handle = window
+            .as_ref()
+            .ok_or(HandleError::Unavailable)
+            .and_then(|window| window.window_handle().map(|handle| handle.as_raw()));
+        self.frame.raw_display_handle = window
+            .as_ref()
+            .ok_or(HandleError::Unavailable)
+            .and_then(|window| window.display_handle().map(|handle| handle.as_raw()));
+        self.frame.window = window;
+        self.frame.activation_token = None;
+        self.pending_raw_input = egui::RawInput::default();
+        self.can_drag_window = false;
+    }
+
     pub fn should_close(&self) -> bool {
         self.close
     }
@@ -332,8 +351,8 @@ impl EpiIntegration {
     /// If `viewport_ui_cb` is None, we are in the root viewport and will call
     /// [`crate::App::logic`] and [`crate::App::ui`].
     ///
-    /// Only call this when the ui will actually be shown;
-    /// use [`Self::update_logic_only`] otherwise.
+    /// Also used for a detached root with auxiliary viewports.
+    /// Use [`Self::update_logic_only`] when no egui pass is needed.
     pub fn update(
         &mut self,
         app: &mut dyn epi::App,
