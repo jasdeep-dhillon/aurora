@@ -3,9 +3,8 @@
 #   - Linux: Aurora-Linux-x86_64.tar.gz (+ .sha256), an Arch package, a .deb, an RPM and an experimental Flatpak
 #   - Windows: the setup, a portable zip and SHA256SUMS.txt (the app's
 #     updater checks it)
-# in parallel, then tags the commit vX.Y.Z and publishes the release (with
-# the Windows files too when that build succeeded). Pushes that don't change
-# the version do nothing here (Build still checks them).
+# in parallel, then tags the commit vX.Y.Z and publishes the complete set.
+# Pushes without a version bump only need the separate Build workflow.
 #
 # Run it by hand (Actions → Release → Run workflow) to build the files; on
 # main it publishes only if the version isn't released yet. Run by hand on
@@ -183,9 +182,7 @@ jobs:
 
   publish:
     needs: [version, linux, windows]
-    # Publish a new version once Linux built, even if Windows didn't; a test
-    # build only with both (testing Windows is usually the point).
-    if: always() && needs.version.outputs.release == 'true' && needs.linux.result == 'success' && (needs.version.outputs.prerelease != 'true' || needs.windows.result == 'success')
+    if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
     steps:
       # For the changelog and Linux package recipes.
@@ -201,7 +198,6 @@ jobs:
       # Proton games on Linux run with the same steamclient DLLs as Windows
       # (see client::launch): put this commit's into the Linux archive.
       - name: Add the steamclient DLLs to the Linux archive
-        if: needs.windows.result == 'success'
         run: |
           name=Aurora-Linux-x86_64
           mkdir -p work && tar -C work -xzf dist/$name.tar.gz
@@ -217,7 +213,6 @@ jobs:
       # historical pkgrel mapping for releases with a numeric suffix.
       - name: Arch package
         id: arch
-        continue-on-error: true
         env:
           VERSION: ${{ needs.version.outputs.version }}
           TAG: ${{ needs.version.outputs.tag }}
@@ -243,11 +238,9 @@ jobs:
           echo "pkg=$pkg" >> "$GITHUB_OUTPUT"
 
       # A Debian/Ubuntu package of the same files (Ubuntu 22.04+, Mint,
-      # Pop!_OS…): built from the Ubuntu 22.04 binaries. Test builds too, so
-      # testers can try it. It never holds the release back.
+      # Pop!_OS…): built from the Ubuntu 22.04 binaries.
       - name: Debian package
         id: deb
-        continue-on-error: true
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
@@ -291,7 +284,6 @@ jobs:
 
       - name: Fedora package
         id: rpm
-        continue-on-error: true
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
@@ -309,11 +301,8 @@ jobs:
           cp "rpm/RPMS/x86_64/aurora-$rpm_version-1.x86_64.rpm" "dist/$pkg"
           echo "pkg=$pkg" >> "$GITHUB_OUTPUT"
 
-      # Like the other Linux packages, a Flatpak failure leaves the remaining
-      # assets publishable. Stage the bundle and checksum before adding them.
       - name: Flatpak bundle
         id: flatpak
-        continue-on-error: true
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
@@ -328,20 +317,32 @@ jobs:
           mv "flatpak-dist/$pkg" "flatpak-dist/$pkg.sha256" dist/
           echo "pkg=$pkg" >> "$GITHUB_OUTPUT"
 
+      - name: Verify release assets
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          ARCH_PKG: ${{ steps.arch.outputs.pkg }}
+          DEB_PKG: ${{ steps.deb.outputs.pkg }}
+          RPM_PKG: ${{ steps.rpm.outputs.pkg }}
+          FLATPAK_PKG: ${{ steps.flatpak.outputs.pkg }}
+        run: |
+          for file in "Aurora-Setup-$VERSION.exe" "Aurora-$VERSION-portable.zip" SHA256SUMS.txt \
+                      Aurora-Linux-x86_64.tar.gz Aurora-Linux-x86_64.tar.gz.sha256 \
+                      "$ARCH_PKG" PKGBUILD "$DEB_PKG" "$RPM_PKG" "$FLATPAK_PKG" "$FLATPAK_PKG.sha256"; do
+            if [ ! -s "dist/$file" ]; then
+              echo "::error::Missing or empty release asset: $file"
+              exit 1
+            fi
+          done
+
       - name: Release notes
         env:
           VERSION: ${{ needs.version.outputs.version }}
           TAG: ${{ needs.version.outputs.tag }}
-          WINDOWS: ${{ needs.windows.result }}
           PRERELEASE: ${{ needs.version.outputs.prerelease }}
           BRANCH: ${{ github.ref_name }}
-          ARCH: ${{ steps.arch.outcome }}
           ARCH_PKG: ${{ steps.arch.outputs.pkg }}
-          DEB: ${{ steps.deb.outcome }}
           DEB_PKG: ${{ steps.deb.outputs.pkg }}
-          RPM: ${{ steps.rpm.outcome }}
           RPM_PKG: ${{ steps.rpm.outputs.pkg }}
-          FLATPAK: ${{ steps.flatpak.outcome }}
           FLATPAK_PKG: ${{ steps.flatpak.outputs.pkg }}
         run: |
           asset="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG"
@@ -362,23 +363,11 @@ jobs:
             echo
             echo '| Platform / Build | Download | Notes |'
             echo '| --- | --- | --- |'
-            if [ "$WINDOWS" = "success" ]; then
-              echo "| Windows x86-64 | [Installer]($asset/Aurora-Setup-$VERSION.exe) · [Portable ZIP]($asset/Aurora-$VERSION-portable.zip) · [SHA-256]($asset/SHA256SUMS.txt) | Run the installer or extract the ZIP |"
-            else
-              echo '| Windows x86-64 | Unavailable | The Windows CI build failed |'
-            fi
-            if [ "$DEB" = "success" ]; then
-              echo "| Debian / Ubuntu / Mint | [.deb]($asset/$DEB_PKG) | Install with apt |"
-            fi
-            if [ "$ARCH" = "success" ]; then
-              echo "| Arch Linux | [.pkg.tar.zst]($asset/$ARCH_PKG) · [PKGBUILD]($asset/PKGBUILD) | Install with pacman -U |"
-            fi
-            if [ "$RPM" = "success" ]; then
-              echo "| Fedora | [.rpm]($asset/$RPM_PKG) | Install with dnf |"
-            fi
-            if [ "$FLATPAK" = "success" ]; then
-              echo "| Linux x86-64 (experimental) | [.flatpak]($asset/$FLATPAK_PKG) · [SHA-256]($asset/$FLATPAK_PKG.sha256) | Install with flatpak install --user; use a native package for Steam and Proton integration |"
-            fi
+            echo "| Windows x86-64 | [Installer]($asset/Aurora-Setup-$VERSION.exe) · [Portable ZIP]($asset/Aurora-$VERSION-portable.zip) · [SHA-256]($asset/SHA256SUMS.txt) | Run the installer or extract the ZIP |"
+            echo "| Debian / Ubuntu / Mint | [.deb]($asset/$DEB_PKG) | Install with apt |"
+            echo "| Arch Linux | [.pkg.tar.zst]($asset/$ARCH_PKG) · [PKGBUILD]($asset/PKGBUILD) | Install with pacman -U |"
+            echo "| Fedora | [.rpm]($asset/$RPM_PKG) | Install with dnf |"
+            echo "| Linux x86-64 (experimental) | [.flatpak]($asset/$FLATPAK_PKG) · [SHA-256]($asset/$FLATPAK_PKG.sha256) | Install with flatpak install --user; use a native package for Steam and Proton integration |"
             echo "| Generic Linux x86-64 | [.tar.gz]($asset/Aurora-Linux-x86_64.tar.gz) · [SHA-256]($asset/Aurora-Linux-x86_64.tar.gz.sha256) | Extract and launch aurora |"
             echo
           } > notes.md
@@ -393,5 +382,6 @@ jobs:
           prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
           make_latest: ${{ needs.version.outputs.prerelease == 'true' && 'false' || 'true' }}
           files: dist/*
+          fail_on_unmatched_files: true
           body_path: notes.md
           generate_release_notes: true

@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.0.0-rc3](https://github.com/mollie2999/Aurora/compare/v1.0.0-rc2...v1.0.0-rc3) (2026-11-23)
+
+### New
+
+* **Big Picture mode:** browse your library and the Store, watch trailers, install and launch games, manage downloads, and use Friends, chat, and settings in a fullscreen interface designed for controllers. Open it from the toolbar, the app menu, the Guide button while Aurora is focused, or `aurora --bigpicture`. ([Aurora port](https://github.com/mollie2999/Aurora/commit/8dd8a67), [focus and navigation](https://github.com/mollie2999/Aurora/commit/7a069b2), [artwork and trailers](https://github.com/mollie2999/Aurora/commit/78d433e))
+* **Steam Input layouts:** choose a per-game template, browse Steam Community Layouts, and edit bindings in a visual editor. The in-game overlay adds a controller panel, and supported games can read active bindings through Steam Input. ([Layout editor and game integration](https://github.com/mollie2999/Aurora/commit/8364e9e), [community layout search](https://github.com/mollie2999/Aurora/commit/5b40a17))
+* **Wayland tray support:** Hide to Tray now removes the window from the compositor. Restoring it uses a Wayland activation token when available, and hiding releases UI resources. ([Tray changes](https://github.com/mollie2999/Aurora/commit/ad93260))
+* **Experimental Linux Flatpak:** Aurora now ships a standalone x86-64 bundle. For host Steam, Proton, and in-game overlay integration, use one of the native packages. ([Flatpak packaging](https://github.com/mollie2999/Aurora/commit/e381b26))
+
+### Fixes
+
+* **Controllers on Windows:** improved XInput and Steam Input initialization, including controller handoff for games launched through the headless Steam host. ([Controller initialization](https://github.com/mollie2999/Aurora/commit/aaefa8c), [headless Steam Input routing](https://github.com/mollie2999/Aurora/commit/60a0ed9))
+* **Linux Vulkan overlay:** improved mouse and keyboard capture under X11 and made input release safer when the overlay closes or loses focus. The renderer now keeps cleared textures alive until pending GPU work has finished. ([Input capture](https://github.com/mollie2999/Aurora/commit/917cdcf), [texture lifetime](https://github.com/mollie2999/Aurora/commit/11048c0))
+
+### Performance
+
+* Reduced work in the Vulkan and D3D12 overlays with bounded queues, less Vulkan lock contention, and a faster D3D12 command-queue path. Moved screenshot processing off the UI thread and reduced work in theme rendering and large file copies. ([Overlay changes](https://github.com/mollie2999/Aurora/commit/5616b66), [UI and storage changes](https://github.com/mollie2999/Aurora/commit/76b362f))
+
+### Security and hardening
+
+* Hardened overlay memory handling, installer and backup paths, Steam Input data, Workshop content, theme packages, social images and custom artwork, and game-server queries. ([Overlay](https://github.com/mollie2999/Aurora/pull/69), [client and installer](https://github.com/mollie2999/Aurora/pull/70), [themes, social, and game servers](https://github.com/mollie2999/Aurora/pull/72))
+
+### Credits
+
+* Thanks to **[@madonchik123](https://github.com/madonchik123)** for the SteamInRust work ported into this release. That includes [Big Picture mode](https://github.com/madonchik123/SteamInRust/commit/b1077e4), [friend pages](https://github.com/madonchik123/SteamInRust/commit/a6e9336), [Store trailers and reviews, the install screen, and library filters](https://github.com/madonchik123/SteamInRust/commit/64f2913), [chat and screenshot navigation](https://github.com/madonchik123/SteamInRust/commit/2bf61d4), the [Backspace fix](https://github.com/madonchik123/SteamInRust/commit/49d9ec6), and Big Picture changes adapted from the [chat and settings update](https://github.com/madonchik123/SteamInRust/commit/98c0c70) and [screenshot manager update](https://github.com/madonchik123/SteamInRust/commit/d7bcba4).
+
 ## [1.0.0-rc2](https://github.com/mollie2999/Aurora/compare/v1.0.0-rc1...v1.0.0-rc2) (2026-11-22)
 
 ### Faster
