@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Aurora Steam Client
+Comment=An unofficial native Steam desktop client
+Exec=aurora
+Icon=io.github.mollie2999.Aurora
+Terminal=false
+Categories=Game;
+StartupWMClass=SteamInRust

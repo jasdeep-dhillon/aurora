@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.mollie2999.Aurora</id>
+  <name>Aurora Steam Client</name>
+  <summary>Browse your Steam library with a native client</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="io.github.mollie2999">
+    <name>Aurora contributors</name>
+  </developer>
+  <description>
+    <p>Aurora is an unofficial Steam desktop client written in Rust. Browse the store and your library in a native interface.</p>
+    <p>This experimental sandboxed build is intended for the desktop client. Use a native Aurora package for integration with Steam and Proton.</p>
+  </description>
+  <launchable type="desktop-id">io.github.mollie2999.Aurora.desktop</launchable>
+  <url type="homepage">https://mollie2999.github.io/Aurora/</url>
+  <url type="bugtracker">https://github.com/mollie2999/Aurora/issues</url>
+  <content_rating type="oars-1.1" />
+</component>
