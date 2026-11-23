@@ -23,8 +23,8 @@ build="$work/build"
 flatpak build-init --arch=x86_64 "$build" "$id" "$platform" "$platform" "$branch"
 install -Dm755 "$src/aurora" "$build/files/bin/aurora"
 install -Dm644 "$src/LICENSE" "$build/files/share/licenses/$id/LICENSE"
-install -Dm644 "$root/crates/ui/assets/aurora.svg" \
-    "$build/files/share/icons/hicolor/scalable/apps/$id.svg"
+install -Dm644 "$src/icon-256.png" \
+    "$build/files/share/icons/hicolor/256x256/apps/$id.png"
 install -Dm644 "$root/packaging/flatpak/$id.desktop" \
     "$build/files/share/applications/$id.desktop"
 install -Dm644 "$root/packaging/flatpak/$id.metainfo.xml" \
