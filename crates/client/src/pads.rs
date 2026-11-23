@@ -664,6 +664,8 @@ pub fn stop() {}
 
 #[cfg(windows)]
 pub use platform::{start, stop};
+#[cfg(windows)]
+pub(crate) use platform::{native_xinput_slots, needs_steam_input_client};
 
 #[cfg(windows)]
 mod platform {
@@ -754,8 +756,8 @@ mod platform {
         }
     }
 
-    /// Count how many real native XInput slots (0..4) are currently connected.
-    fn count_real_xinput_slots() -> usize {
+    /// Bit i is set when XInputGetState succeeds for player index i.
+    pub(crate) fn native_xinput_slots() -> Option<u8> {
         type GetState = unsafe extern "system" fn(u32, *mut [u8; 16]) -> u32;
         #[link(name = "kernel32")]
         unsafe extern "system" {
@@ -763,7 +765,7 @@ mod platform {
             fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
         }
         static GET_STATE: OnceLock<Option<GetState>> = OnceLock::new();
-        let Some(&get) = GET_STATE
+        let get = GET_STATE
             .get_or_init(|| {
                 for dll in ["xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"] {
                     let wide: Vec<u16> = dll.encode_utf16().chain([0]).collect();
@@ -778,18 +780,43 @@ mod platform {
                 }
                 None
             })
-            .as_ref()
-        else {
-            return 0;
-        };
-        let mut count = 0usize;
+            .as_ref()?;
+        let mut slots = 0u8;
         for i in 0..4u32 {
             let mut buf = [0u8; 16];
             if unsafe { get(i, &mut buf) } == 0 {
-                count += 1;
+                slots |= 1 << i;
             }
         }
-        count
+        Some(slots)
+    }
+
+    pub(crate) fn needs_steam_input_client(app_override: u8) -> bool {
+        let families = settings().families;
+        if !super::resolve_steam_input(app_override, &families).enabled {
+            return false;
+        }
+        if app_override == 1 || (families.xbox && native_xinput_slots().is_some_and(|slots| slots != 0)) {
+            return true;
+        }
+        // WinMM can see OEM controllers whose drivers expose no XInput slot.
+        // Its position API does not identify a family, so only use this
+        // fallback when every family is enabled.
+        if families.bitmask() != shm::FAMILY_ALL {
+            return false;
+        }
+        #[link(name = "winmm")]
+        unsafe extern "system" {
+            fn joyGetNumDevs() -> u32;
+            fn joyGetPosEx(id: u32, info: *mut [u32; 13]) -> u32;
+        }
+        (0..unsafe { joyGetNumDevs() }).any(|id| {
+            // JOYINFOEX has thirteen DWORDs, starting with dwSize and dwFlags.
+            let mut info = [0u32; 13];
+            info[0] = size_of_val(&info) as u32;
+            info[1] = 1; // JOY_RETURNX
+            unsafe { joyGetPosEx(id, &mut info) == 0 }
+        })
     }
 
     fn run_sdl_loop(sdl: &'static Sdl, shared: Option<&'static Shared>) {
@@ -834,7 +861,7 @@ mod platform {
             let force = FORCE_RESCAN.swap(false, Ordering::AcqRel);
             if force || scanned.is_none_or(|t| t.elapsed() > Duration::from_millis(500)) {
                 scanned = Some(Instant::now());
-                real_xinput_count = count_real_xinput_slots();
+                real_xinput_count = native_xinput_slots().unwrap_or_default().count_ones() as usize;
                 let mut n = 0;
                 let ids = unsafe { (sdl.get_gamepads)(&mut n) };
                 if !ids.is_null() {
