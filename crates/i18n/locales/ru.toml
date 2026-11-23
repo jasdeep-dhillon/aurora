@@ -1714,7 +1714,7 @@
 "Home" = "Главная"
 "My profile" = "Мой профиль"
 "Start games through the official Steam client" = "Запускать игры через официальный клиент Steam"
-"Off: games start here, natively or with Proton, and only anti-cheat games use Steam. Turn on for games that won't run without Steam." = "Выкл.: игры запускаются здесь, нативно или через Proton, и только игры с античитом используют Steam. Включите для игр, которые не запускаются без Steam."
+"Aurora uses the windowless Steam host by default. Turn this on for games that need the official Steam client." = "По умолчанию Aurora использует хост Steam без окна. Включите эту настройку для игр, которым нужен официальный клиент Steam."
 
 # Steam-DRM games on the headless host / background Steam (Linux & Windows)
 "Your Steam (no window)" = "Ваш Steam (без окна)"
@@ -1731,15 +1731,10 @@
 "Which Proton runs your Windows games (including Steam-DRM games). Automatic follows Steam's own choice per game." = "Какой Proton запускает ваши игры для Windows (включая игры с Steam DRM). «Автоматически» следует выбору самого Steam для каждой игры."
 
 # --- Settings > Library: experimental anti-cheat games on the headless host ---
-"Experimental" = "Экспериментально"
-"Run anti-cheat games without the official Steam client" = "Запускать игры с античитом без официального клиента Steam"
-"Games with Easy Anti-Cheat, BattlEye or another anti-cheat start on the windowless Steam host, like Steam-DRM games, instead of the official client. Close the official Steam first." = "Игры с Easy Anti-Cheat, BattlEye или другим античитом запускаются на фоновом Steam без окна, как игры с Steam DRM, а не через официальный клиент. Сначала закройте официальный Steam."
 "Play anti-cheat games at your own risk" = "Игры с античитом — на свой страх и риск"
-"This is experimental. Anti-cheat games normally start through the official Steam client; with this on, they start on Aurora's windowless Steam host instead." = "Это экспериментальная функция. Обычно игры с античитом запускаются через официальный клиент Steam; если она включена, они запускаются на фоновом Steam без окна от Aurora."
+"{name} uses anti-cheat. Aurora will start it through the windowless Steam host." = "В игре {name} используется античит. Aurora запустит её через хост Steam без окна."
 "The anti-cheat may see this as an unsupported setup. That can mean a kick, a game ban or a Steam (VAC) ban on your account, and bans are usually permanent." = "Античит может счесть такую конфигурацию неподдерживаемой. Это может привести к исключению из игры, блокировке в игре или блокировке Steam (VAC) вашей учётной записи, а блокировки обычно бессрочные."
 "Some games won't start, or can't go online, without the official client." = "Некоторые игры без официального клиента не запустятся или не смогут подключиться к сети."
-"Neither Valve nor the game's developer supports this. Don't use it on an account you can't afford to lose." = "Ни Valve, ни разработчик игры это не поддерживают. Не используйте это на учётной записи, которую не готовы потерять."
-"I understand the risks, turn it on" = "Я понимаю риски, включить"
 "Skip" = "Пропустить"
 "Start the game now; it compiles what's missing while you play" = "Запустить игру сейчас; недостающее скомпилируется во время игры"
 "Compiling shaders… {pct}%" = "Компиляция шейдеров… {pct}%"

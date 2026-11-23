@@ -1,19 +1,7 @@
-//! Starting installed games, in one of three ways:
-//!
-//! - **Our steamclient** ([`LaunchMode::Aurora`]): games without
-//!   anti-cheat get Aurora's own `steamclient` DLL (crates/steamclient)
-//!   through the registry value Steam itself uses, so their Steam API calls
-//!   (user, achievements, cloud files…) are answered by this app.
-//! - **Official Steam** ([`LaunchMode::OfficialSteam`]): games with
-//!   anti-cheat (VAC, Easy Anti-Cheat, BattlEye, …) never get our DLL; that
-//!   would keep the anti-cheat from running. Valve's client is started
-//!   silently and runs the game, so Steam and the anti-cheat work normally.
-//! - **No Steam** ([`LaunchMode::NoSteam`]): when our DLL can't serve the
-//!   game (32-bit games, DLL missing), it starts plain, as before.
-//!
-//! On Linux, Windows games run with Proton get our DLL too, inside their
-//! Wine prefix (see [`linux::client_shim`]); native Linux games start
-//! without Steam features for now.
+//! Starting installed games through the user's windowless Steam host by default.
+//! The official client remains available for compatibility. When Steam is
+//! unavailable, compatible games can still use Aurora's steamclient or start
+//! without Steam features.
 
 use model::{AppId, OwnedApp};
 use std::path::{Path, PathBuf};
@@ -25,16 +13,19 @@ use std::time::{Duration, Instant};
 pub enum LaunchMode {
     /// Steam features come from Aurora's own steamclient.
     Aurora,
-    /// Runs through the official Steam client because of its anti-cheat
-    /// (named in `anti_cheat`).
+    /// Runs through the official Steam client. `anti_cheat` names the reason.
     OfficialSteam { anti_cheat: String },
-    /// Steam-DRM games: runs on a headless instance of the user's own Steam
-    /// engine (no steamui/CEF). The game reaches it through Valve's own
-    /// steamclient (on Linux, through Proton's lsteamclient), and the engine
-    /// answers SteamStub's check itself.
-    HeadlessHost,
+    /// Runs on a headless instance of the user's own Steam engine.
+    HeadlessHost { steam_drm: bool },
     /// Starts without Steam features; `reason` says why.
     NoSteam { reason: String },
+}
+
+impl LaunchMode {
+    /// Keep Aurora's Cloud and Workshop sync for ordinary games on the host.
+    pub(crate) fn uses_aurora_sync(&self) -> bool {
+        !matches!(self, Self::OfficialSteam { .. } | Self::HeadlessHost { steam_drm: true })
+    }
 }
 
 /// How Play will start this game. Reads the install folder (anti-cheat
@@ -44,49 +35,47 @@ pub fn mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
 }
 
 pub(crate) fn mode_for_launch(app: &OwnedApp, install_dir: &Path, controller: u8) -> LaunchMode {
+    mode_with_host(app, install_dir, controller, headless_host_available() && !official_steam_open())
+}
+
+pub(crate) fn mode_with_host(app: &OwnedApp, install_dir: &Path, controller: u8, host_ready: bool) -> LaunchMode {
     #[cfg(not(windows))]
     let _ = controller;
-    if let Some(ac) = anti_cheat(app, install_dir) {
-        // Experimental (Settings > Library): the headless host instead. It is
-        // the user's own Steam engine, so the game sees real Steam.
-        if anti_cheat_headless() && headless_host_available() && !official_steam_open() {
-            return LaunchMode::HeadlessHost;
+    #[cfg(not(windows))]
+    let force_official = prefer_official();
+    #[cfg(windows)]
+    let force_official = false;
+
+    let executable = launch_exe(app, install_dir).filter(|path| path.is_file());
+    let use_host = host_ready && !force_official && executable.is_some();
+    if !use_host {
+        if let Some(ac) = anti_cheat(app, install_dir) {
+            return LaunchMode::OfficialSteam { anti_cheat: ac };
         }
-        return LaunchMode::OfficialSteam { anti_cheat: ac };
     }
-    // Steam DRM checks with Valve's client before the game even starts
-    // ("Application load error 3:0000065432" with ours). A headless instance
-    // of the user's own Steam engine answers it; when that isn't available,
-    // or the official client is already open (only one can run), the
-    // official client runs it.
-    if steam_drm_marked(app.app_id) || launch_exe(app, install_dir).is_some_and(|exe| has_steam_drm(&exe)) {
-        if headless_host_available() && !official_steam_open() {
-            #[cfg(windows)]
-            {
-                // The headless host has no Steam Input frontend. Let Steam
-                // start the game with its own controller configuration.
-                let input = crate::pads::effective_controller_override(app.app_id, controller);
-                if crate::pads::needs_steam_input_client(input) && steam_exe().is_some() {
-                    return LaunchMode::OfficialSteam { anti_cheat: STEAM_DRM.into() };
-                }
+    let steam_drm = steam_drm_marked(app.app_id) || executable.is_some_and(|exe| has_steam_drm(&exe));
+    if use_host {
+        #[cfg(windows)]
+        if steam_drm {
+            // The headless host has no Steam Input frontend. Let Steam
+            // start DRM games that need its controller configuration.
+            let input = crate::pads::effective_controller_override(app.app_id, controller);
+            if crate::pads::needs_steam_input_client(input) && steam_exe().is_some() {
+                return LaunchMode::OfficialSteam { anti_cheat: STEAM_DRM.into() };
             }
-            return LaunchMode::HeadlessHost;
         }
+        return LaunchMode::HeadlessHost { steam_drm };
+    }
+    if steam_drm {
         return LaunchMode::OfficialSteam { anti_cheat: STEAM_DRM.into() };
     }
-    // Linux: Aurora starts the game itself, natively or with Proton.
-    // The official client only for anti-cheat (above), when the player asks
-    // for it, or when there's no way to run the game here.
     #[cfg(not(windows))]
     {
-        if prefer_official() {
+        if force_official {
             return LaunchMode::OfficialSteam { anti_cheat: "Steam for Linux".into() };
         }
         return match linux::plan(app, install_dir) {
             Ok(p) if linux::client_dll(&p, install_dir).is_some() => LaunchMode::Aurora,
-            // Native Linux games load Valve's own steamclient.so, which needs
-            // a running Steam to connect to: the headless host is one.
-            Ok(p) if !p.uses_proton() && headless_host_available() && !official_steam_open() => LaunchMode::HeadlessHost,
             Ok(p) => LaunchMode::NoSteam { reason: p.describe() },
             Err(_) => LaunchMode::OfficialSteam { anti_cheat: "Steam for Linux".into() },
         };
@@ -211,8 +200,8 @@ const ANTI_CHEAT_MARKERS: &[(&str, &str)] = &[
 /// Steam category for "Valve Anti-Cheat enabled".
 const CATEGORY_VAC: u32 = 8;
 
-/// The anti-cheat this game uses, if any. Unsure (folder unreadable) counts
-/// as anti-cheat: running it through Steam is the safe side.
+/// The anti-cheat this game uses, if any. An unreadable install folder
+/// is treated conservatively as a possible anti-cheat install.
 pub fn anti_cheat(app: &OwnedApp, install_dir: &Path) -> Option<String> {
     if app.categories.contains(&CATEGORY_VAC) {
         return Some("Valve Anti-Cheat".into());
@@ -1140,7 +1129,7 @@ fn steamhost_bin() -> Option<PathBuf> {
     beside.is_file().then_some(beside)
 }
 
-/// The headless host can run a Steam-DRM game here: we have the helper and a
+/// The headless host can run games here: we have the helper and a
 /// Steam install with the engine it loads.
 fn headless_host_available() -> bool {
     steamhost_bin().is_some() && local::find_steam_root().is_some_and(|r| r.join(ENGINE_LIB).is_file())
@@ -1244,22 +1233,24 @@ pub fn apply_steam_prefs() {
 struct HostCount;
 
 impl HostCount {
-    fn new() -> HostCount {
-        HOSTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        HostCount
+    fn acquire() -> Result<Self, &'static str> {
+        HOSTS
+            .compare_exchange(0, 1, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
+            .map(|_| Self)
+            .map_err(|_| "Close the game using the windowless Steam host before starting another.")
     }
 }
 
 impl Drop for HostCount {
     fn drop(&mut self) {
-        HOSTS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        HOSTS.store(0, std::sync::atomic::Ordering::Release);
     }
 }
 
 /// Printed by `steamhost serve` once it is signed in and serving.
 const STEAMHOST_READY: &str = "STEAMHOST-READY";
 
-/// Run a Steam-DRM game on a headless instance of the user's own Steam engine.
+/// Run a game on a headless instance of the user's own Steam engine.
 ///
 /// Starts `steamhost serve` (signed in with the user's refresh token, fed on
 /// stdin — never argv/env), waits until it is ready, launches the game through
@@ -1294,8 +1285,8 @@ pub fn run_through_host(
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
+    let _counted = HostCount::acquire()?;
     let mut host = cmd.spawn().map_err(|e| format!("couldn't start the headless Steam host: {e}"))?;
-    let _counted = HostCount::new();
 
     // Its diagnostics go to our log; the last line explains a failure.
     let last_err = std::sync::Arc::new(Mutex::new(String::new()));
@@ -1999,28 +1990,31 @@ static PREFER_OFFICIAL: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 /// Linux: start every game through the official Steam client (for games
 /// that refuse to run without it). Off by default.
 pub fn set_prefer_official(on: bool) {
-    PREFER_OFFICIAL.store(on, std::sync::atomic::Ordering::Relaxed);
+    if PREFER_OFFICIAL.swap(on, std::sync::atomic::Ordering::Relaxed) != on {
+        *MODE_CACHE.lock().unwrap() = None;
+    }
 }
 
 fn prefer_official() -> bool {
     PREFER_OFFICIAL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-static ANTI_CHEAT_HEADLESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ANTI_CHEAT_ACKNOWLEDGED: Mutex<std::collections::BTreeSet<AppId>> = Mutex::new(std::collections::BTreeSet::new());
 
-/// Experimental: start anti-cheat games (EAC, BattlEye…) on the headless host
-/// instead of the official client. Off by default; the player accepts the
-/// risks in Settings > Library.
-pub fn set_anti_cheat_headless(on: bool) {
-    if ANTI_CHEAT_HEADLESS.swap(on, std::sync::atomic::Ordering::Relaxed) != on {
-        // Cached modes would keep the old choice for up to a minute.
-        *MODE_CACHE.lock().unwrap() = None;
-    }
-    crate::preferences_changed();
+pub fn set_anti_cheat_acknowledged(apps: std::collections::BTreeSet<AppId>) {
+    *ANTI_CHEAT_ACKNOWLEDGED.lock().unwrap() = apps;
 }
 
-pub fn anti_cheat_headless() -> bool {
-    ANTI_CHEAT_HEADLESS.load(std::sync::atomic::Ordering::Relaxed)
+pub fn acknowledge_anti_cheat(app_id: AppId) {
+    ANTI_CHEAT_ACKNOWLEDGED.lock().unwrap().insert(app_id);
+}
+
+pub(crate) fn needs_anti_cheat_warning(app: &OwnedApp, install_dir: &Path, mode: &LaunchMode) -> bool {
+    if !matches!(mode, LaunchMode::HeadlessHost { .. }) {
+        return false;
+    }
+    let acknowledged = ANTI_CHEAT_ACKNOWLEDGED.lock().unwrap().contains(&app.app_id);
+    !acknowledged && anti_cheat(app, install_dir).is_some()
 }
 
 /// Linux: a Proton/compat tool (its internal name) the player chose in
@@ -2164,7 +2158,7 @@ fn prefix_knows_client(app: &OwnedApp, install_dir: &Path) -> bool {
 /// nothing to do.
 #[cfg(not(windows))]
 pub(crate) fn prefix_setup(app: &OwnedApp, install_dir: &Path) -> Option<Command> {
-    if mode(app, install_dir) != LaunchMode::Aurora || prefix_knows_client(app, install_dir) {
+    if prefix_knows_client(app, install_dir) {
         return None;
     }
     let mut cmd = in_prefix(app, install_dir, "cmd", &["/c".into(), "exit".into()])?;
@@ -2910,6 +2904,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn defaults_to_headless_for_regular_and_anti_cheat_games() {
+        let dir = std::env::temp_dir().join(format!("aurora-headless-default-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (executable, os) = if cfg!(windows) { ("game.exe", "windows") } else { ("game", "linux") };
+        std::fs::write(dir.join(executable), b"").unwrap();
+        let mut app = OwnedApp {
+            app_id: 4_000_000_221,
+            launch: vec![model::LaunchOption {
+                executable: executable.into(),
+                os_list: os.into(),
+                arguments: String::new(),
+                working_dir: String::new(),
+                description: String::new(),
+            }],
+            ..Default::default()
+        };
+        let regular = mode_with_host(&app, &dir, 2, true);
+        app.categories.push(CATEGORY_VAC);
+        let protected = mode_with_host(&app, &dir, 2, true);
+        let fallback = mode_with_host(&app, &dir, 2, false);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(regular, LaunchMode::HeadlessHost { steam_drm: false });
+        assert_eq!(protected, LaunchMode::HeadlessHost { steam_drm: false });
+        assert_eq!(fallback, LaunchMode::OfficialSteam { anti_cheat: "Valve Anti-Cheat".into() });
+    }
+
+    #[test]
+    fn anti_cheat_acknowledgement_is_per_game() {
+        let dir = std::env::temp_dir().join(format!("aurora-anti-cheat-warning-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = OwnedApp { app_id: 4_000_000_222, ..Default::default() };
+        let host = LaunchMode::HeadlessHost { steam_drm: false };
+        assert!(!needs_anti_cheat_warning(&app, &dir, &host));
+
+        app.categories.push(CATEGORY_VAC);
+        let steam = LaunchMode::OfficialSteam { anti_cheat: "Valve Anti-Cheat".into() };
+        assert!(!needs_anti_cheat_warning(&app, &dir, &steam));
+        assert!(needs_anti_cheat_warning(&app, &dir, &host));
+        assert!(needs_anti_cheat_warning(&app, &dir, &host));
+        acknowledge_anti_cheat(app.app_id);
+        assert!(!needs_anti_cheat_warning(&app, &dir, &host));
+
+        app.app_id += 1;
+        assert!(needs_anti_cheat_warning(&app, &dir, &host));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A minimal PE file with the given section names.
     fn pe_with_sections(names: &[&str]) -> Vec<u8> {
         let mut f = vec![0u8; 64];
@@ -2960,12 +3002,12 @@ mod tests {
             ..Default::default()
         };
         let steam = LaunchMode::OfficialSteam { anti_cheat: STEAM_DRM.into() };
-        assert_eq!(mode(&app, &dir), if connected { steam.clone() } else { LaunchMode::HeadlessHost });
+        assert_eq!(mode(&app, &dir), if connected { steam.clone() } else { LaunchMode::HeadlessHost { steam_drm: true } });
         assert_eq!(mode_for_launch(&app, &dir, 1), steam);
-        assert_eq!(mode_for_launch(&app, &dir, 2), LaunchMode::HeadlessHost);
+        assert_eq!(mode_for_launch(&app, &dir, 2), LaunchMode::HeadlessHost { steam_drm: true });
         crate::pads::set_app_controller(app.app_id, 1);
         assert_eq!(mode(&app, &dir), steam);
-        assert_eq!(mode_for_launch(&app, &dir, 2), LaunchMode::HeadlessHost);
+        assert_eq!(mode_for_launch(&app, &dir, 2), LaunchMode::HeadlessHost { steam_drm: true });
         crate::pads::set_app_controller(app.app_id, 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
