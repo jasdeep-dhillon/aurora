@@ -105,10 +105,13 @@ From [the latest release](https://github.com/mollie2999/Aurora/releases/latest):
 | File | Platform |
 | --- | --- |
 | `Aurora-Linux-x86_64.tar.gz` | Linux x86_64. Unpack and run `aurora` |
+| `Aurora-<version>-x86_64.flatpak` | Experimental Linux x86_64 bundle (`flatpak install --user ./Aurora-<version>-x86_64.flatpak`) |
 | `aurora-bin-<version>-x86_64.pkg.tar.zst` | Arch Linux package (`sudo pacman -U …`) |
 | `aurora_<version>_amd64.deb` | Debian, Ubuntu 22.04+, Mint (`sudo apt install ./aurora_…deb`) |
 | `Aurora-Setup-<version>.exe` | Windows 10/11 installer, updates itself |
 | `Aurora-<version>-portable.zip` | Windows, no installer |
+
+The experimental Flatpak keeps its own settings and library data. Use a native package for host Steam, Proton, and in-game overlay integration. To update the Flatpak, install the new bundle from the release page.
 
 Store trailers on Linux need `ffmpeg`, and `libpulse` for sound.
 
