@@ -39,6 +39,20 @@ pub enum PadEvent {
 /// Start reading controllers on a background thread. Each press wakes the UI.
 pub fn spawn(ctx: egui::Context) -> mpsc::Receiver<PadEvent> {
     let (tx, rx) = mpsc::channel();
+    // The standard Windows.Gaming.Input gamepad reading omits Guide.
+    // Use the SDL/XInput reader as the single source of Guide presses on Windows.
+    #[cfg(windows)]
+    {
+        let tx = tx.clone();
+        let ctx = ctx.clone();
+        client::listen_for_controller_guide(move || {
+            if tx.send(PadEvent::Press(Press::Guide)).is_err() {
+                return false;
+            }
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            true
+        });
+    }
     let spawned = std::thread::Builder::new().name("gamepads".into()).spawn(move || read_pads(tx, ctx));
     if let Err(e) = spawned {
         tracing::warn!("controllers: {e}");
@@ -93,6 +107,7 @@ fn button_press(b: gilrs::Button, swap: bool) -> Option<Press> {
         Button::LeftTrigger => Press::Lb,
         Button::RightTrigger => Press::Rb,
         Button::Start => Press::Start,
+        #[cfg(not(windows))]
         Button::Mode => Press::Guide,
         _ => return None,
     })
@@ -101,7 +116,7 @@ fn button_press(b: gilrs::Button, swap: bool) -> Option<Press> {
 /// On Windows the gamepad library reads every pad 125 times a second, even
 /// with none plugged in, which was nearly all of the app's CPU use while
 /// idle. So it only runs while a controller is connected: Windows says when
-/// one is plugged in, and Guide then opens Big Picture as before.
+/// one is plugged in.
 fn read_pads(tx: mpsc::Sender<PadEvent>, ctx: egui::Context) {
     #[cfg(windows)]
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
@@ -232,7 +247,7 @@ fn read_connected(mut gilrs: gilrs::Gilrs, tx: &mpsc::Sender<PadEvent>, ctx: &eg
     let send = |e: PadEvent| {
         let ok = tx.send(e).is_ok();
         if ok {
-            ctx.request_repaint();
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
         ok
     };
@@ -361,7 +376,10 @@ mod tests {
         assert_eq!(button_press(Button::East, true), Some(Press::A));
         // Only A and B swap.
         assert_eq!(button_press(Button::West, true), Some(Press::X));
+        #[cfg(not(windows))]
         assert_eq!(button_press(Button::Mode, true), Some(Press::Guide));
+        #[cfg(windows)]
+        assert_eq!(button_press(Button::Mode, true), None);
         assert_eq!(button_press(Button::DPadUp, false), None);
     }
 
