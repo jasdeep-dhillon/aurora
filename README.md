@@ -57,21 +57,41 @@ the official client for anti-cheat.
 
 ## Status
 
-Works: sign-in (password, Steam Guard, QR), store with trailers, library with
-collections and non-Steam games, downloads, friends and chat, community pages,
-Workshop, inventory and Market, Steam Cloud, offline mode, plugins. English and
-Russian.
+Aurora's feature coverage compared with Valve's Steam desktop client on
+Windows and Linux. Based on a source review of Aurora's `main` at `cbd6f48`.
 
-Missing:
+**0** unavailable · **0.25** limited support · **0.5** usable with major gaps ·
+**0.75** most common workflows covered · **1** covers the workflows Aurora
+targets for that feature. The table notes intentional exclusions, browser
+handoffs, and Steam dependencies. Compatibility can vary by game, platform,
+and package.
 
-- **Linux:** tray icon, `steam://` links, Shift+Tab overlay inside games.
-- **Linux, known bug:** the first launch of a Windows game with a new Proton
-  prefix can fail when the game needs Steam (Bloons TD 6 crashed with
-  "NoSteamClient"). The second launch works.
-- **Everywhere:** Big Picture, Remote Play, group chats and voice chat, writing
-  reviews. Checkout and trade offers open Steam's website.
+| Steam desktop feature | Aurora / 1 | Coverage and limits |
+| --- | ---: | --- |
+| Sign-in and accounts | 1 | Password, Steam Guard, QR sign-in, and saved accounts. Sensitive account changes open Steam's website. |
+| Steam Families | 0.75 | Shared library, family creation, invites, and member management. Parental controls and purchase requests open Steam's website. |
+| Offline mode and reconnecting | 0.75 | Cached library, offline launches for supported games, and automatic reconnect. Steam's handling of reported offline playtime is unconfirmed. |
+| Library and collections | 0.75 | Search, filters, non-Steam shortcuts, and synced static collections. Steam's dynamic collections are read-only. |
+| Downloads, installs, and storage | 1 | Queued and resumable downloads, drag reordering, scheduled updates, file verification, library moves, and backup and restore. Local network game transfers are outside Aurora's scope. |
+| Store and purchases | 1 | Search, trailers, wishlist, Discovery Queue, Points Shop, and review writing. Payment is handled on Steam's website. |
+| Friends and chat | 0.75 | Friends list, presence, invites, direct messages, and group text chats. Voice channels are visible in group chat, with no support for voice calls. |
+| Community | 0.75 | Activity feed, profile editing, game hubs, guides, and discussion browsing. Some community actions still open Steam's website. |
+| Workshop | 0.75 | Browse, subscribe, and download mods. Publishing support covers single-file uploads through the in-game API. |
+| Inventory, trading, and Market | 0.5 | View inventory, check prices, list items, and send basic trade offers. The trade inbox and Market browsing open Steam's website. |
+| Steam Cloud | 1 | Per-game sync, conflict resolution with local backups, and viewing and deleting remote saves. |
+| Game launch and Proton | 1 | Native Linux launches and per-game Proton selection. Some launch paths require Valve's installed Steam components. Anti-cheat defaults to the official client. Headless anti-cheat support is experimental. |
+| In-game Steam features | 0.75 | Achievements, stats, lobbies, and other Steamworks features on supported routes. Aurora's own implementation lacks Steam Datagram Relay for modern multiplayer. |
+| Steam Input | 0.5 | Controller testing, calibration, per-game overrides, community layouts, and binding editing. In-game support depends on the game and launch route. |
+| Shift+Tab overlay | 1 | In-game rendering on supported Windows games and via a Vulkan layer on Linux, with a window fallback on some launch paths. Includes notes, screenshots, and an FPS counter. An in-game browser is outside Aurora's scope. |
+| Desktop integration | 0.75 | Desktop notifications and tray menus on Windows and supported Linux desktops. Registering Aurora as the `steam://` link handler is Windows-only. |
+| Settings, languages, and updates | 0.75 | English, French, Spanish, and Russian UI. The Windows installer updates automatically. Linux updates depend on the package. |
+| Steam Broadcast | 0.25 | Aurora can watch live broadcasts on Linux. Hosting broadcasts is unavailable. |
+| Big Picture | 0 | No Big Picture mode on `main`. |
+| Remote Play | 0 | No game streaming or Remote Play Together. |
+| Game Recording | 0 | No gameplay clip recording. |
 
-Area-by-area detail (from Aurora): [docs/parity.md](docs/parity.md).
+See [Steamworks compatibility](docs/steam-compatibility.md) for in-game API
+details and the [changelog](CHANGELOG.md) for release history.
 
 ## Benchmarks
 
