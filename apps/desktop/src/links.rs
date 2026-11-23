@@ -185,9 +185,12 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+pub(crate) const BIG_PICTURE: &str = "bigpicture";
+pub(crate) const BIG_PICTURE_WINDOW: &str = "bigpicture-window";
+
 pub(crate) fn is_allowed_payload(payload: &str) -> bool {
     let p = payload.trim();
-    p == "show" || parse(p).is_some()
+    matches!(p, "show" | BIG_PICTURE | BIG_PICTURE_WINDOW) || parse(p).is_some()
 }
 
 pub struct LinkRequest {

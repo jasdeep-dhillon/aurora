@@ -32,8 +32,15 @@ install -Dm644 "$root/packaging/flatpak/$id.metainfo.xml" \
 
 # Steam lives outside the sandbox. Keep Aurora's files private and use
 # desktop portals for opening links and selecting files.
+devices=(--device=dri)
+# Older build hosts can still package a keyboard/mouse build.
+flatpak_version=$(flatpak --version)
+flatpak_version=${flatpak_version#Flatpak }
+if [ "$(printf '%s\n' "1.15.6" "$flatpak_version" | sort -V | head -n 1)" = 1.15.6 ]; then
+    devices+=(--device=input)
+fi
 flatpak build-finish --command=aurora \
-    --share=network --share=ipc --device=dri \
+    --share=network --share=ipc "${devices[@]}" \
     --socket=wayland --socket=x11 --socket=pulseaudio "$build"
 flatpak build-export --arch=x86_64 "$work/repo" "$build"
 flatpak build-bundle --arch=x86_64 --runtime-repo="$runtime_repo" "$work/repo" "$2" "$id"

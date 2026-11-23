@@ -6,7 +6,7 @@
 pub mod community;
 pub mod community_home;
 pub mod group_chat;
-mod downloads;
+pub(crate) mod downloads;
 pub mod hub;
 pub mod inventory;
 pub mod library;

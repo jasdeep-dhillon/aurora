@@ -142,6 +142,8 @@ pub struct Store {
     price_log: std::collections::BTreeMap<AppId, Vec<(u64, u64)>>,
     price_log_dirty: bool,
     lists_requested: bool,
+    /// Big Picture's search, kept apart from the store page's own.
+    tv_search: Option<(String, Shared<Vec<Item>>)>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -204,6 +206,7 @@ impl Store {
             price_log: Default::default(),
             price_log_dirty: false,
             lists_requested: false,
+            tv_search: None,
             search: None,
             view: View::Home,
             hero: 0,
@@ -353,6 +356,7 @@ impl Store {
             self.recent.clear();
             // Browse results carry prices too: load them again in the new currency.
             self.query = None;
+            self.tv_search = None;
             self.tags = None;
             self.ratings.lock().unwrap().clear();
         }
@@ -479,6 +483,74 @@ impl Store {
             Load::Ready(m) => m.iter().find(|(_, n)| n.eq_ignore_ascii_case(name)).map(|(id, _)| *id),
             _ => None,
         }
+    }
+}
+
+/// What Big Picture reads from the store: the same data, cache and
+/// content filter as the store page.
+impl Store {
+    /// The front page (featured games and sections) in the account's currency.
+    pub(crate) fn front_for(&mut self, ctx: &Ctx) -> Option<Result<Arc<StoreFront>, String>> {
+        if !self.sync_locale(ctx) {
+            return None;
+        }
+        if self.front.is_none() {
+            let api = self.api.clone();
+            self.front = Some(self.fetch(async move { api.front().await.map(Arc::new) }));
+        }
+        self.flush_ratings();
+        self.front_data()
+    }
+
+    /// Search results for `query` (asked once per new query).
+    pub(crate) fn search_for(&mut self, ctx: &Ctx, query: &str) -> Option<Result<Vec<Item>, String>> {
+        if !self.sync_locale(ctx) {
+            return None;
+        }
+        if self.tv_search.as_ref().is_none_or(|(q, _)| q != query) {
+            let (api, q) = (self.api.clone(), query.to_string());
+            let slot = self.fetch(async move { api.search(&q).await });
+            self.tv_search = Some((query.to_string(), slot));
+        }
+        let (_, slot) = self.tv_search.as_ref()?;
+        match &*slot.lock().unwrap() {
+            Load::Loading => None,
+            Load::Ready(v) => Some(Ok(v.clone())),
+            Load::Failed(e) => Some(Err(e.clone())),
+        }
+    }
+
+    /// `None` while locale or content descriptors are still loading.
+    pub(crate) fn big_picture_access(&mut self, ctx: &Ctx, id: AppId) -> Option<bool> {
+        if !self.sync_locale(ctx) {
+            return None;
+        }
+        if self.allowed.contains(&id) || self.hidden.is_empty() {
+            return Some(true);
+        }
+        let classified = self.shown(id);
+        classified.or_else(|| self.details(id).map(|details| {
+            !details.content_descriptors.iter().any(|descriptor| self.hidden.contains(descriptor))
+        }))
+    }
+
+    pub(crate) fn allow_big_picture_page(&mut self, id: AppId) {
+        self.allowed.insert(id);
+    }
+
+    pub(crate) fn details_for(&mut self, ctx: &Ctx, id: AppId) -> Option<Arc<Details>> {
+        if self.big_picture_access(ctx, id) != Some(true) {
+            return None;
+        }
+        self.details(id)
+    }
+
+    /// `Some(true)` = fine to show, `Some(false)` = hidden by the mature
+    /// content settings, `None` = not known yet.
+    pub(crate) fn shown(&mut self, id: AppId) -> Option<bool> {
+        let r = self.safe(id);
+        self.flush_ratings();
+        r
     }
 }
 
@@ -697,6 +769,10 @@ impl Extension for Store {
             }
         });
         true
+    }
+
+    fn as_any(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 
     fn save(&self) -> Option<String> {
@@ -1937,5 +2013,53 @@ mod tests {
         assert_eq!(view_arg(&View::Discovery(0)).as_deref(), Some("discovery"));
         assert_eq!(view_arg(&View::Discovery(4)).as_deref(), Some("discovery/4"));
         assert_eq!(view_arg(&View::Browse).as_deref(), Some("browse"));
+    }
+}
+
+/// For Big Picture: trailers, review summaries and a trailer player.
+impl Store {
+    pub(crate) fn trailers_for(&mut self, id: AppId) -> Vec<store::browse::Trailer> {
+        self.browse_info(id).map(|b| b.trailers.clone()).unwrap_or_default()
+    }
+
+    pub(crate) fn ratings_for(&mut self, id: AppId) -> Option<(u32, u64)> {
+        self.browse_info(id).and_then(|b| b.reviews.as_ref().map(|r| (r.percent_positive, r.count)))
+    }
+
+    /// Play trailer `i` of a game in `rect` (started if it isn't the one
+    /// playing). True when it ended.
+    pub(crate) fn play_trailer(&mut self, ui: &mut Ui, t: &Theme, rect: Rect, id: AppId, i: usize) -> bool {
+        let trailers = self.trailers_for(id);
+        let Some(tr) = trailers.get(i) else { return false };
+        let Some(src) = tr.hls.clone().map(video::Source::Hls).or_else(|| tr.micro_mp4.clone().map(video::Source::Mp4)) else {
+            w::image_or_skeleton(ui, t, rect, &tr.thumbnail, t.corner());
+            return false;
+        };
+        if self.trailer.as_ref().is_none_or(|(url, _)| url != src.url()) {
+            let url = src.url().to_string();
+            let mut p = video::Player::new(&self.rt, ui.ctx(), src, video::widget::options(ui.ctx()));
+            p.play();
+            self.trailer = Some((url, p));
+        }
+        let (_, p) = self.trailer.as_mut().expect("just set");
+        p.fullscreen = false;
+        video::widget::show(ui, t, rect, p, &tr.thumbnail, &tr.name).ended
+    }
+
+    /// Pause/play, or move by `seconds`, the trailer playing.
+    pub(crate) fn trailer_control(&mut self, toggle: bool, seconds: f64) {
+        if let Some((_, p)) = self.trailer.as_mut() {
+            if toggle {
+                p.toggle();
+            }
+            if seconds != 0.0 {
+                let to = (p.position() + seconds).clamp(0.0, p.duration().max(0.0));
+                p.seek(to);
+            }
+        }
+    }
+
+    pub(crate) fn stop_trailer(&mut self) {
+        self.trailer = None;
     }
 }

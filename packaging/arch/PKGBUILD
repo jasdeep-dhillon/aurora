@@ -12,7 +12,7 @@ url="https://github.com/mollie2999/Aurora"
 license=('MIT')
 # Linked: glibc, gcc-libs, dbus, OpenSSL 3 (built on Ubuntu 22.04). Loaded at
 # run time by the window code: OpenGL, X11/Wayland, xkbcommon.
-depends=('glibc' 'gcc-libs' 'dbus' 'openssl-3' 'libglvnd' 'libxkbcommon' 'libxkbcommon-x11'
+depends=('glibc' 'gcc-libs' 'dbus' 'openssl-3' 'systemd-libs' 'libglvnd' 'libxkbcommon' 'libxkbcommon-x11'
          'libx11' 'libxcursor' 'libxi' 'libxrandr' 'wayland')
 optdepends=('steam: Proton, and the windowless Steam host for Steam-DRM, native and anti-cheat games'
             'ffmpeg: store trailers'
