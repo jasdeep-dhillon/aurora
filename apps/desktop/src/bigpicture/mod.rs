@@ -135,6 +135,7 @@ pub struct BigPicture {
     bg: Vec<(AppId, f64)>,
     /// The game whose art the background should show this frame.
     bg_want: Option<AppId>,
+    game_backdrop: Option<String>,
     /// Achievement lists asked for this session.
     asked: HashSet<AppId>,
     /// Sliding highlight under the selected tab.
@@ -271,6 +272,9 @@ impl BigPicture {
     }
 
     pub fn leave(&mut self, ctx: &egui::Context) {
+        if let Some(uri) = self.game_backdrop.take() {
+            ctx.forget_image(&uri);
+        }
         let was_active = std::mem::replace(&mut self.active, false);
         self.menu = None;
         self.queued.clear();
@@ -671,6 +675,25 @@ impl BigPicture {
         let b = screen.center() + vec2((time * 0.06 + 2.0).cos() * screen.width() * 0.38, (time * 0.08 + 1.0).sin() * screen.height() * 0.32);
         paint::glow(&p, a, screen.width() * 0.45, t.accent.gamma_multiply(0.10));
         paint::glow(&p, b, screen.width() * 0.4, t.accent_2.gamma_multiply(0.09));
+
+        if let Page::Game(id) = self.page() {
+            let e = since(ui, self.page_since, 1.8);
+            let rect = paint::grow(screen, 1.0 + (1.0 - e) * 0.08);
+            let artwork = paint::faded(ui, screen, since(ui, self.page_since, 0.35));
+            let uri = w::paint_blurred_cover_first(&artwork, screen, rect, &[&model::art::hero(id), &model::art::header(id)]);
+            if self.game_backdrop != uri {
+                if let Some(old) = self.game_backdrop.take() {
+                    ui.ctx().forget_image(&old);
+                }
+                self.game_backdrop = uri;
+            }
+            w::gradient(&p, screen, t.bg.gamma_multiply(0.08), t.bg.gamma_multiply(0.94), false);
+            w::fade_right(ui, screen, t.bg.gamma_multiply(0.65), 0.58);
+            return;
+        }
+        if let Some(uri) = self.game_backdrop.take() {
+            ui.ctx().forget_image(&uri);
+        }
 
         // Pages say which game is focused while drawing: that shows next frame.
         if let Some(want) = self.bg_want.take().or(self.bg.last().map(|b| b.0)) {

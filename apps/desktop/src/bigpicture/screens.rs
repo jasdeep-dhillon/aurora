@@ -473,19 +473,6 @@ fn game(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppId) ->
     let installed = f.app.local.games.iter().find(|g| g.app_id == id).cloned();
     let name = f.app.state.app_name(id).map(String::from).or_else(|| installed.as_ref().map(|g| g.name.clone())).unwrap_or_default();
 
-    // Hero art under the bar, settling in with a slow zoom.
-    let screen = ui.max_rect();
-    let hero = Rect::from_min_size(pos2(screen.left(), top - 104.0 * s), vec2(screen.width(), 600.0 * s));
-    let zoom = 1.0 + 0.08 * (1.0 - since(ui, bp.page_since, 1.8));
-    // The art runs under the tab bar, but the zoom must stay inside the fade.
-    let clip = ui.clip_rect();
-    ui.set_clip_rect(hero.intersect(Rect::from_min_max(screen.min, clip.max)));
-    if !w::paint_cover_first(ui, paint::grow(hero, zoom), &[&art::hero(id), &art::header(id)], egui::CornerRadius::ZERO) {
-        w::fade_down(ui, hero, f.t.surface, 0.0);
-    }
-    w::fade_down(ui, hero, f.t.bg, 0.35);
-    w::fade_right(ui, hero, f.t.bg.gamma_multiply(0.7), 0.55);
-    ui.set_clip_rect(clip);
     let (k, dy) = appear(ui, bp, 0);
     let logo = Rect::from_min_size(pos2(f.view.left() + f.pad, top + 70.0 * s + dy * s), vec2(620.0 * s, 230.0 * s));
     let c = paint::faded(ui, logo.expand(20.0 * s), k);

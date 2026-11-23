@@ -2048,6 +2048,8 @@ impl Store {
             w::image_or_skeleton(ui, t, rect, &tr.thumbnail, t.corner());
             return false;
         };
+        // The registry's idle cleanup also runs while Big Picture draws this player.
+        self.drawn_frame = self.frames;
         if self.trailer.as_ref().is_none_or(|(url, _)| url != src.url()) {
             let url = src.url().to_string();
             let mut p = video::Player::new(&self.rt, ui.ctx(), src, video::widget::options(ui.ctx()));
