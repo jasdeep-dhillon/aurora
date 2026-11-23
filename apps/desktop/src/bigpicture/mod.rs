@@ -63,6 +63,11 @@ enum ChatTarget {
 enum Page {
     Tab(Tab),
     Game(AppId),
+    Controller(AppId),
+    QuickAccess,
+    Notifications,
+    #[cfg(target_os = "linux")]
+    Compatibility(AppId),
     StoreApp(AppId),
     Review(AppId, String),
     Search,
@@ -90,6 +95,7 @@ impl Page {
 #[derive(Default)]
 pub struct BigPicture {
     pub active: bool,
+    deck_preview: bool,
     /// `--bigpicture=window`: stay in a window (previews, testing).
     windowed: bool,
     fullscreen_sent: bool,
@@ -165,10 +171,12 @@ pub struct BigPicture {
 
 impl BigPicture {
     pub fn new(ctx: &egui::Context) -> Self {
-        let flag = std::env::args().find(|a| a == "--bigpicture" || a == "--bigpicture=window");
+        let mode = crate::links::big_picture_request(std::env::args().skip(1)).and_then(crate::links::big_picture_mode);
+        let (deck_preview, windowed) = mode.unwrap_or_default();
         let mut bp = Self {
-            active: flag.is_some(),
-            windowed: flag.as_deref() == Some("--bigpicture=window"),
+            active: mode.is_some(),
+            deck_preview,
+            windowed,
             pad: Some(input::spawn(ctx.clone())),
             slide: 0.0,
             ..Default::default()
@@ -225,10 +233,11 @@ impl BigPicture {
         ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
 
-    pub fn enter_requested(&mut self, ctx: &egui::Context, windowed: bool) {
-        if self.windowed != windowed {
+    pub fn enter_requested(&mut self, ctx: &egui::Context, deck_preview: bool, windowed: bool) {
+        if self.windowed != windowed || self.deck_preview != deck_preview {
             self.leave(ctx);
             self.windowed = windowed;
+            self.deck_preview = deck_preview;
         }
         self.enter(ctx);
     }
@@ -287,6 +296,15 @@ impl BigPicture {
     /// Running in a window (`--bigpicture=window`), not full screen.
     pub fn is_windowed(&self) -> bool {
         self.windowed
+    }
+
+    fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
+        self.windowed = !self.windowed;
+        self.fullscreen_asked = f64::NEG_INFINITY;
+        if self.windowed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+        ctx.request_repaint();
     }
 
     fn page(&self) -> Page {
@@ -437,6 +455,20 @@ impl BigPicture {
                 self.entered_at = now;
             }
         }
+        let mut toggle_fullscreen = false;
+        ctx.input_mut(|i| i.events.retain(|event| {
+            if let egui::Event::Key { key: egui::Key::F11, pressed, repeat, modifiers, .. } = event
+                && *modifiers == egui::Modifiers::NONE
+            {
+                toggle_fullscreen |= *pressed && !*repeat;
+                false
+            } else {
+                true
+            }
+        }));
+        if toggle_fullscreen {
+            self.toggle_fullscreen(&ctx);
+        }
         // Fullscreen, and again if something resized the window meanwhile
         // (signing in sets the normal window size).
         if !self.windowed && ctx.input(|i| i.viewport().fullscreen) != Some(true) && now - self.fullscreen_asked > 0.5 {
@@ -542,6 +574,14 @@ impl BigPicture {
                     Press::Start | Press::Guide => {
                         self.menu = Some(menu::Menu::new(now));
                     }
+                    Press::QuickAccess if self.deck_preview => {
+                        if self.page() == Page::QuickAccess {
+                            self.back(now);
+                        } else {
+                            self.open(Page::QuickAccess, now);
+                        }
+                    }
+                    Press::QuickAccess => {}
                 }
             }
         }
@@ -821,6 +861,9 @@ impl BigPicture {
             if let Some(x) = screens::x_hint(self) {
                 hints.push((Press::X, x));
             }
+            if self.deck_preview {
+                hints.push((Press::QuickAccess, t!("Quick Access").into()));
+            }
             hints.push((Press::Start, t!("Menu").into()));
         }
         let mut x = bar.right() - pad;
@@ -865,7 +908,7 @@ impl BigPicture {
         let size = 120.0 * s * (0.8 + 0.35 * focus::ease(e));
         let mut c = paint::faded(ui, Rect::from_center_size(screen.center(), vec2(size, size)), fade);
         w::logo(&mut c, t, size);
-        p.text(screen.center() + vec2(0.0, size * 0.75 + 20.0 * s), Align2::CENTER_TOP, t!("Big Picture"), w::font_bold(30.0 * s), t.text.gamma_multiply(fade));
+        p.text(screen.center() + vec2(0.0, size * 0.75 + 20.0 * s), Align2::CENTER_TOP, if self.deck_preview { t!("Deck preview") } else { t!("Big Picture") }, w::font_bold(30.0 * s), t.text.gamma_multiply(fade));
     }
 }
 
@@ -897,6 +940,8 @@ fn glyph_for(p: Press, pad: bool) -> (&'static str, bool) {
         (Press::X, false) => ("X", false),
         (Press::Y, false) => ("Y", false),
         (Press::Start, false) => ("M", false),
+        (Press::QuickAccess, true) => (icons::DOTS, true),
+        (Press::QuickAccess, false) => ("F2", false),
         (_, true) => ("LB", false),
         (_, false) => ("Q", false),
     }

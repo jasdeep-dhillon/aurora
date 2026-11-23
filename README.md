@@ -94,6 +94,13 @@ Open Big Picture with the monitor button, the app menu, the controller's
 Guide button while Aurora is focused, or `aurora --bigpicture`. Use
 `--bigpicture=window` to open it in a window.
 
+To try Aurora’s Deck interface on a desktop, use `aurora --steam-deck`
+(full screen) or `aurora --steam-deck=window`. Press F2 or click **Quick Access**
+while Big Picture has focus. Press Esc to go back, F1 for the main menu, and
+F11 to toggle fullscreen.
+The preview uses your normal Aurora library and settings. It does not emulate
+Deck hardware, claim a SteamOS session, or activate system-level controls.
+
 See [Steamworks compatibility](docs/steam-compatibility.md) for in-game API
 details and the [changelog](CHANGELOG.md) for release history.
 

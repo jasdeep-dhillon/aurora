@@ -906,8 +906,8 @@ impl SteamApp {
         }
         for raw in std::mem::take(&mut self.pending_links) {
             let nav = |page: &str, arg: Option<String>| Action::Navigate { page: page.into(), arg };
-            if matches!(raw.as_str(), crate::links::BIG_PICTURE | crate::links::BIG_PICTURE_WINDOW) {
-                self.bigpicture.enter_requested(ctx, raw == crate::links::BIG_PICTURE_WINDOW);
+            if let Some((deck_preview, windowed)) = crate::links::big_picture_mode(&raw) {
+                self.bigpicture.enter_requested(ctx, deck_preview, windowed);
                 continue;
             }
             match crate::links::parse(&raw) {
@@ -1196,7 +1196,12 @@ impl eframe::App for SteamApp {
             WindowMode::SignIn
         };
         if fullscreen {
-            self.window_mode = None;
+            if self.window_mode.take().is_some() {
+                // A fixed-size login window leaves size constraints behind on Wayland.
+                ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::vec2(16384.0, 16384.0)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(2.0, 1.0)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+            }
             self.pending_size = None;
             self.center_window = None;
         } else if self.window_mode != Some(mode) {
