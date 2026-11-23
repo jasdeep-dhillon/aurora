@@ -40,6 +40,12 @@ pub enum LaunchMode {
 /// How Play will start this game. Reads the install folder (anti-cheat
 /// files, the executable's bitness), so callers should cache it.
 pub fn mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
+    mode_for_launch(app, install_dir, 0)
+}
+
+pub(crate) fn mode_for_launch(app: &OwnedApp, install_dir: &Path, controller: u8) -> LaunchMode {
+    #[cfg(not(windows))]
+    let _ = controller;
     if let Some(ac) = anti_cheat(app, install_dir) {
         // Experimental (Settings > Library): the headless host instead. It is
         // the user's own Steam engine, so the game sees real Steam.
@@ -55,6 +61,15 @@ pub fn mode(app: &OwnedApp, install_dir: &Path) -> LaunchMode {
     // official client runs it.
     if steam_drm_marked(app.app_id) || launch_exe(app, install_dir).is_some_and(|exe| has_steam_drm(&exe)) {
         if headless_host_available() && !official_steam_open() {
+            #[cfg(windows)]
+            {
+                // The headless host has no Steam Input frontend. Let Steam
+                // start the game with its own controller configuration.
+                let input = crate::pads::effective_controller_override(app.app_id, controller);
+                if crate::pads::needs_steam_input_client(input) && steam_exe().is_some() {
+                    return LaunchMode::OfficialSteam { anti_cheat: STEAM_DRM.into() };
+                }
+            }
             return LaunchMode::HeadlessHost;
         }
         return LaunchMode::OfficialSteam { anti_cheat: STEAM_DRM.into() };
@@ -717,8 +732,8 @@ pub fn kill_in_folder(dir: &Path) {
 /// Wait for a game process and any launcher-spawned child processes. On
 /// Windows, attaches the child to a Job Object so descendant processes
 /// (even outside `install_dir`) keep IPC and shared controller publishing
-/// alive through launcher handoff; falls back to `processes_in(install_dir)`
-/// if job assignment is unavailable.
+/// alive through launcher handoff. Also check the install directory when the job
+/// is empty, since a launcher can spawn the game before job assignment.
 pub fn wait_in_dir(app_id: AppId, install_dir: &Path, mut child: Child) -> AppId {
     #[cfg(windows)]
     let job = win::JobGuard::attach(&child);
@@ -729,10 +744,8 @@ pub fn wait_in_dir(app_id: AppId, install_dir: &Path, mut child: Child) -> AppId
         let mut logged = false;
         let mut empty_since: Option<Instant> = None;
         loop {
-            let alive = match &job {
-                Some(j) => j.has_processes(),
-                None => !win::processes_in(install_dir).is_empty(),
-            };
+            let alive = job.as_ref().is_some_and(win::JobGuard::has_processes)
+                || !win::processes_in(install_dir).is_empty();
             if alive {
                 if !logged {
                     tracing::info!("initial game process exited; waiting for launcher-spawned processes");
@@ -1340,8 +1353,13 @@ pub fn run_through_host(
     // Launch the game through Proton with lsteamclient ON (the default), so the
     // game's steamclient reaches the host. `command` already points
     // STEAM_COMPAT_CLIENT_INSTALL_PATH at the real Steam root.
+    #[cfg(windows)]
+    match crate::pads::native_xinput_slots() {
+        Some(mask) => tracing::info!("controllers: headless launch, native XInput slot mask {mask:#06b} (bit 0 = player 1)"),
+        None => tracing::warn!("controllers: headless launch, XInputGetState unavailable"),
+    }
     let game = spawn_for_host(app, install_dir, &args.user, &connect, account, overlay);
-    let mut child = match game {
+    let child = match game {
         Ok(c) => c,
         Err(e) => {
             drop(stdin);
@@ -1350,7 +1368,7 @@ pub fn run_through_host(
         }
     };
     started();
-    wait_all(&mut child);
+    wait_in_dir(app.app_id, install_dir, child);
 
     // Game closed: drop the pipe so the host signs out and exits.
     tracing::info!("{} closed; shutting down the headless Steam host", app.name);
@@ -2924,6 +2942,58 @@ mod tests {
         assert!(!has_steam_drm(&dir.join("missing.exe")));
         assert_eq!(pe_is_64bit(&wrapped), Some(true));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Exercise Play's route with a real or virtual pad, Steam closed, and
+    /// steam.exe, the engine and steamhost available in the test environment.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires Windows controller and Steam install fixtures"]
+    fn windows_drm_controller_launch() {
+        let connected: bool = std::env::var("AURORA_TEST_CONNECTED_PAD").unwrap().parse().unwrap();
+        let dir = std::env::temp_dir().join(format!("aurora-controller-route-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("game.exe"), pe_with_sections(&[".text", ".bind"])).unwrap();
+        let app = OwnedApp {
+            app_id: 1234567,
+            launch: vec![model::LaunchOption { executable: "game.exe".into(), os_list: "windows".into(), arguments: String::new(), working_dir: String::new(), description: String::new() }],
+            ..Default::default()
+        };
+        let steam = LaunchMode::OfficialSteam { anti_cheat: STEAM_DRM.into() };
+        assert_eq!(mode(&app, &dir), if connected { steam.clone() } else { LaunchMode::HeadlessHost });
+        assert_eq!(mode_for_launch(&app, &dir, 1), steam);
+        assert_eq!(mode_for_launch(&app, &dir, 2), LaunchMode::HeadlessHost);
+        crate::pads::set_app_controller(app.app_id, 1);
+        assert_eq!(mode(&app, &dir), steam);
+        assert_eq!(mode_for_launch(&app, &dir, 2), LaunchMode::HeadlessHost);
+        crate::pads::set_app_controller(app.app_id, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn waits_for_game_outside_launcher_job() {
+        // Simulate a game started before the launcher was assigned to its job.
+        let dir = std::env::temp_dir().join(format!("aurora-handoff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let game_exe = dir.join("game.exe");
+        let shell = std::env::var_os("ComSpec").unwrap();
+        std::fs::copy(&shell, &game_exe).unwrap();
+        let mut game = Command::new(game_exe)
+            .args(["/d", "/q"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn().unwrap();
+        let launcher = Command::new(shell).args(["/d", "/c", "exit"]).spawn().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let install_dir = dir.clone();
+        std::thread::spawn(move || tx.send(wait_in_dir(1, &install_dir, launcher)).ok());
+        let while_running = rx.recv_timeout(Duration::from_secs(7));
+        drop(game.stdin.take());
+        game.wait().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(while_running, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(15)).unwrap(), 1);
     }
 
     /// A launcher that starts the game in the background and exits.

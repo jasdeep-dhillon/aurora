@@ -754,7 +754,7 @@ async fn online(
             let script = st
                 .apps
                 .get(&app_id)
-                .filter(|a| !st.running.contains_key(&app_id) && !st.shader_jobs.contains_key(&app_id) && !matches!(launch::mode(a, &install_dir), crate::LaunchMode::OfficialSteam { .. }))
+                .filter(|a| !st.running.contains_key(&app_id) && !st.shader_jobs.contains_key(&app_id) && !matches!(launch::mode_for_launch(a, &install_dir, args.controller), crate::LaunchMode::OfficialSteam { .. }))
                 .and_then(|a| crate::installscript::pending(a, &install_dir));
             // First launch in a new Proton prefix, no install script to
             // create it: set it up so our steamclient answers from the start.
@@ -795,7 +795,7 @@ async fn online(
                 let pending = st
                     .apps
                     .get(&app_id)
-                    .filter(|a| !busy && !matches!(launch::mode(a, &install_dir), crate::LaunchMode::OfficialSteam { .. }))
+                    .filter(|a| !busy && !matches!(launch::mode_for_launch(a, &install_dir, args.controller), crate::LaunchMode::OfficialSteam { .. }))
                     .and_then(|_| crate::shaders::pending(&install_dir, app_id));
                 match pending {
                     // Already compiling: Play again doesn't start it twice.
@@ -844,7 +844,7 @@ async fn online(
             } else {
                 // Like Steam: bring down newer cloud saves first (games the
                 // official client runs get its own cloud sync instead).
-                let official = st.apps.get(&app_id).is_some_and(|a| matches!(launch::mode(a, &install_dir), crate::LaunchMode::OfficialSteam { .. } | crate::LaunchMode::HeadlessHost));
+                let official = st.apps.get(&app_id).is_some_and(|a| matches!(launch::mode_for_launch(a, &install_dir, args.controller), crate::LaunchMode::OfficialSteam { .. } | crate::LaunchMode::HeadlessHost));
                 match st.cloud_target(app_id, &install_dir).filter(|_| !official) {
                     // Offline: play with the saves on this PC; they go up once online.
                     Some(_) if st.link != Link::Online && !st.running.contains_key(&app_id) => {
@@ -985,7 +985,7 @@ async fn online(
                     } else {
                         // Like Steam: subscribed Workshop items are downloaded
                         // (or updated) before the game starts, then cloud saves.
-                        let official = st.apps.get(&app_id).is_some_and(|a| matches!(launch::mode(a, &install_dir), crate::LaunchMode::OfficialSteam { .. } | crate::LaunchMode::HeadlessHost));
+                        let official = st.apps.get(&app_id).is_some_and(|a| matches!(launch::mode_for_launch(a, &install_dir, args.controller), crate::LaunchMode::OfficialSteam { .. } | crate::LaunchMode::HeadlessHost));
                         let library = crate::workshop::library_of(&install_dir).filter(|_| !official && st.link == Link::Online && !st.running.contains_key(&app_id));
                         match library {
                             Some(library) => {
@@ -2983,7 +2983,7 @@ impl Online {
             sink(Event::Error(format!("{} is already running", app.name)));
             return Ok(());
         }
-        let mode = launch::mode(app, dir);
+        let mode = launch::mode_for_launch(app, dir, args.controller);
         tracing::info!("{} starts as {mode:?}", app.name);
         sink(Event::LaunchMode { app_id, mode: mode.clone() });
         match mode {
