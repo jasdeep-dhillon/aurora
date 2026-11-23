@@ -288,8 +288,17 @@ impl StoreClient {
     }
 
     pub async fn details(&self, id: AppId) -> Result<Details> {
+        self.details_with_cache(id, DETAILS_FOR).await
+    }
+
+    /// Reload a page on explicit retry, even if its previous response was cached.
+    pub async fn refresh_details(&self, id: AppId) -> Result<Details> {
+        self.details_with_cache(id, std::time::Duration::ZERO).await
+    }
+
+    async fn details_with_cache(&self, id: AppId, max_age: std::time::Duration) -> Result<Details> {
         let url = format!("{BASE}/appdetails?appids={id}&cc={}&l={}", self.country, self.language);
-        let mut raw: HashMap<String, RawEnvelope> = self.cached_json(self.http.get(&url), DETAILS_FOR).await?;
+        let mut raw: HashMap<String, RawEnvelope> = self.cached_json(self.http.get(&url), max_age).await?;
         let d = raw.remove(&id.to_string()).filter(|e| e.success).and_then(|e| e.data).ok_or(Error::NotFound(id))?;
         let (min, rec) = match d.pc_requirements {
             serde_json::Value::Object(m) => (

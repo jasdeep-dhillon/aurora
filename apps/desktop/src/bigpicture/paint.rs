@@ -53,11 +53,15 @@ pub fn text_width(p: &Painter, text: &str, font: FontId) -> f32 {
 
 /// A soft drop shadow / glow under a raised thing.
 pub fn shadow(p: &Painter, rect: Rect, r: f32, s: f32, strength: f32, color: Color32) {
+    draw_shadow(p, rect, r, s, strength, color, 12.0);
+}
+
+fn draw_shadow(p: &Painter, rect: Rect, r: f32, s: f32, strength: f32, color: Color32, offset_y: f32) {
     if strength <= 0.01 {
         return;
     }
     let sh = Shadow {
-        offset: [0, (12.0 * s * strength).clamp(0.0, 127.0) as i8],
+        offset: [0, (offset_y * s * strength).clamp(0.0, 127.0) as i8],
         blur: (44.0 * s).clamp(0.0, 255.0) as u8,
         spread: (2.0 * s * strength).clamp(0.0, 255.0) as u8,
         color: color.gamma_multiply(strength),
@@ -147,7 +151,7 @@ pub enum Kind {
 }
 
 /// A big pill button. `progress` fills it (downloads).
-pub fn pill(ui: &Ui, t: &Theme, rect: Rect, icon: Option<&str>, label: &str, kind: Kind, hit: &Hit, s: f32, progress: Option<f32>) {
+pub fn pill(ui: &Ui, t: &Theme, rect: Rect, icon: Option<&str>, label: &str, kind: Kind, hit: &Hit, s: f32, progress: Option<f32>) -> Rect {
     let p = ui.painter();
     let shown = grow(rect, 1.0 + 0.04 * hit.glow);
     let r = shown.height() / 2.0;
@@ -159,7 +163,11 @@ pub fn pill(ui: &Ui, t: &Theme, rect: Rect, icon: Option<&str>, label: &str, kin
         Kind::Muted => (t.surface, t.text_dim),
     };
     let fill = w::mix(fill, Color32::WHITE, 0.12 * hit.glow);
-    shadow(p, shown, r, s, 0.3 + 0.5 * hit.glow, if matches!(kind, Kind::Play | Kind::Primary) { fill } else { Color32::from_black_alpha(160) });
+    if matches!(kind, Kind::Play | Kind::Primary) {
+        draw_shadow(p, shown, r, s, 0.3 + 0.5 * hit.glow, fill, 0.0);
+    } else {
+        shadow(p, shown, r, s, 0.3 + 0.5 * hit.glow, Color32::from_black_alpha(160));
+    }
     p.rect_filled(shown, radius(r), fill);
     if let Some(f) = progress {
         let done = Rect::from_min_size(shown.min, vec2(shown.width() * f.clamp(0.0, 1.0), shown.height()));
@@ -178,6 +186,7 @@ pub fn pill(ui: &Ui, t: &Theme, rect: Rect, icon: Option<&str>, label: &str, kin
         p.text(pos2(start, shown.center().y), Align2::LEFT_CENTER, i, w::font(24.0 * s), text);
     }
     p.text(pos2(start + icon_w, shown.center().y), Align2::LEFT_CENTER, label, font, text);
+    shown
 }
 
 /// Width a pill needs for this label.

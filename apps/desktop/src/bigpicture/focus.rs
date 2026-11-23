@@ -1,5 +1,5 @@
 //! Focus for a couch: one thing is always focused, arrows/D-pad move it to
-//! the nearest thing in that direction, and a glowing ring glides after it.
+//! the nearest thing in that direction, and a glowing ring follows its bounds.
 
 use egui::{Color32, CornerRadius, Id, Rect, Sense, Stroke, StrokeKind, Ui};
 use ui::Theme;
@@ -39,14 +39,12 @@ pub struct Focus {
     /// The focus moved by D-pad/keys this frame (scroll it into view).
     pub moved: bool,
     pub last_dir: Option<Dir>,
-    /// Ring position (animated) and where it's heading.
-    ring: Option<Rect>,
-    ring_target: Option<(Rect, f32)>,
+    ring_target: Option<(Id, Rect, f32)>,
     /// No ring this frame (a full-page viewer: a box around the whole page
     /// only gets in the way).
     no_ring: bool,
-    /// A move with nowhere to go: the ring nudges that way.
-    bump: Option<(Dir, f64)>,
+    /// A move with nowhere to go briefly brightens the ring.
+    bump: Option<f64>,
     /// Focus last frame, and when it last changed (for the tile sheen).
     seen: Option<Id>,
     pub changed_at: f64,
@@ -106,7 +104,7 @@ impl Focus {
                 self.current = Some(id);
                 self.moved = true;
             }
-            None => self.bump = Some((dir, now)),
+            None => self.bump = Some(now),
         }
     }
 
@@ -135,7 +133,7 @@ impl Focus {
         }
         let glow = ui.ctx().animate_bool_with_time(id.with("bp-focus"), focused, 0.18);
         if focused {
-            self.ring_target = Some((rect, 0.0));
+            self.ring_target = Some((id, rect, 0.0));
         }
         Hit { focused, activated, glow, response }
     }
@@ -147,7 +145,7 @@ impl Focus {
     }
 
     pub fn ring_around(&mut self, rect: Rect, radius: f32) {
-        self.ring_target = Some((rect, radius));
+        self.ring_target = self.current.map(|id| (id, rect, radius));
     }
 
     pub fn exists(&self, id: Id) -> bool {
@@ -177,49 +175,29 @@ impl Focus {
         self.items.iter().find(|i| i.id == c).map(|i| (i.rect, i.place))
     }
 
-    /// Paint the ring: glides to the focused item, glows and breathes.
-    pub fn paint_ring(&mut self, ui: &Ui, t: &Theme, s: f32, radius: f32) {
+    /// Paint the ring around the current visual bounds, clipped to its region.
+    pub fn paint_ring(&mut self, ui: &Ui, t: &Theme, s: f32, radius: f32, page_clip: Rect) {
         if self.no_ring {
-            self.ring = None;
             return;
         }
-        let Some((target, r_override)) = self.ring_target.or_else(|| self.focused().map(|f| (f.0, 0.0))) else {
-            self.ring = None;
-            return;
-        };
-        let (dt, now) = ui.input(|i| (i.stable_dt.min(0.1), i.time));
-        let k = 1.0 - (-dt * 16.0).exp();
-        let ring = match self.ring {
-            // Far jumps (another screen) snap closer quickly but still glide.
-            Some(r) => Rect::from_min_max(r.min + (target.min - r.min) * k, r.max + (target.max - r.max) * k),
-            None => target,
-        };
-        let settled = (ring.min - target.min).length() < 0.5 && (ring.max - target.max).length() < 0.5;
-        self.ring = Some(if settled { target } else { ring });
-        if !settled {
-            ui.ctx().request_repaint();
-        }
-        let mut rect = self.ring.unwrap();
-        // Nudge when there's nowhere to go.
-        if let Some((dir, at)) = self.bump {
-            let e = (now - at) as f32 / 0.25;
-            if e >= 1.0 {
+        let Some((bounds, place)) = self.focused() else { return };
+        let (_, rect, r_override) = self.ring_target.filter(|(id, _, _)| Some(*id) == self.current).unwrap_or((Id::NULL, bounds, 0.0));
+        let now = ui.input(|i| i.time);
+        let mut pulse = ((now * 2.6).sin() as f32) * 0.5 + 0.5;
+        if let Some(at) = self.bump {
+            let elapsed = ((now - at) / 0.25) as f32;
+            if elapsed >= 1.0 {
                 self.bump = None;
             } else {
-                let amount = (e * std::f32::consts::PI).sin() * 10.0 * s;
-                let v = match dir {
-                    Dir::Up => egui::vec2(0.0, -amount),
-                    Dir::Down => egui::vec2(0.0, amount),
-                    Dir::Left => egui::vec2(-amount, 0.0),
-                    Dir::Right => egui::vec2(amount, 0.0),
-                };
-                rect = rect.translate(v);
+                pulse = pulse.max((elapsed * std::f32::consts::PI).sin());
                 ui.ctx().request_repaint();
             }
         }
         let radius = if r_override > 0.0 { r_override } else { radius };
-        let pulse = ((now * 2.6).sin() as f32) * 0.5 + 0.5;
-        let p = ui.painter();
+        let p = match place {
+            Place::Page => ui.painter().with_clip_rect(page_clip),
+            Place::Bar => ui.painter().clone(),
+        };
         // Soft outer glow, wider and fainter outward.
         for i in 1..=5 {
             let grow = i as f32 * 3.0 * s + pulse * 2.0 * s;
@@ -229,11 +207,6 @@ impl Focus {
         let ring_color = ui::widgets::mix(t.accent, Color32::WHITE, 0.25 + 0.2 * pulse);
         p.rect_stroke(rect.expand(2.0 * s), CornerRadius::same((radius + 2.0 * s).min(255.0) as u8), Stroke::new(3.5 * s, ring_color), StrokeKind::Outside);
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
-    }
-
-    /// Forget the ring so it appears without gliding (opening an overlay).
-    pub fn reset_ring(&mut self) {
-        self.ring = None;
     }
 }
 
@@ -330,4 +303,38 @@ pub fn since(ui: &Ui, start: f64, secs: f32) -> f32 {
         ui.ctx().request_repaint();
     }
     ease(e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_ring_tracks_the_drawn_bounds_and_respects_the_footer() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(300.0, 240.0));
+        let content = Rect::from_min_max(screen.min, egui::pos2(300.0, 180.0));
+        let id = Id::unique("scrolling-card");
+        let mut focus = Focus { current: Some(id), ..Default::default() };
+        for y in [134.0, 112.0] {
+            let bounds = Rect::from_min_size(egui::pos2(50.0, y), egui::vec2(110.0, 85.0));
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                focus.begin(ui, None, false);
+                focus.item(ui, id, bounds, content, Place::Page);
+                focus.ring_around(bounds, 12.0);
+                focus.paint_ring(ui, &Theme::default(), 1.0, 12.0, content);
+            });
+            output.textures_delta.clear();
+            let rectangles: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.stroke.width > 0.0 => Some((shape.clip_rect, rect.rect)),
+                _ => None,
+            }).collect();
+            assert_eq!(rectangles.len(), 6);
+            for (clip, rect) in &rectangles {
+                assert_eq!(*clip, content);
+                assert_eq!(rect.center(), bounds.center());
+            }
+            assert_eq!(rectangles.last().unwrap().1, bounds.expand(2.0));
+        }
+    }
 }

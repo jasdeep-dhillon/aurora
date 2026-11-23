@@ -41,6 +41,7 @@ pub fn draw(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, pos: f32) -> f32 {
         Page::Tab(Tab::Friends) => friends(bp, ui, f, top),
         Page::Game(id) => game(bp, ui, f, top, id),
         Page::StoreApp(id) => store_app(bp, ui, f, top, id),
+        Page::Review(id, review) => review_page(ui, f, top, id, &review),
         Page::Search => search(bp, ui, f, top),
         Page::Shots(id, i) => shots(bp, ui, f, id, i),
         Page::Settings => super::settings::page(bp, ui, f),
@@ -160,9 +161,9 @@ fn button(bp: &mut BigPicture, ui: &Ui, f: &Frame, id: Id, at: egui::Pos2, min_w
     let wdt = paint::pill_width(ui, icon.is_some(), label, f.s).max(min_w);
     let r = Rect::from_min_size(at, vec2(wdt, h));
     let hit = bp.focus.item(ui, id, r, ui.clip_rect(), Place::Page);
-    paint::pill(ui, &f.t, r, icon, label, kind, &hit, f.s, progress);
+    let shown = paint::pill(ui, &f.t, r, icon, label, kind, &hit, f.s, progress);
     if hit.focused {
-        bp.focus.ring_around(paint::grow(r, 1.0 + 0.04 * hit.glow), h / 2.0);
+        bp.focus.ring_around(shown, shown.height() / 2.0);
     }
     (r, hit)
 }
@@ -476,9 +477,9 @@ fn game(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppId) ->
     let screen = ui.max_rect();
     let hero = Rect::from_min_size(pos2(screen.left(), top - 104.0 * s), vec2(screen.width(), 600.0 * s));
     let zoom = 1.0 + 0.08 * (1.0 - since(ui, bp.page_since, 1.8));
-    // The art runs up under the tab bar.
+    // The art runs under the tab bar, but the zoom must stay inside the fade.
     let clip = ui.clip_rect();
-    ui.set_clip_rect(Rect::from_min_max(screen.min, clip.max));
+    ui.set_clip_rect(hero.intersect(Rect::from_min_max(screen.min, clip.max)));
     if !w::paint_cover_first(ui, paint::grow(hero, zoom), &[&art::hero(id), &art::header(id)], egui::CornerRadius::ZERO) {
         w::fade_down(ui, hero, f.t.surface, 0.0);
     }
@@ -696,23 +697,35 @@ fn store_tile(bp: &mut BigPicture, ui: &mut Ui, f: &Frame, r: Rect, hit: &Hit, o
     }
 }
 
+fn store_details_error(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, y: f32, id: AppId, error: &str) -> f32 {
+    if empty(bp, ui, f, y, icons::WARNING, t!("The store didn't load"), &i18n::tr_dyn(error), Some((icons::REFRESH, t!("Try again")))) == Some(true) {
+        with_store(f.app, f.actions, |store, _| store.retry_details(id));
+    }
+    500.0 * f.s
+}
+
 fn store_app(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppId) -> f32 {
     let s = f.s;
     match with_store(f.app, f.actions, |store, cx| store.big_picture_access(cx, id)).flatten() {
-        Some(true) => {}
-        Some(false) => {
+        Some(Ok(true)) => {}
+        Some(Ok(false)) => {
             if empty(bp, ui, f, top, icons::WARNING, t!("Mature content"), t!("This game contains content you chose to hide in your store preferences."), Some((icons::STORE, t!("View page")))) == Some(true) {
                 with_store(f.app, f.actions, |store, _| store.allow_big_picture_page(id));
             }
             return 500.0 * s;
         }
+        Some(Err(error)) => return store_details_error(bp, ui, f, top, id, &error),
         None => {
             empty(bp, ui, f, top, icons::STORE, t!("Loading…"), "", None);
             return 500.0 * s;
         }
     }
     bp.bg_want = Some(id);
-    let details = with_store(f.app, f.actions, |st, cx| st.details_for(cx, id)).flatten();
+    let details = match with_store(f.app, f.actions, |st, _| st.details_result(id)).flatten() {
+        Some(Ok(details)) => Some(details),
+        Some(Err(error)) => return store_details_error(bp, ui, f, top, id, &error),
+        None => None,
+    };
     let mut y = top + 20.0 * s;
     let left = f.view.left() + f.pad;
     let header = Rect::from_min_size(pos2(left, y), vec2(640.0 * s, 300.0 * s));
@@ -823,64 +836,122 @@ fn store_app(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppI
         }
     }
 
-    // Reviews: the share of thumbs up, then the most helpful ones.
-    let all = with_store(f.app, f.actions, |st, _| st.ratings_for(id)).flatten();
-    let filter = model::ReviewFilter::default();
-    let review_key = (id, i18n::language());
-    if bp.reviews_requested != Some(review_key) {
-        bp.reviews_requested = Some(review_key);
-        if !f.app.demo && f.app.state.online() {
-            f.app.client.send(Command::LoadAppReviews { app_id: id, language: review_key.1.steam_name().into(), cursor: None, filter });
-        }
-    }
-    let summary = f.app.state.app_reviews.get(&(id, filter)).and_then(|r| r.as_ref().ok());
-    let recent = summary.map(|r| (u64::from(r.positive), u64::from(r.negative))).filter(|(u, d)| u + d > 0);
-    let reviews = summary.map(|r| r.items.clone()).unwrap_or_default();
-    if all.is_some() || !reviews.is_empty() {
-        heading(ui, f, &mut y, t!("Reviews"));
-        let p = ui.painter().clone();
-        let mut x = left;
-        let bars = [(t!("PAST MONTH"), recent.map(|(u, d)| ((u * 100 / (u + d)) as u32, u + d))), (t!("ALL TIME"), all)];
-        for (label, value) in bars {
-            let Some((pct, count)) = value else { continue };
-            p.text(pos2(x, y), Align2::LEFT_TOP, label, w::font_bold(15.0 * s), f.t.text_faint);
-            p.text(pos2(x, y + 24.0 * s), Align2::LEFT_TOP, t!("{pct}% positive", pct = pct), w::font_semibold(28.0 * s), if pct >= 70 { Color32::from_rgb(0x66, 0xC0, 0xF4) } else if pct >= 40 { f.t.away } else { f.t.danger });
-            let bar = Rect::from_min_size(pos2(x, y + 66.0 * s), vec2(300.0 * s, 8.0 * s));
-            paint::bar(ui, &f.t, bar, pct as f32 / 100.0, false);
-            p.text(pos2(x, y + 82.0 * s), Align2::LEFT_TOP, t!("{count} reviews", count = crate::builtin::store::thousands(count)), w::font(17.0 * s), f.t.text_dim);
-            x += 380.0 * s;
-        }
-        y += 130.0 * s;
-        if !reviews.is_empty() {
-            let list: Vec<_> = reviews.into_iter().take(10).collect();
-            let tiles = shelf(bp, ui, f, &mut y, "reviews", list.len(), vec2(560.0 * s, 230.0 * s), |i| Id::unique(("bp-review", i)));
-            let mut focused = None;
-            for (i, r, hit) in tiles {
-                let rv = &list[i];
-                let shown = paint::grow(r, 1.0 + 0.03 * hit.glow);
-                paint::shadow(ui.painter(), shown, 12.0 * s, s, 0.4 + 0.6 * hit.glow, Color32::from_black_alpha(200));
-                ui.painter().rect_filled(shown, paint::radius(12.0 * s), f.t.surface);
-                let (icon, color, verdict) = if rv.recommended { (icons::THUMBS_UP, Color32::from_rgb(0x66, 0xC0, 0xF4), t!("Recommended|review")) } else { (icons::THUMBS_DOWN, f.t.danger, t!("Not recommended|review")) };
-                let pad = 20.0 * s;
-                let q = ui.painter();
-                q.text(shown.left_top() + vec2(pad, pad), Align2::LEFT_TOP, format!("{icon}  {verdict}"), w::font_bold(20.0 * s), color);
-                paint::line(q, shown.left_top() + vec2(pad, pad + 32.0 * s), Align2::LEFT_TOP, &t!("{h} hrs played", h = format!("{:.1}", rv.minutes_played as f32 / 60.0)), w::font(16.0 * s), f.t.text_faint, shown.width() - 2.0 * pad);
-                paint::wrapped(q, shown.left_top() + vec2(pad, pad + 66.0 * s), &rv.text.replace('\n', " "), w::font(18.0 * s), f.t.text_dim, shown.width() - 2.0 * pad, 5);
-                if hit.focused {
-                    bp.focus.ring_around(shown, 12.0 * s);
-                    focused = Some(rv.clone());
-                }
-            }
-            y += 22.0 * s;
-            // The focused review in full, under the row.
-            if let Some(rv) = focused {
-                let r = paint::wrapped(&p, pos2(left, y), &rv.text, w::font(20.0 * s), f.t.text, f.view.width() - 2.0 * f.pad, 14);
-                y = r.bottom() + 20.0 * s;
-            }
-            y += 40.0 * s;
-        }
-    }
+    store_reviews(bp, ui, f, id, &mut y);
     y - top + 20.0 * s
+}
+
+fn review_filter() -> model::ReviewFilter {
+    model::ReviewFilter { order: model::ReviewOrder::Recent, all_languages: true, ..Default::default() }
+}
+
+fn reviews<'a>(f: &'a Frame<'_>, id: AppId) -> Option<&'a Result<model::AppReviews, String>> {
+    let filter = if f.app.demo { model::ReviewFilter::default() } else { review_filter() };
+    f.app.state.app_reviews.get(&(id, filter))
+}
+
+fn store_reviews(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, id: AppId, y: &mut f32) {
+    let s = f.s;
+    let left = f.view.left() + f.pad;
+    let language = i18n::language();
+    let load = |f: &Frame, cursor| f.app.client.send(Command::LoadAppReviews {
+        app_id: id, language: language.steam_name().into(), cursor, filter: review_filter(),
+    });
+    if bp.reviews_requested != Some((id, language)) && !f.app.demo && f.app.state.online() {
+        bp.reviews_requested = Some((id, language));
+        bp.review_cursor = None;
+        load(f, None);
+    }
+    let rating = with_store(f.app, f.actions, |store, _| store.ratings_for(id)).flatten();
+    let result = reviews(f, id);
+    let all = rating.or_else(|| {
+        let summary = result?.as_ref().ok()?;
+        let (positive, total) = (u64::from(summary.positive), u64::from(summary.total));
+        (total > 0).then(|| ((positive * 100 / total).min(100) as u32, total))
+    });
+    if all.is_none() && result.is_none() {
+        return;
+    }
+    heading(ui, f, y, t!("Reviews"));
+    show_review_rating(ui, f, y, all);
+    let summary = match result {
+        None => return,
+        Some(Ok(summary)) => summary,
+        Some(Err(error)) => {
+            paint::line(ui.painter(), pos2(left, *y), Align2::LEFT_TOP, &i18n::tr_dyn(error.as_str()), w::font(20.0 * s), f.t.text_dim, f.view.width() - 2.0 * f.pad);
+            *y += 36.0 * s;
+            let (_, hit) = button(bp, ui, f, Id::unique("bp-reviews-retry"), pos2(left, *y), 0.0, Some(icons::REFRESH), t!("Try again"), Kind::Secondary, None);
+            if hit.activated {
+                bp.review_cursor = None;
+                load(f, None);
+            }
+            *y += 90.0 * s;
+            return;
+        }
+    };
+    if !summary.items.is_empty() {
+        let tiles = shelf(bp, ui, f, y, "reviews", summary.items.len(), vec2(560.0 * s, 230.0 * s), |i| Id::unique(("bp-review", &summary.items[i].id)));
+        for (i, r, hit) in tiles {
+            let review = &summary.items[i];
+            let shown = paint::grow(r, 1.0 + 0.03 * hit.glow);
+            paint::shadow(ui.painter(), shown, 12.0 * s, s, 0.4 + 0.6 * hit.glow, Color32::from_black_alpha(200));
+            ui.painter().rect_filled(shown, paint::radius(12.0 * s), f.t.surface);
+            let origin = shown.left_top() + vec2(20.0 * s, 20.0 * s);
+            review_heading(ui, f, origin, review);
+            paint::wrapped(ui.painter(), origin + vec2(0.0, 66.0 * s), &review.text.replace('\n', " "), w::font(18.0 * s), f.t.text_dim, shown.width() - 40.0 * s, 5);
+            if hit.focused {
+                bp.focus.ring_around(shown, 12.0 * s);
+            }
+            if hit.activated {
+                bp.open(Page::Review(id, review.id.clone()), f.now);
+            }
+        }
+        *y += 22.0 * s;
+    }
+    if let Some(cursor) = summary.cursor.as_ref().filter(|_| !f.app.demo && f.app.state.online() && summary.items.len() < summary.total as usize) {
+        // Retain a stable focus target while this page is loading.
+        let pending = bp.review_cursor.as_ref() == Some(cursor);
+        let label = if pending { t!("Loading…") } else { t!("More reviews") };
+        let (_, hit) = button(bp, ui, f, Id::unique("bp-more-reviews"), pos2(left, *y), 0.0, Some(icons::CARET_DOWN), label, Kind::Secondary, None);
+        if hit.activated && !pending {
+            bp.review_cursor = Some(cursor.clone());
+            load(f, Some(cursor.clone()));
+        }
+        *y += 92.0 * s;
+    }
+}
+
+fn show_review_rating(ui: &Ui, f: &Frame, y: &mut f32, rating: Option<(u32, u64)>) {
+    let Some((pct, count)) = rating else { return };
+    let s = f.s;
+    let x = f.view.left() + f.pad;
+    let p = ui.painter();
+    p.text(pos2(x, *y), Align2::LEFT_TOP, t!("ALL TIME"), w::font_bold(15.0 * s), f.t.text_faint);
+    let color = if pct >= 70 { Color32::from_rgb(0x66, 0xC0, 0xF4) } else if pct >= 40 { f.t.away } else { f.t.danger };
+    p.text(pos2(x, *y + 24.0 * s), Align2::LEFT_TOP, t!("{pct}% positive", pct = pct), w::font_semibold(28.0 * s), color);
+    let bar = Rect::from_min_size(pos2(x, *y + 66.0 * s), vec2(300.0 * s, 8.0 * s));
+    paint::bar(ui, &f.t, bar, pct as f32 / 100.0, false);
+    p.text(pos2(x, *y + 82.0 * s), Align2::LEFT_TOP, t!("{count} reviews", count = crate::builtin::store::thousands(count)), w::font(17.0 * s), f.t.text_dim);
+    *y += 130.0 * s;
+}
+
+fn review_heading(ui: &Ui, f: &Frame, origin: egui::Pos2, review: &model::AppReview) {
+    let (icon, color, verdict) = if review.recommended {
+        (icons::THUMBS_UP, Color32::from_rgb(0x66, 0xC0, 0xF4), t!("Recommended|review"))
+    } else {
+        (icons::THUMBS_DOWN, f.t.danger, t!("Not recommended|review"))
+    };
+    ui.painter().text(origin, Align2::LEFT_TOP, format!("{icon}  {verdict}"), w::font_bold(20.0 * f.s), color);
+    ui.painter().text(origin + vec2(0.0, 32.0 * f.s), Align2::LEFT_TOP, t!("{h} hrs played", h = format!("{:.1}", review.minutes_played as f32 / 60.0)), w::font(16.0 * f.s), f.t.text_faint);
+}
+
+fn review_page(ui: &mut Ui, f: &mut Frame, top: f32, id: AppId, review_id: &str) -> f32 {
+    let Some(review) = reviews(f, id).and_then(|result| result.as_ref().ok()).and_then(|summary| summary.items.iter().find(|review| review.id == review_id)) else {
+        return 0.0;
+    };
+    let origin = pos2(f.view.left() + f.pad, top + 26.0 * f.s);
+    review_heading(ui, f, origin, review);
+    let rect = paint::wrapped(ui.painter(), origin + vec2(0.0, 70.0 * f.s), &review.text, w::font(22.0 * f.s), f.t.text, f.view.width() - 2.0 * f.pad, usize::MAX);
+    rect.bottom() - top + 30.0 * f.s
 }
 
 /// A trailer over the whole page.
@@ -1511,12 +1582,6 @@ fn chat_input_id() -> Id {
     Id::unique("bp-chat-input")
 }
 
-/// A key of the on-screen keyboard (see `keyboard`).
-fn is_key(id: Option<Id>) -> bool {
-    let Some(id) = id else { return false };
-    (0..4).any(|r| (0..11).any(|c| id == Id::unique(("bp-key", r, c)))) || (0..4).any(|i| id == Id::unique(("bp-key-special", i)))
-}
-
 /// A conversation over the whole page: the friend at the top, the history
 /// filling the middle (it scrolls), the message box at the bottom. The
 /// on-screen keyboard slides up while the message box is selected, like
@@ -1568,10 +1633,9 @@ fn chat_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, _top: f32, target:
     paint::line(&p, pos2(tx, av.center().y + 4.0 * s), Align2::LEFT_TOP, &status, w::font_medium(20.0 * s), color, right - tx);
     let head_bottom = av.bottom() + 18.0 * s;
 
-    // The keyboard slides up while the message box or one of its keys is focused.
+    // Opening the keyboard is an action. Pointer focus may change as it moves.
     let input_id = chat_input_id();
-    let want_keys = bp.focus.current == Some(input_id) || is_key(bp.focus.current);
-    bp.chat_keys = want_keys;
+    let want_keys = bp.chat_keys;
     let k = super::focus::ease(ui.ctx().animate_bool_with_time(Id::unique(("bp-chat-keys", target)), want_keys, 0.25));
     let key = 74.0 * s;
     let unit = key + 10.0 * s;
@@ -1586,7 +1650,11 @@ fn chat_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, _top: f32, target:
         let edge = Rect::from_min_size(panel.min, vec2(panel.width(), 2.0 * s));
         w::gradient(&p, edge, f.t.accent.gamma_multiply(0.0), f.t.accent.gamma_multiply(0.8), true);
         let mut ky = panel_top + 26.0 * s;
-        match keyboard(bp, ui, f, f.view.center().x - keys_w / 2.0, &mut ky, t!("Send")) {
+        let mut keys_ui = paint::faded(ui, panel, k);
+        if !want_keys {
+            keys_ui.disable();
+        }
+        match keyboard(bp, &mut keys_ui, f, f.view.center().x - keys_w / 2.0, &mut ky, t!("Send")) {
             Some(Key::Char(ch)) => bp.message.push(ch),
             Some(Key::Del) => {
                 bp.message.pop();
@@ -1637,7 +1705,10 @@ fn chat_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, _top: f32, target:
     p.vline(caret.right() + 3.0 * s, (caret.top() + 3.0 * s)..=(caret.bottom() - 3.0 * s), egui::Stroke::new(3.0 * s, f.t.accent.gamma_multiply(blink)));
     // A on the box: straight to the letters.
     if hit.activated {
-        bp.focus.current = Some(Id::unique(("bp-key", 1, 0)));
+        bp.chat_keys = true;
+        if want_keys {
+            bp.focus.current = Some(Id::unique(("bp-key", 1, 0)));
+        }
     }
     let empty_box = bp.message.trim().is_empty();
     let (_, send_hit) = button(bp, ui, f, Id::unique(("bp-chat-send", target)), pos2(field.right() + 18.0 * s, bottom - 72.0 * s), send_w, Some(icons::SEND), send_label, if empty_box { Kind::Secondary } else { Kind::Primary }, None);

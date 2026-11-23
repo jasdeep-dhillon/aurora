@@ -64,6 +64,7 @@ enum Page {
     Tab(Tab),
     Game(AppId),
     StoreApp(AppId),
+    Review(AppId, String),
     Search,
     /// Screenshots of a store page, at one of them.
     Shots(AppId, usize),
@@ -158,6 +159,7 @@ pub struct BigPicture {
     pub launch_dialog: bool,
     modal_keys: Vec<(egui::Key, egui::Modifiers)>,
     reviews_requested: Option<(AppId, i18n::Lang)>,
+    review_cursor: Option<String>,
 }
 
 impl BigPicture {
@@ -218,7 +220,7 @@ impl BigPicture {
         self.stack.clear();
         self.menu = None;
         self.focus.current = None;
-        self.focus.reset_ring();
+        self.chat_keys = false;
         ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
 
@@ -295,6 +297,7 @@ impl BigPicture {
     }
 
     fn arrive(&mut self, now: f64, slide: f32) {
+        self.chat_keys = false;
         self.focus.current = self.memory.get(&self.page().key()).copied();
         self.page_since = now;
         self.slide = slide;
@@ -523,7 +526,10 @@ impl BigPicture {
                     Press::A if typing && from_keys && !chat && self.query.trim() != self.submitted => submit = true,
                     Press::A => press = true,
                     // Chat with the keyboard up: B puts it away first.
-                    Press::B if chat && self.chat_keys => self.focus.current = Some(screens::chat_history_id()),
+                    Press::B if chat && self.chat_keys => {
+                        self.chat_keys = false;
+                        self.focus.current = Some(screens::chat_history_id());
+                    }
                     Press::B => self.back(now),
                     Press::X => x = true,
                     Press::Y => y = true,
@@ -568,6 +574,10 @@ impl BigPicture {
         if let (Page::Embedded(..), Some(d @ (Dir::Up | Dir::Down))) = (self.page(), dir) {
             self.wheel += if d == Dir::Up { 120.0 } else { -120.0 } * s;
             ctx.request_repaint();
+            dir = None;
+        }
+        if let (Page::Review(..), Some(d @ (Dir::Up | Dir::Down))) = (self.page(), dir) {
+            self.scroller("page").target += if d == Dir::Up { -120.0 } else { 120.0 } * s;
             dir = None;
         }
         // The screenshot viewer pages with left/right.
@@ -631,12 +641,12 @@ impl BigPicture {
         }
 
         self.top_bar(ui, &mut f, screen, top_h);
-        self.hint_bar(ui, &mut f, screen, hint_h);
         let first: Vec<Id> = self.preferred.into_iter().collect();
         self.focus.end(&first, tab_id(self.tab));
         if !menu_open {
-            self.focus.paint_ring(ui, &t, s, 12.0 * s);
+            self.focus.paint_ring(ui, &t, s, 12.0 * s, content.clip_rect());
         }
+        self.hint_bar(ui, &mut f, screen, hint_h);
         if self.menu.is_some() {
             menu::show(self, ui, &mut f, screen);
         }
@@ -701,7 +711,7 @@ impl BigPicture {
         let total: f32 = widths.iter().sum::<f32>() + gap * (TABS.len() - 1) as f32;
         let mut x = bar.center().x - total / 2.0;
         let tab_h = 54.0 * s;
-        let mut selected_rect = None;
+        let mut tabs = Vec::with_capacity(TABS.len());
         for (i, tab) in TABS.iter().enumerate() {
             let r = Rect::from_min_size(pos2(x, bar.center().y - tab_h / 2.0), vec2(widths[i], tab_h));
             x += widths[i] + gap;
@@ -710,9 +720,6 @@ impl BigPicture {
                 self.focus.ring_around(r, tab_h / 2.0);
             }
             let selected = *tab == self.tab;
-            if selected {
-                selected_rect = Some(r);
-            }
             if hit.focused && !selected && !self.focus.by_pointer {
                 // Moving along the tabs (D-pad, keys) shows each one; the
                 // mouse only highlights a tab until it's clicked.
@@ -723,32 +730,29 @@ impl BigPicture {
                 self.focus.current = self.memory.get(&Page::Tab(*tab).key()).copied().or(Some(Id::NULL));
                 self.focus.moved = true;
             }
-            let color = if selected { t.text } else { w::mix(t.text_dim, t.text, hit.glow) };
-            p.text(r.center(), Align2::CENTER_CENTER, tab_label(f, *tab), font.clone(), color);
+            tabs.push((r, hit.glow));
         }
-        // The highlight slides from tab to tab.
-        if let Some(target) = selected_rect {
-            let dt = ui.input(|i| i.stable_dt.min(0.1));
-            let k = 1.0 - (-dt * 14.0).exp();
-            let cur = self.tab_pill.map(|c| Rect::from_min_max(c.min + (target.min - c.min) * k, c.max + (target.max - c.max) * k)).unwrap_or(target);
-            if (cur.min - target.min).length() > 0.5 {
-                ui.ctx().request_repaint();
-            }
-            self.tab_pill = Some(cur);
-            let under = ui.painter().clone();
-            // Behind the label: a soft pill and a bright line under it.
-            under.rect_filled(cur, paint::radius(cur.height() / 2.0), Color32::from_white_alpha(18));
-            let line = Rect::from_center_size(pos2(cur.center().x, cur.bottom() + 6.0 * s), vec2(cur.width() * 0.4, 4.0 * s));
-            w::gradient(&under.with_clip_rect(line), line, t.accent, t.accent_2, true);
-            // Labels again on top of the pill.
-            let mut x = bar.center().x - total / 2.0;
-            for (i, tab) in TABS.iter().enumerate() {
-                let r = Rect::from_min_size(pos2(x, bar.center().y - tab_h / 2.0), vec2(widths[i], tab_h));
-                x += widths[i] + gap;
-                if *tab == self.tab {
-                    p.text(r.center(), Align2::CENTER_CENTER, tab_label(f, *tab), font.clone(), t.text);
-                }
-            }
+        // The selected tab's fill, underline and focus outline share one animation.
+        let target = tabs[self.tab.index()].0;
+        let dt = ui.input(|i| i.stable_dt.min(0.1));
+        let k = 1.0 - (-dt * 14.0).exp();
+        let cur = self.tab_pill.map(|c| Rect::from_min_max(c.min + (target.min - c.min) * k, c.max + (target.max - c.max) * k)).unwrap_or(target);
+        let cur = if (cur.min - target.min).length() > 0.5 || (cur.max - target.max).length() > 0.5 {
+            ui.ctx().request_repaint();
+            cur
+        } else {
+            target
+        };
+        self.tab_pill = Some(cur);
+        p.rect_filled(cur, paint::radius(cur.height() / 2.0), Color32::from_white_alpha(18));
+        let line = Rect::from_center_size(pos2(cur.center().x, cur.bottom() + 6.0 * s), vec2(cur.width() * 0.4, 4.0 * s));
+        w::gradient(&p.with_clip_rect(line), line, t.accent, t.accent_2, true);
+        if self.focus.current == Some(tab_id(self.tab)) {
+            self.focus.ring_around(cur, cur.height() / 2.0);
+        }
+        for (tab, (r, glow)) in TABS.iter().zip(tabs) {
+            let color = if *tab == self.tab { t.text } else { w::mix(t.text_dim, t.text, glow) };
+            p.text(r.center(), Align2::CENTER_CENTER, tab_label(f, *tab), font.clone(), color);
         }
 
         // Right: controller and account.
@@ -789,7 +793,7 @@ impl BigPicture {
             p.text(pos2(bar.left() + pad, bar.center().y), Align2::LEFT_CENTER, left, w::font_medium(18.0 * s), t.text_faint);
         }
         let menu_open = self.menu.is_some();
-        let mut hints: Vec<(Press, String)> = vec![(Press::A, t!("Select").into()), (Press::B, if menu_open { t!("Close") } else { t!("Back") }.into())];
+        let mut hints: Vec<(Press, String)> = vec![(Press::A, t!("Select").into()), (Press::B, if menu_open || matches!(self.page(), Page::Chat(_)) && self.chat_keys { t!("Close") } else { t!("Back") }.into())];
         if !menu_open {
             if let Some(x) = screens::x_hint(self) {
                 hints.push((Press::X, x));

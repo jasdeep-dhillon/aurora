@@ -246,6 +246,10 @@ impl Store {
     }
 
     fn details(&mut self, id: AppId) -> Option<Arc<Details>> {
+        self.details_result(id).and_then(Result::ok)
+    }
+
+    pub(crate) fn details_result(&mut self, id: AppId) -> Option<Result<Arc<Details>, String>> {
         self.touch(id);
         if !self.details.contains_key(&id) {
             let api = self.api.clone();
@@ -253,9 +257,16 @@ impl Store {
             self.details.insert(id, slot);
         }
         match &*self.details[&id].lock().unwrap() {
-            Load::Ready(d) => Some(d.clone()),
-            _ => None,
+            Load::Ready(d) => Some(Ok(d.clone())),
+            Load::Failed(error) => Some(Err(error.clone())),
+            Load::Loading => None,
         }
+    }
+
+    pub(crate) fn retry_details(&mut self, id: AppId) {
+        let api = self.api.clone();
+        let slot = self.fetch(async move { api.refresh_details(id).await.map(Arc::new) });
+        self.details.insert(id, slot);
     }
 
     fn browse_info(&mut self, id: AppId) -> Option<Arc<BrowseInfo>> {
@@ -521,15 +532,17 @@ impl Store {
     }
 
     /// `None` while locale or content descriptors are still loading.
-    pub(crate) fn big_picture_access(&mut self, ctx: &Ctx, id: AppId) -> Option<bool> {
+    pub(crate) fn big_picture_access(&mut self, ctx: &Ctx, id: AppId) -> Option<Result<bool, String>> {
         if !self.sync_locale(ctx) {
             return None;
         }
         if self.allowed.contains(&id) || self.hidden.is_empty() {
-            return Some(true);
+            return Some(Ok(true));
         }
-        let classified = self.shown(id);
-        classified.or_else(|| self.details(id).map(|details| {
+        if let Some(classified) = self.shown(id) {
+            return Some(Ok(classified));
+        }
+        self.details_result(id).map(|result| result.map(|details| {
             !details.content_descriptors.iter().any(|descriptor| self.hidden.contains(descriptor))
         }))
     }
@@ -539,7 +552,7 @@ impl Store {
     }
 
     pub(crate) fn details_for(&mut self, ctx: &Ctx, id: AppId) -> Option<Arc<Details>> {
-        if self.big_picture_access(ctx, id) != Some(true) {
+        if !matches!(self.big_picture_access(ctx, id), Some(Ok(true))) {
             return None;
         }
         self.details(id)

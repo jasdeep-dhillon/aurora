@@ -141,7 +141,7 @@ pub fn show(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, screen: Rect) {
     }
     let ids: Vec<Id> = (0..items.len()).map(|i| Id::unique((salt, i))).collect();
     m.focus.end(&ids[..1], ids[0]);
-    m.focus.paint_ring(ui, &t, s, 14.0 * s);
+    m.focus.paint_ring(ui, &t, s, 14.0 * s, screen);
     let tip = if bp.device == super::input::Device::Pad { t!("Press Guide again to leave Big Picture") } else { t!("Press Home to leave Big Picture") };
     p.text(pos2(panel.left() + pad, panel.bottom() - 40.0 * s), Align2::LEFT_BOTTOM, tip, w::font(17.0 * s), t.text_faint);
 
