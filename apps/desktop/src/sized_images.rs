@@ -47,6 +47,7 @@ struct Job {
     uri: String,
     bytes: egui::load::Bytes,
     cover: bool,
+    blur_bottom: bool,
     w: u32,
     h: u32,
     ctx: egui::Context,
@@ -88,7 +89,12 @@ fn worker(rx: &Mutex<Receiver<Job>>, entries: &Mutex<HashMap<String, Entry>>) {
     let mut resizer = fast_image_resize::Resizer::new();
     loop {
         let Ok(job) = rx.lock().unwrap().recv() else { return };
-        let result = decode_with(&job.bytes, job.cover, job.w, job.h, &mut resizer);
+        let result = decode_with(&job.bytes, job.cover, job.w, job.h, &mut resizer).map(|mut image| {
+            if job.blur_bottom {
+                blur_bottom(&mut image);
+            }
+            image
+        });
         let mut map = entries.lock().unwrap();
         // Forgotten meanwhile (another page): don't keep it.
         if matches!(map.get(&job.uri), Some(Entry::Pending)) {
@@ -149,13 +155,39 @@ fn decode_with(
     Ok(ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()))
 }
 
+/// Bake a smooth vertical blur into the existing artwork. Only the small
+/// copy needs a Gaussian pass, and both samples use the same coordinates.
+fn blur_bottom(image: &mut ColorImage) {
+    use egui::Color32;
+    use image::imageops::{self, FilterType};
+    let [w, h] = image.size;
+    let rgba = image::RgbaImage::from_fn(w as u32, h as u32, |x, y| {
+        image::Rgba(image.pixels[y as usize * w + x as usize].to_array())
+    });
+    let small = imageops::resize(&rgba, (w as u32 / 4).max(1), (h as u32 / 4).max(1), FilterType::Triangle);
+    let soft = imageops::resize(&imageops::blur(&small, 3.5), w as u32, h as u32, FilterType::Triangle);
+    for (y, (sharp, blurred)) in image.pixels.chunks_exact_mut(w).zip(soft.as_raw().chunks_exact(w * 4)).enumerate() {
+        let k = ((y as f32 / h as f32 - 0.34) / 0.60).clamp(0.0, 1.0);
+        let weight = (256.0 * k * k * (3.0 - 2.0 * k)).round() as u16;
+        if weight == 0 {
+            continue;
+        }
+        for (pixel, other) in sharp.iter_mut().zip(blurred.chunks_exact(4)) {
+            let from = pixel.to_array();
+            let mix = |i: usize| ((u16::from(from[i]) * (256 - weight) + u16::from(other[i]) * weight) / 256) as u8;
+            *pixel = Color32::from_rgba_premultiplied(mix(0), mix(1), mix(2), mix(3));
+        }
+    }
+}
+
 impl ImageLoader for SizedLoader {
     fn id(&self) -> &str {
         egui::generate_loader_id!(SizedLoader)
     }
 
     fn load(&self, ctx: &egui::Context, uri: &str, _: SizeHint) -> ImageLoadResult {
-        let Some((url, cover, w, h)) = ui::widgets::parse_sized(uri) else {
+        let plain = uri.strip_suffix(ui::widgets::BLUR_BOTTOM_SUFFIX);
+        let Some((url, cover, w, h)) = ui::widgets::parse_sized(plain.unwrap_or(uri)) else {
             return Err(LoadError::NotSupported);
         };
         match self.entries.lock().unwrap().get(uri) {
@@ -173,7 +205,7 @@ impl ImageLoader for SizedLoader {
                         loader.forget(url);
                     }
                 }
-                let job = Job { uri: uri.to_string(), bytes, cover, w, h, ctx: ctx.clone() };
+                let job = Job { uri: uri.to_string(), bytes, cover, blur_bottom: plain.is_some(), w, h, ctx: ctx.clone() };
                 if self.jobs.lock().unwrap().send(job).is_err() {
                     self.entries.lock().unwrap().insert(uri.to_string(), Entry::Failed("no decoder".into()));
                 }
@@ -214,6 +246,28 @@ mod tests {
         let mut out = std::io::Cursor::new(Vec::new());
         img.write_to(&mut out, image::ImageFormat::Jpeg).unwrap();
         out.into_inner()
+    }
+
+    #[test]
+    fn backdrop_keeps_the_top_sharp_and_blurs_the_bottom_in_place() {
+        let width = 128;
+        let height = 128;
+        let mut image = ColorImage::filled([width, height], egui::Color32::BLACK);
+        for row in image.pixels.chunks_exact_mut(width) {
+            for x in (0..width).step_by(2) {
+                row[x] = egui::Color32::WHITE;
+            }
+        }
+        let original = image.clone();
+        blur_bottom(&mut image);
+        assert_eq!(image.size, original.size);
+        assert_eq!(&image.pixels[..width * 40], &original.pixels[..width * 40]);
+        let contrast = |y| {
+            let i: usize = y * width + width / 2;
+            image.pixels[i].r().abs_diff(image.pixels[i + 1].r())
+        };
+        assert!(contrast(80) < contrast(40));
+        assert!(contrast(120) < contrast(80));
     }
 
     #[test]

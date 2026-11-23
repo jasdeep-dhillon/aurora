@@ -58,7 +58,7 @@ the official client for anti-cheat.
 ## Status
 
 Aurora's feature coverage compared with Valve's Steam desktop client on
-Windows and Linux. Based on a source review of Aurora's `main` at `cbd6f48`.
+Windows and Linux.
 
 **0** unavailable · **0.25** limited support · **0.5** usable with major gaps ·
 **0.75** most common workflows covered · **1** covers the workflows Aurora
@@ -86,9 +86,13 @@ and package.
 | Desktop integration | 0.75 | Desktop notifications and tray menus on Windows and supported Linux desktops. Registering Aurora as the `steam://` link handler is Windows-only. |
 | Settings, languages, and updates | 0.75 | English, French, Spanish, and Russian UI. The Windows installer updates automatically. Linux updates depend on the package. |
 | Steam Broadcast | 0.25 | Aurora can watch live broadcasts on Linux. Hosting broadcasts is unavailable. |
-| Big Picture | 0 | No Big Picture mode on `main`. |
+| Big Picture | 0.75 | Fullscreen Library, Store, Downloads, Friends, text chat, and settings with controller and keyboard navigation. |
 | Remote Play | 0 | No game streaming or Remote Play Together. |
 | Game Recording | 0 | No gameplay clip recording. |
+
+Open Big Picture with the monitor button, the app menu, the controller's
+Guide button while Aurora is focused, or `aurora --bigpicture`. Use
+`--bigpicture=window` to open it in a window.
 
 See [Steamworks compatibility](docs/steam-compatibility.md) for in-game API
 details and the [changelog](CHANGELOG.md) for release history.
@@ -137,7 +141,7 @@ Store trailers on Linux need `ffmpeg`, and `libpulse` for sound.
 
 ## Build from source
 
-Needs [Rust](https://rustup.rs).
+Needs [Rust](https://rustup.rs). On Linux, install the libudev development package (`libudev-dev` on Debian and Ubuntu).
 
 ```sh
 git clone https://github.com/mollie2999/Aurora.git

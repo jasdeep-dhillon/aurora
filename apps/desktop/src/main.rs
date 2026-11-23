@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod bigpicture;
 mod builtin;
 mod chrome;
 mod demo;
@@ -41,7 +42,16 @@ fn main() -> eframe::Result {
     let activation_token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
     #[cfg(not(target_os = "linux"))]
     let activation_token: Option<String> = None;
-    if !separate && links::forward_to_running(link.as_deref().unwrap_or("show"), activation_token.as_deref()) {
+    let request = link.as_deref().unwrap_or_else(|| {
+        if std::env::args().any(|a| a == "--bigpicture=window") {
+            links::BIG_PICTURE_WINDOW
+        } else if std::env::args().any(|a| a == "--bigpicture") {
+            links::BIG_PICTURE
+        } else {
+            "show"
+        }
+    });
+    if !separate && links::forward_to_running(request, activation_token.as_deref()) {
         return Ok(());
     }
     // An update downloaded last time installs now, before the app opens.

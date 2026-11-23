@@ -735,8 +735,21 @@ pub fn spawn(rt: &tokio::runtime::Handle, local: &local::LocalState, sink: clien
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     rt.spawn(async move {
         let me = demo_profile.steam_id;
+        let mut ordinal = 0;
+        let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
         while let Some(cmd) = rx.recv().await {
             match cmd {
+                Command::SendMessage { to, text } => sink(Event::Message(ChatMessage {
+                    friend: to, from: me, text, time: now(), invite: None, group_invite: None,
+                })),
+                Command::SendGroupMessage { group_id, chat_id, text } => {
+                    ordinal += 1;
+                    sink(Event::GroupMessage(GroupMessage {
+                        group_id, chat_id, from: me, text, time: now(), ordinal,
+                        invite: None, group_invite: None, deleted: false, server_msg: None,
+                        reactions: Vec::new(), mentioned_me: false,
+                    }));
+                }
                 Command::LoadProfileEdit { .. } => sink(Event::ProfileEdit(Ok(demo_edit.clone()))),
                 Command::LoadProfile { steam_id } if steam_id == me => sink(Event::Profile(demo_profile.clone())),
                 Command::LoadLocations { country, state } => {

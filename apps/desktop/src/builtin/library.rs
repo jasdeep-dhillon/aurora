@@ -203,6 +203,25 @@ pub(crate) enum Setup {
     Installed,
 }
 
+/// A game's main button, see [`Library::main_action`].
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum MainAction {
+    Play,
+    Running,
+    Update,
+    Install,
+    Syncing,
+    Preparing,
+    Moving(f32),
+    BackingUp(f32),
+    Queued,
+    Uninstalling,
+    /// Downloading or verifying.
+    Busy { fraction: f32, verifying: bool, paused: bool },
+    /// Not owned: only the store page.
+    StorePage,
+}
+
 pub(crate) fn setup_state(ctx: &Ctx, id: AppId, installed: bool) -> Setup {
     if let Some(d) = ctx.state.downloads.get(&id).filter(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)) {
         return Setup::Downloading(d.clone());
@@ -474,12 +493,10 @@ impl Extension for Library {
         }
         self.add_dialog(ui, &t, ctx);
         self.import_dialog(ui, &t, ctx);
-        self.drm_notice(ui, &t, ctx);
         self.reader(ui, &t, ctx);
         self.install_window(ui, &t, ctx);
         self.properties_window(ui, &t, ctx);
         self.run_pending(ctx);
-        self.cloud_conflict_dialog(ui, &t, ctx);
         self.naming_dialog(ui, &t);
         if let Some(mut dlg) = self.storage_dialog.take()
             && dlg.show(ui, &t, ctx, "library")
@@ -554,6 +571,10 @@ impl Extension for Library {
             pending_shortcuts: self.shortcut_after_install.clone(),
         })
         .ok()
+    }
+
+    fn as_any(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 
     fn load(&mut self, data: &str) {
@@ -759,7 +780,7 @@ impl Library {
         let name = ctx.state.app_name(app).unwrap_or_default().to_string();
         let dir = ctx.local.games.iter().find(|g| g.app_id == app).map(|g| g.install_dir.clone());
         let names: Vec<String> = hold.report.conflicts.iter().map(|c| c.name.clone()).collect();
-        let mut choice = None;
+        let mut choice = ui.input(|i| i.key_pressed(egui::Key::Escape)).then_some(0);
         ui::widgets::modal(ui.ctx(), egui::Id::unique(("cloud-conflict", app))).show(ui.ctx(), |ui| {
             ui.set_width(560.0);
             ui.horizontal(|ui| {
@@ -819,17 +840,9 @@ impl Library {
 
     /// "What's new": the latest update posts from games you play, newest first.
     fn whats_new(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, recent: &[(AppId, &str, u64)]) {
-        let mut posts: Vec<(AppId, usize, store::events::GameEvent)> = Vec::new();
-        let mut loading = false;
-        for (id, _, _) in recent.iter().take(10) {
-            match self.events(*id) {
-                Some(list) => posts.extend(list.iter().take(3).cloned().enumerate().map(|(i, e)| (*id, i, e))),
-                None => loading = true,
-            }
-        }
+        let ids: Vec<_> = recent.iter().map(|g| g.0).collect();
+        let (posts, loading) = self.whats_new_posts(&ids);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        posts.retain(|p| now.saturating_sub(p.2.time) < 45 * 86_400);
-        posts.sort_by_key(|p| std::cmp::Reverse(p.2.time));
         if posts.is_empty() && !loading {
             return;
         }
@@ -2275,6 +2288,84 @@ impl Library {
         self.reports.insert(id, report);
     }
 
+    /// Recent news for Big Picture and the desktop library.
+    pub(crate) fn whats_new_posts(&mut self, ids: &[AppId]) -> (Vec<(AppId, usize, store::events::GameEvent)>, bool) {
+        let mut posts: Vec<(AppId, usize, store::events::GameEvent)> = Vec::new();
+        let mut loading = false;
+        for id in ids.iter().take(10) {
+            match self.events(*id) {
+                Some(list) => posts.extend(list.iter().take(3).cloned().enumerate().map(|(i, e)| (*id, i, e))),
+                None => loading = true,
+            }
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        posts.retain(|p| now.saturating_sub(p.2.time) < 45 * 86_400);
+        posts.sort_by_key(|p| std::cmp::Reverse(p.2.time));
+        (posts, loading)
+    }
+
+    /// What the game's main button does right now (the library page and Big
+    /// Picture show the same thing).
+    pub(crate) fn main_action(&mut self, ctx: &Ctx, id: AppId) -> MainAction {
+        if let Some(progress) = ctx.state.moving.get(&id) {
+            return MainAction::Moving(progress.fraction());
+        }
+        if let Some(progress) = ctx.state.backing_up.get(&id) {
+            return MainAction::BackingUp(progress.fraction());
+        }
+        if ctx.state.install_script.contains_key(&id) || ctx.state.shader_compiling.contains_key(&id) {
+            return MainAction::Preparing;
+        }
+        if let Some(d) = ctx.state.downloads.get(&id).filter(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)) {
+            return MainAction::Busy { fraction: d.fraction(), verifying: d.verifying(), paused: d.paused };
+        }
+        if ctx.state.download_queue.contains(&id) {
+            return MainAction::Queued;
+        }
+        let installed = ctx.local.games.iter().find(|g| g.app_id == id).cloned();
+        match installed {
+            Some(_) if self.uninstalling.contains_key(&id) => MainAction::Uninstalling,
+            Some(_) if ctx.state.playing == Some(id) => MainAction::Running,
+            Some(g) if self.needs_update(ctx, &g) => MainAction::Update,
+            Some(_) if ctx.state.cloud_syncing.contains(&id) => MainAction::Syncing,
+            Some(_) => MainAction::Play,
+            None if ctx.state.apps.as_ref().is_some_and(|a| a.contains_key(&id)) => MainAction::Install,
+            None => MainAction::StorePage,
+        }
+    }
+
+    /// Play, stop, update or change download state from Big Picture.
+    pub(crate) fn run_main_action(&mut self, ctx: &mut Ctx, id: AppId) {
+        let installed = ctx.local.games.iter().find(|g| g.app_id == id).cloned();
+        match (self.main_action(ctx, id), installed) {
+            (MainAction::Play, Some(g)) => self.launch_or_notice(ctx, id, g.install_dir, self.launch_args_for(id)),
+            (MainAction::Running, _) => ctx.send(Command::StopGame { app_id: id }),
+            (MainAction::Update, Some(g)) => self.queue_install(ctx, id, Some(g.library.clone())),
+            (MainAction::Busy { paused: true, .. }, _) => ctx.send(Command::ResumeDownload { app_id: id }),
+            (MainAction::Busy { verifying: false, .. }, _) => ctx.send(Command::PauseDownload { app_id: id }),
+            _ => {}
+        }
+    }
+
+    /// Hidden from the library by the user.
+    pub(crate) fn is_hidden(&self, id: AppId) -> bool {
+        self.hidden.contains(&id)
+    }
+
+    pub(crate) fn launch_dialog_pending(&self) -> bool {
+        self.cloud_hold.is_some() || matches!(self.dialog, Some(Dialog::DrmNotice { .. }))
+    }
+
+    /// Questions the library may need answered whatever page is open (a
+    /// Steam Cloud conflict before a game starts): the app draws these
+    /// every frame, so a launch from a shortcut, a plugin or another page
+    /// isn't left waiting on a dialog that isn't shown.
+    pub(crate) fn background_dialogs(&mut self, ui: &mut Ui, ctx: &mut Ctx) {
+        let t = ctx.theme.clone();
+        self.cloud_conflict_dialog(ui, &t, ctx);
+        self.drm_notice(ui, &t, ctx);
+    }
+
     /// Is a newer build of the installed version out? (Cached: it reads the
     /// game's manifest from disk.)
     fn needs_update(&mut self, ctx: &Ctx, g: &InstalledGame) -> bool {
@@ -2350,7 +2441,8 @@ impl Library {
         let (id, install_dir, args) = (*id, install_dir.clone(), args.clone());
         let name = ctx.state.app_name(id).unwrap_or_default().to_string();
         let steam_root = local::find_steam_root();
-        let (mut close, mut play) = (false, false);
+        let mut close = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        let mut play = false;
         ui::widgets::modal(ui.ctx(), egui::Id::new(("drm-notice", id))).show(ui.ctx(), |ui| {
             ui.set_width(480.0);
             ui.label(w::text(icons::SHIELD, 28.0, t.accent));
@@ -3638,5 +3730,34 @@ mod themed_library_tests {
         assert_eq!(args.user, "-novid");
         assert_eq!(args.controller, 2);
         assert_eq!(lib.launch_args_for(440).controller, 0);
+    }
+}
+
+/// What installing a game needs (for Big Picture's install screen).
+pub(crate) struct InstallPlan {
+    /// Library folders with their free space.
+    pub libraries: Vec<(std::path::PathBuf, u64)>,
+    /// The one with the most free space.
+    pub default: std::path::PathBuf,
+    /// Size on disk.
+    pub size: u64,
+    pub choose_platform: bool,
+}
+
+impl Library {
+    pub(crate) fn install_plan(&self, ctx: &Ctx, id: AppId, platform: &str) -> InstallPlan {
+        let mut d = InstallDialog::new(id, ctx);
+        d.platform = platform.into();
+        let libraries = d.libraries.iter().map(|l| (l.clone(), fs4_free(l).unwrap_or(0))).collect();
+        let size = d.size(ctx);
+        InstallPlan { libraries, default: d.library, size, choose_platform: d.choose_platform }
+    }
+
+    /// Install to a chosen folder, with a desktop shortcut afterwards if asked.
+    pub(crate) fn install_to(&mut self, ctx: &mut Ctx, id: AppId, library: std::path::PathBuf, shortcut: bool, platform: &str) {
+        if shortcut {
+            self.shortcut_after_install.insert(id, library.clone());
+        }
+        self.queue_install_as(ctx, id, Some(library), platform.into());
     }
 }

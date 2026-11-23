@@ -145,6 +145,7 @@ pub enum ImageState {
 /// shares one texture.
 const STEPS: [u32; 11] = [64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048];
 const SIZED: &str = "#sir-fit=";
+pub const BLUR_BOTTOM_SUFFIX: &str = ",blur-bottom";
 
 fn step(px: f32) -> Option<u32> {
     STEPS.iter().copied().find(|s| *s as f32 >= px.ceil())
@@ -209,11 +210,15 @@ fn load_sized(ui: &Ui, url: &str, size: Vec2, cover: bool) -> (ImageState, Optio
         return (ImageState::Missing, None);
     }
     let uri = sized_url(url, size * ui.ctx().pixels_per_point(), cover);
+    load_uri(ui, url, &uri, size)
+}
+
+fn load_uri(ui: &Ui, url: &str, uri: &str, size: Vec2) -> (ImageState, Option<egui::load::SizedTexture>) {
     let result = if uri == url {
         egui::Image::new(url).load_for_size(ui.ctx(), size)
     } else {
         // The sized decoder must see its URI intact, including for WebP.
-        ui.ctx().try_load_texture(&uri, egui::TextureOptions::LINEAR, egui::load::SizeHint::default())
+        ui.ctx().try_load_texture(uri, egui::TextureOptions::LINEAR, egui::load::SizeHint::default())
     };
     let result = match result {
         Err(egui::load::LoadError::Loading(reason)) if reason == USE_ORIGINAL_IMAGE => {
@@ -244,7 +249,7 @@ fn load_sized(ui: &Ui, url: &str, size: Vec2, cover: bool) -> (ImageState, Optio
                 entry.1 = now;
                 ui.ctx().forget_image(url);
                 if uri != url {
-                    ui.ctx().forget_image(&uri);
+                    ui.ctx().forget_image(uri);
                 }
             }
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
@@ -303,6 +308,29 @@ pub fn paint_cover_first(ui: &Ui, rect: Rect, urls: &[&str], radius: CornerRadiu
         }
     }
     false
+}
+
+/// Draw one cover with blur increasing toward the bottom. Return the sized
+/// variant so the caller can release it when leaving the game page.
+pub fn paint_blurred_cover_first(ui: &Ui, screen: Rect, rect: Rect, urls: &[&str]) -> Option<String> {
+    let px = screen.size() * ui.ctx().pixels_per_point();
+    // A viewport resize or zoom should not produce a new texture every frame.
+    let px = px * (1536.0 / px.x.max(px.y).max(1.0)).min(1.0);
+    for url in urls.iter().copied().filter(|url| !url.is_empty()) {
+        let mut uri = sized_url(url, px, true);
+        if uri != url {
+            uri.push_str(BLUR_BOTTOM_SUFFIX);
+        }
+        match load_uri(ui, url, &uri, screen.size()) {
+            (_, Some(texture)) => {
+                paint_cover_texture(ui, rect, texture, CornerRadius::ZERO);
+                return (uri != url).then_some(uri);
+            }
+            (ImageState::Missing, _) => continue,
+            _ => return (uri != url).then_some(uri),
+        }
+    }
+    None
 }
 
 /// Start loading the image [`paint_cover_first`] would show, without drawing.

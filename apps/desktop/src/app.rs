@@ -106,6 +106,14 @@ pub struct Prefs {
     /// Watch active theme files on disk and hot-reload on change.
     #[serde(default)]
     pub hot_reload_themes: bool,
+    /// Start in Big Picture after signing in.
+    pub bigpicture_start: bool,
+    /// Big Picture interface scale relative to its screen size.
+    pub bigpicture_scale: f32,
+    pub bigpicture_library: u8,
+    pub bigpicture_swap_ab: bool,
+    pub bigpicture_repeat: u8,
+    pub bigpicture_stick: u8,
 }
 
 fn yes() -> bool {
@@ -150,6 +158,12 @@ impl Default for Prefs {
             win_maximized: false,
             active_theme_id: None,
             hot_reload_themes: false,
+            bigpicture_start: false,
+            bigpicture_scale: 1.0,
+            bigpicture_library: 0,
+            bigpicture_swap_ab: false,
+            bigpicture_repeat: 1,
+            bigpicture_stick: 1,
         }
     }
 }
@@ -198,6 +212,7 @@ pub struct SteamApp {
     /// "A download is in progress, exit anyway?" is showing.
     confirm_exit: bool,
     window_mode: Option<WindowMode>,
+    pub(crate) bigpicture: crate::bigpicture::BigPicture,
     /// A window size waiting to be centered once the monitor size is known.
     center_window: Option<[f32; 2]>,
     /// A window size asked for but not reached yet: (size, resizable, frames
@@ -358,6 +373,10 @@ impl SteamApp {
         }
 
         let overlay = crate::overlay::Overlay::new(&cc.egui_ctx);
+        let mut bigpicture = crate::bigpicture::BigPicture::new(&cc.egui_ctx);
+        if prefs.bigpicture_start && !bigpicture.active {
+            bigpicture.enter(&cc.egui_ctx);
+        }
         let mut app = Self {
             _rt: rt,
             client,
@@ -382,6 +401,7 @@ impl SteamApp {
             cart_count: None,
             confirm_exit: false,
             window_mode: None,
+            bigpicture,
             center_window: None,
             pending_size: None,
             tray: crate::tray::Tray::new(cc),
@@ -486,6 +506,8 @@ impl SteamApp {
                     self.login = Default::default();
                 }
                 Event::LoggedOut { reason } => {
+                    self.bigpicture.leave(ctx);
+                    self.window_mode = None;
                     if reason == "Logged out" {
                         self.prefs.auto_login = None;
                     }
@@ -581,6 +603,10 @@ impl SteamApp {
         self.current_arg = arg;
     }
 
+    pub(crate) fn restore_desktop_page(&mut self) {
+        self.registry.navigate(&self.prefs.page, self.current_arg.as_deref());
+    }
+
     pub fn go_back(&mut self) {
         if let Some((p, a)) = self.back.pop() {
             self.forward.push((self.prefs.page.clone(), self.current_arg.clone()));
@@ -599,7 +625,11 @@ impl SteamApp {
         let now = ctx.input(|i| i.time);
         for a in actions {
             match a {
-                Action::Navigate { page, arg } => self.navigate(page, arg),
+                Action::Navigate { page, arg } => {
+                    if !self.bigpicture.navigate(ctx, &page, arg.as_deref()) {
+                        self.navigate(page, arg);
+                    }
+                }
                 Action::Toast(text) => self.toast(now, text, ""),
                 Action::SetTheme(t) => self.prefs.theme = t,
                 Action::SetZoom(z) => self.prefs.zoom = z.clamp(0.7, 2.0),
@@ -876,6 +906,10 @@ impl SteamApp {
         }
         for raw in std::mem::take(&mut self.pending_links) {
             let nav = |page: &str, arg: Option<String>| Action::Navigate { page: page.into(), arg };
+            if matches!(raw.as_str(), crate::links::BIG_PICTURE | crate::links::BIG_PICTURE_WINDOW) {
+                self.bigpicture.enter_requested(ctx, raw == crate::links::BIG_PICTURE_WINDOW);
+                continue;
+            }
             match crate::links::parse(&raw) {
                 Some(Link::Run(id)) => match self.local.games.iter().find(|g| g.app_id == id) {
                     Some(g) => {
@@ -920,6 +954,10 @@ impl SteamApp {
 
 impl SteamApp {
     /// A download is running, paused or queued.
+    pub(crate) fn shared_flags(&self) -> crate::builtin::settings::SharedFlags {
+        self.flags.clone()
+    }
+
     pub fn downloading(&self) -> bool {
         !self.state.download_queue.is_empty() || self.state.downloads.values().any(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed))
     }
@@ -1028,6 +1066,7 @@ impl eframe::App for SteamApp {
     /// Scroll faster than egui's default (Settings → Accessibility → Scroll
     /// speed). Ctrl/Cmd + wheel zooms, so those events stay as they are.
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.bigpicture.feed_input(raw_input);
         let speed = self.prefs.scroll_speed;
         if (speed - 1.0).abs() < f32::EPSILON {
             return;
@@ -1102,7 +1141,9 @@ impl eframe::App for SteamApp {
             self.confirm_exit = true;
         }
         self.exit_dialog(&ctx);
-        if self.hidden || !frame.is_window_attached() {
+        let visible = !self.hidden && frame.is_window_attached();
+        crate::bigpicture::poll(self, &ctx, visible);
+        if !visible {
             // Keep the friends window, overlay and notifications alive while hidden.
             if !self.tray.wayland() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
@@ -1124,13 +1165,26 @@ impl eframe::App for SteamApp {
             return;
         }
 
+        let env = Env {
+            state: &self.state, local: &self.local, theme: &self.prefs.theme,
+            zoom: self.prefs.zoom, client: &self.client, actions: &mut actions,
+        };
+        let launch_dialog = signed_in_now && self.registry.with_ext::<crate::builtin::library::Library, _>(
+            "library", env, |lib, _| lib.launch_dialog_pending(),
+        ).unwrap_or(false);
+        self.bigpicture.launch_dialog = launch_dialog;
+        let big_picture = signed_in_now && self.bigpicture.active;
+        let fullscreen = big_picture && !self.bigpicture.is_windowed();
+
         // Mouse back/forward buttons.
         let (b, f) = ctx.input(|i| (i.pointer.button_pressed(egui::PointerButton::Extra1), i.pointer.button_pressed(egui::PointerButton::Extra2)));
-        if b {
-            self.go_back();
-        }
-        if f {
-            self.go_forward();
+        if !big_picture {
+            if b {
+                self.go_back();
+            }
+            if f {
+                self.go_forward();
+            }
         }
 
         let signed_in = self.state.phase == Phase::LoggedIn;
@@ -1141,7 +1195,11 @@ impl eframe::App for SteamApp {
         } else {
             WindowMode::SignIn
         };
-        if self.window_mode != Some(mode) {
+        if fullscreen {
+            self.window_mode = None;
+            self.pending_size = None;
+            self.center_window = None;
+        } else if self.window_mode != Some(mode) {
             self.window_mode = Some(mode);
             let (size, min, resizable) = match mode {
                 WindowMode::Main => ([1440.0, 900.0], [1060.0, 680.0], true),
@@ -1208,12 +1266,12 @@ impl eframe::App for SteamApp {
             self.center_window = None;
         }
         // Remember the main window's geometry for next time.
-        if mode == WindowMode::Main {
+        if mode == WindowMode::Main && !fullscreen && self.pending_size.is_none() {
             ctx.input(|i| {
                 let vp = i.viewport();
                 // Right after sign-in the window is still sign-in sized for a
                 // few frames: don't take that for the main window's size.
-                if vp.inner_rect.is_none_or(|r| r.width() < 1000.0 || r.height() < 600.0) {
+                if vp.fullscreen == Some(true) || vp.inner_rect.is_none_or(|r| r.width() < 1000.0 || r.height() < 600.0) {
                     return;
                 }
                 self.prefs.win_maximized = vp.maximized.unwrap_or(false);
@@ -1227,7 +1285,15 @@ impl eframe::App for SteamApp {
                 }
             });
         }
-        if signed_in {
+        if big_picture {
+            crate::bigpicture::show(self, ui, &mut actions);
+            crate::friends_window::show(self, &ctx, &mut actions);
+            crate::overlay::show(self, &ctx, &mut actions);
+            if !launch_dialog {
+                crate::launch_popup::show(self, &ctx);
+            }
+            crate::tray::show(self, &ctx);
+        } else if signed_in {
             let snapshot = self.resolved_snapshot.take();
             let bg_tex = self.bg_tex.as_ref().map(|(_, _, h)| h.clone());
             let logo_tex = self.logo_tex.as_ref().map(|(_, _, h)| h.clone());
@@ -1280,7 +1346,9 @@ impl eframe::App for SteamApp {
             crate::shell::friend_dialogs(self, &ctx);
             crate::friends_window::show(self, &ctx, &mut actions);
             crate::overlay::show(self, &ctx, &mut actions);
-            crate::launch_popup::show(self, &ctx);
+            if !launch_dialog {
+                crate::launch_popup::show(self, &ctx);
+            }
             crate::tray::show(self, &ctx);
         } else {
             crate::login::show(self, ui);
@@ -1295,13 +1363,22 @@ impl eframe::App for SteamApp {
             client: &self.client,
             actions: &mut actions,
         };
+        if signed_in {
+            self.registry.with_ext::<crate::builtin::library::Library, _>("library", env, |lib, cx| lib.background_dialogs(ui, cx));
+        }
+        let env = Env {
+            state: &self.state, local: &self.local, theme: &self.prefs.theme,
+            zoom: self.prefs.zoom, client: &self.client, actions: &mut actions,
+        };
         self.registry.tick(env);
         self.apply_actions(&ctx, actions);
         crate::shell::toasts(self, &ctx);
-        if signed_in {
-            crate::chrome::resize_handles(&ctx);
+        if !big_picture || self.bigpicture.is_windowed() {
+            if signed_in {
+                crate::chrome::resize_handles(&ctx);
+            }
+            crate::chrome::border(&ctx, &self.prefs.theme);
         }
-        crate::chrome::border(&ctx, &self.prefs.theme);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
