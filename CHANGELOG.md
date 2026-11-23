@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+* Installed Steam games use the windowless Steam host by default when available. A per-game warning before the first headless launch of an anti-cheat game replaces the experimental Library toggle.
+
 ## [1.0.0-rc3](https://github.com/mollie2999/Aurora/compare/v1.0.0-rc2...v1.0.0-rc3) (2026-11-23)
 
 ### New

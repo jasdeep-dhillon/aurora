@@ -685,7 +685,7 @@ async fn online(
     };
     let (dl_tx, mut dl_rx) = mpsc::unbounded_channel::<(AppId, Result<String, String>)>();
     let (apps_tx, mut apps_rx) = mpsc::unbounded_channel::<Vec<OwnedApp>>();
-    let (exit_tx, mut exit_rx) = mpsc::unbounded_channel::<AppId>();
+    let (exit_tx, mut exit_rx) = mpsc::unbounded_channel::<(AppId, Option<std::path::PathBuf>)>();
     // Launches that waited for a Steam Cloud download.
     let (launch_tx, mut launch_rx) = mpsc::unbounded_channel::<(AppId, std::path::PathBuf, crate::LaunchArgs)>();
     // Launches that waited for Workshop downloads (Steam Cloud comes next).
@@ -740,8 +740,14 @@ async fn online(
     macro_rules! launch_now {
         ($app_id:expr, $install_dir:expr, $args:expr) => {{
             let (app_id, install_dir, args): (AppId, std::path::PathBuf, crate::LaunchArgs) = ($app_id, $install_dir, $args);
+            let app = st.apps.get(&app_id);
+            let mode = app.map(|app| st.game_launch_mode(app, &install_dir, args.controller));
             if let Err(e) = launch::safe_connect_args(&args.connect) {
                 sink(Event::Error(e));
+            } else if !st.running.contains_key(&app_id)
+                && app.zip(mode.as_ref()).is_some_and(|(app, mode)| launch::needs_anti_cheat_warning(app, &install_dir, mode))
+            {
+                sink(Event::AntiCheatWarning { app_id, install_dir, args, skip_cloud: true });
             } else {
             // Steam's download and shader settings as chosen in Aurora,
             // before anything of Steam's starts for this game.
@@ -751,18 +757,14 @@ async fn online(
             // First launch: the game's install script (registry keys,
             // anti-cheat setup…), like Steam's "Running install script".
             // The official client runs its own.
-            let script = st
-                .apps
-                .get(&app_id)
-                .filter(|a| !st.running.contains_key(&app_id) && !st.shader_jobs.contains_key(&app_id) && !matches!(launch::mode_for_launch(a, &install_dir, args.controller), crate::LaunchMode::OfficialSteam { .. }))
-                .and_then(|a| crate::installscript::pending(a, &install_dir));
+            let busy = st.running.contains_key(&app_id) || st.shader_jobs.contains_key(&app_id);
+            let starts_here = !matches!(mode, Some(crate::LaunchMode::OfficialSteam { .. }));
+            let script = app.filter(|_| !busy && starts_here).and_then(|a| crate::installscript::pending(a, &install_dir));
             // First launch in a new Proton prefix, no install script to
             // create it: set it up so our steamclient answers from the start.
             #[cfg(not(windows))]
-            let setup = st
-                .apps
-                .get(&app_id)
-                .filter(|_| script.is_none() && !st.running.contains_key(&app_id) && !st.shader_jobs.contains_key(&app_id) && !st.prefix_setups.contains(&app_id))
+            let setup = app
+                .filter(|_| mode == Some(crate::LaunchMode::Aurora) && script.is_none() && !busy && !st.prefix_setups.contains(&app_id))
                 .and_then(|a| launch::prefix_setup(a, &install_dir));
             #[cfg(windows)]
             let setup: Option<std::process::Command> = None;
@@ -791,11 +793,7 @@ async fn online(
             } else {
             #[cfg(not(windows))]
             {
-                let busy = st.running.contains_key(&app_id) || st.shader_jobs.contains_key(&app_id);
-                let pending = st
-                    .apps
-                    .get(&app_id)
-                    .filter(|a| !busy && !matches!(launch::mode_for_launch(a, &install_dir, args.controller), crate::LaunchMode::OfficialSteam { .. }))
+                let pending = app.filter(|_| !busy && starts_here)
                     .and_then(|_| crate::shaders::pending(&install_dir, app_id));
                 match pending {
                     // Already compiling: Play again doesn't start it twice.
@@ -842,10 +840,9 @@ async fn online(
             if let Err(e) = launch::safe_connect_args(&args.connect) {
                 sink(Event::Error(e));
             } else {
-                // Like Steam: bring down newer cloud saves first (games the
-                // official client runs get its own cloud sync instead).
-                let official = st.apps.get(&app_id).is_some_and(|a| matches!(launch::mode_for_launch(a, &install_dir, args.controller), crate::LaunchMode::OfficialSteam { .. } | crate::LaunchMode::HeadlessHost));
-                match st.cloud_target(app_id, &install_dir).filter(|_| !official) {
+                // Like Steam: bring down newer cloud saves first.
+                let sync = st.apps.get(&app_id).is_some_and(|app| st.game_launch_mode(app, &install_dir, args.controller).uses_aurora_sync());
+                match st.cloud_target(app_id, &install_dir).filter(|_| sync) {
                     // Offline: play with the saves on this PC; they go up once online.
                     Some(_) if st.link != Link::Online && !st.running.contains_key(&app_id) => {
                         sink(Event::CloudSkipped { app_id });
@@ -927,7 +924,7 @@ async fn online(
                     sink(Event::GameAttached { app_id, env: st.ipc.env_value(&token) });
                 }
                 // Like Steam: no playing while the game's files are changing.
-                Some(Command::Launch { app_id, .. })
+                Some(Command::Launch { app_id, .. } | Command::LaunchWithoutCloud { app_id, .. })
                     if st.verifying.contains_key(&app_id)
                         || st.active.as_ref().is_some_and(|(a, _)| *a == app_id)
                         || storage_busy(storage, app_id) =>
@@ -985,8 +982,17 @@ async fn online(
                     } else {
                         // Like Steam: subscribed Workshop items are downloaded
                         // (or updated) before the game starts, then cloud saves.
-                        let official = st.apps.get(&app_id).is_some_and(|a| matches!(launch::mode_for_launch(a, &install_dir, args.controller), crate::LaunchMode::OfficialSteam { .. } | crate::LaunchMode::HeadlessHost));
-                        let library = crate::workshop::library_of(&install_dir).filter(|_| !official && st.link == Link::Online && !st.running.contains_key(&app_id));
+                        let sync = if let Some(app) = st.apps.get(&app_id) {
+                            let mode = st.game_launch_mode(app, &install_dir, args.controller);
+                            if !st.running.contains_key(&app_id) && launch::needs_anti_cheat_warning(app, &install_dir, &mode) {
+                                sink(Event::AntiCheatWarning { app_id, install_dir, args, skip_cloud: false });
+                                continue;
+                            }
+                            mode.uses_aurora_sync()
+                        } else {
+                            false
+                        };
+                        let library = crate::workshop::library_of(&install_dir).filter(|_| sync && st.link == Link::Online && !st.running.contains_key(&app_id));
                         match library {
                             Some(library) => {
                                 let (conn, sink, tx, me, cell) = (st.conn.clone(), sink.clone(), ws_tx.clone(), st.me, st.download_cell.unwrap_or(st.cell_id));
@@ -1703,7 +1709,7 @@ async fn online(
                 sink(Event::VerifyFinished { app_id, result: Ok(report) });
             }
             Some(call) = ipc_rx.recv() => st.ipc_call(call, sink),
-            Some(app_id) = exit_rx.recv() => {
+            Some((app_id, host_cloud_dir)) = exit_rx.recv() => {
                 st.running.remove(&app_id);
                 st.launch_layouts.remove(&app_id);
                 st.official.remove(&app_id);
@@ -1722,7 +1728,7 @@ async fn online(
                 }
                 // Like Steam: send changed saves up after the game closes,
                 // or remember to once back online.
-                if let Some(dir) = st.launched_dirs.remove(&app_id) {
+                if let Some(dir) = st.launched_dirs.remove(&app_id).or(host_cloud_dir) {
                     if let Some(target) = st.cloud_target(app_id, &dir) {
                         if st.link == Link::Online {
                             st.upload_saves(app_id, target, sink);
@@ -2963,13 +2969,22 @@ impl Online {
         Some(crate::cloud::Target { app_id, steam_id: self.me, install_dir: install_dir.to_path_buf(), steam_root: self.steam_root.clone(), config: Some(config), cell_id: self.cell_id, prefix_user })
     }
 
+    fn game_launch_mode(&self, app: &OwnedApp, dir: &std::path::Path, controller: u8) -> crate::LaunchMode {
+        if self.link == Link::Online {
+            launch::mode_for_launch(app, dir, controller)
+        } else {
+            // The headless host must sign in to Steam before it can serve a game.
+            launch::mode_with_host(app, dir, controller, false)
+        }
+    }
+
     fn launch(
         &mut self,
         app_id: AppId,
         dir: &std::path::Path,
         args: &crate::LaunchArgs,
         sink: &Sink,
-        exit_tx: &mpsc::UnboundedSender<AppId>,
+        exit_tx: &mpsc::UnboundedSender<(AppId, Option<std::path::PathBuf>)>,
     ) -> Result<(), Error> {
         if let Err(e) = launch::safe_connect_args(&args.connect) {
             sink(Event::Error(e));
@@ -2983,7 +2998,12 @@ impl Online {
             sink(Event::Error(format!("{} is already running", app.name)));
             return Ok(());
         }
-        let mode = launch::mode_for_launch(app, dir, args.controller);
+        let mode = self.game_launch_mode(app, dir, args.controller);
+        // The available Steam route can change during shader compilation.
+        if launch::needs_anti_cheat_warning(app, dir, &mode) {
+            sink(Event::AntiCheatWarning { app_id, install_dir: dir.to_path_buf(), args: args.clone(), skip_cloud: true });
+            return Ok(());
+        }
         tracing::info!("{} starts as {mode:?}", app.name);
         sink(Event::LaunchMode { app_id, mode: mode.clone() });
         match mode {
@@ -2998,11 +3018,11 @@ impl Online {
                     if let Err(e) = launch::run_through_steam(app_id, &args, me, offline, started) {
                         sink(Event::Error(e));
                     }
-                    let _ = tx.send(app_id);
+                    let _ = tx.send((app_id, None));
                 });
                 return Ok(());
             }
-            crate::LaunchMode::HeadlessHost => {
+            crate::LaunchMode::HeadlessHost { steam_drm } => {
                 // The user's own Steam engine, headless, runs it; we follow
                 // along like the official-client case (the engine sends its
                 // own presence/stats). It needs the live refresh token.
@@ -3026,10 +3046,15 @@ impl Online {
                 tokio::task::spawn_blocking(move || {
                     let started = || sink(Event::GameStarted { app_id });
                     let ov = overlay.as_ref().map(|(p, t)| (*p, t.as_str()));
-                    if let Err(e) = launch::run_through_host(&app, &dir2, &args, &account, &token, me, ov, started) {
-                        sink(Event::Error(e));
-                    }
-                    let _ = tx.send(app_id);
+                    let cloud_dir = match launch::run_through_host(&app, &dir2, &args, &account, &token, me, ov, started) {
+                        Ok(()) if !steam_drm => Some(dir2),
+                        Ok(()) => None,
+                        Err(e) => {
+                            sink(Event::Error(e));
+                            None
+                        }
+                    };
+                    let _ = tx.send((app_id, cloud_dir));
                 });
                 return Ok(());
             }
@@ -3122,7 +3147,7 @@ impl Online {
     }
 
     /// A game we started ourselves: we're the one "playing" it.
-    fn track(&mut self, app_id: AppId, dir: &std::path::Path, child: std::process::Child, sink: &Sink, exit_tx: &mpsc::UnboundedSender<AppId>) -> Result<(), Error> {
+    fn track(&mut self, app_id: AppId, dir: &std::path::Path, child: std::process::Child, sink: &Sink, exit_tx: &mpsc::UnboundedSender<(AppId, Option<std::path::PathBuf>)>) -> Result<(), Error> {
         self.running.insert(app_id, child.id());
         self.launched_dirs.insert(app_id, dir.to_path_buf());
         self.playing = Some(app_id);
@@ -3136,7 +3161,7 @@ impl Online {
         let tx = exit_tx.clone();
         let dir_owned = dir.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            let _ = tx.send(launch::wait_in_dir(app_id, &dir_owned, child));
+            let _ = tx.send((launch::wait_in_dir(app_id, &dir_owned, child), None));
         });
         Ok(())
     }

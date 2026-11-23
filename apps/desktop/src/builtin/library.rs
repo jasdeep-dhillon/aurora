@@ -65,7 +65,7 @@ enum Dialog {
 /// the one-time notice is about.
 fn is_steam_drm(mode: &client::LaunchMode) -> bool {
     match mode {
-        client::LaunchMode::HeadlessHost => true,
+        client::LaunchMode::HeadlessHost { steam_drm } => *steam_drm,
         client::LaunchMode::OfficialSteam { anti_cheat } => anti_cheat == client::STEAM_DRM,
         _ => false,
     }
@@ -549,7 +549,7 @@ impl Extension for Library {
         });
         if !cfg!(windows) {
             let before = self.through_steam;
-            super::settings::switch(ui, &t, t!("Start games through the official Steam client"), t!("Off: games start here, natively or with Proton, and only anti-cheat games use Steam. Turn on for games that won't run without Steam."), &mut self.through_steam);
+            super::settings::switch(ui, &t, t!("Start games through the official Steam client"), t!("Aurora uses the windowless Steam host by default. Turn this on for games that need the official Steam client."), &mut self.through_steam);
             if self.through_steam != before {
                 client::launch_through_steam(self.through_steam);
             }
@@ -1832,7 +1832,7 @@ impl Library {
                                 let (mode, why) = match mode {
                                     client::LaunchMode::Aurora => (t!("Aurora"), t!("Achievements, cloud saves and friends work through Aurora.").to_string()),
                                     client::LaunchMode::OfficialSteam { anti_cheat } => (if anti_cheat == client::STEAM_DRM { t!("Runs through Steam (Steam DRM)") } else if cfg!(windows) { t!("Runs through Steam (anti-cheat)") } else { t!("Runs through Steam") }, t!("Uses {name}: starts through the official Steam client, which opens in the background.", name = anti_cheat)),
-                                    client::LaunchMode::HeadlessHost => (t!("Your Steam (no window)"), t!("Starts a limited, windowless instance of your own installed Steam in the background, with no store or friends. It signs in and closes when the game does.").to_string()),
+                                    client::LaunchMode::HeadlessHost { .. } => (t!("Your Steam (no window)"), t!("Starts a limited, windowless instance of your own installed Steam in the background, with no store or friends. It signs in and closes when the game does.").to_string()),
                                     client::LaunchMode::NoSteam { reason } => (t!("Starts without Steam"), i18n::tr_dyn(&reason)),
                                 };
                                 ui.add_space(20.0);
@@ -2448,7 +2448,8 @@ impl Library {
             ui.label(w::text(icons::SHIELD, 28.0, t.accent));
             ui.label(w::text_bold(t!("Before {name} starts", name = name), 20.0, t.text));
             ui.add_space(6.0);
-            let headless = ctx.state.apps.as_ref().and_then(|a| a.get(&id)).is_some_and(|o| client::launch_mode_cached(o, &install_dir) == client::LaunchMode::HeadlessHost);
+            let headless = ctx.state.online()
+                && ctx.state.apps.as_ref().and_then(|a| a.get(&id)).is_some_and(|o| matches!(client::launch_mode_cached(o, &install_dir), client::LaunchMode::HeadlessHost { .. }));
             let body = if headless {
                 t!("{name} gets its Steam features (and Steam DRM check) from your own Steam. Aurora starts a limited, windowless copy of it — no store, friends or web browser — signs in, and closes it again when you quit the game.", name = name)
             } else {
