@@ -20,6 +20,7 @@ pub enum Press {
     Rb,
     Start,
     Guide,
+    QuickAccess,
 }
 
 /// What the last input came from: hints show buttons or keys to match.
@@ -311,6 +312,7 @@ pub fn key_map(typing: bool) -> Vec<(Key, Press)> {
         (Key::PageUp, Press::Lb),
         (Key::PageDown, Press::Rb),
         (Key::F1, Press::Start),
+        (Key::F2, Press::QuickAccess),
         (Key::Home, Press::Guide),
     ];
     if !typing {

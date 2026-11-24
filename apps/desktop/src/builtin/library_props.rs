@@ -722,13 +722,17 @@ impl Library {
         }
     }
 
+    pub(crate) fn set_game_controller(&mut self, app: AppId, choice: u8) {
+        self.settings_mut(app).controller = choice;
+        client::set_app_controller(app, choice);
+    }
+
     fn tab_controller(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, app: AppId) {
         let mut choice = self.settings_mut(app).controller;
         section(ui, t, t!("Steam Input"), t!("Override controller handling for this game."), |ui| {
             for (v, l) in [(0u8, t!("Use the default settings")), (1, t!("Enable Steam Input")), (2, t!("Disable Steam Input"))] {
                 if w::radio_value(ui, t, &mut choice, v, l).changed() {
-                    self.settings_mut(app).controller = choice;
-                    client::set_app_controller(app, choice);
+                    self.set_game_controller(app, choice);
                 }
             }
             ui.add_space(6.0);

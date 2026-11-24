@@ -4,16 +4,19 @@ Games built with Steamworks call into Steam while they run: who is signed
 in, achievements, cloud saves, friends. Before this, games started by
 Aurora found no Steam and said "no connection to Steam" (or quit).
 
-Aurora now starts every game in one of three ways. The game page
-shows which one ("Steam features: Aurora" / "Runs through Steam
-(anti-cheat)" / "Starts without Steam").
+The game page shows how a Steam game will start. Aurora prefers the
+windowless host when online and with Steam's engine and the host helper
+available. On Linux, the official-client setting overrides that default.
 
-| Game | How it starts | Steam features from |
-|---|---|---|
-| No anti-cheat, 64-bit | Aurora's own `steamclient` DLL | Aurora |
-| No anti-cheat, 32-bit | The same DLL built for 32-bit (`steamclient32.dll`) | Aurora |
-| Any anti-cheat (VAC, Easy Anti-Cheat, BattlEye, …) | Official Steam client, started silently | Valve's Steam |
-| No anti-cheat, our DLL missing | Plain start, as before | none |
+| Route | Steam features from |
+|---|---|
+| Windowless Steam host | The engine in your own Steam installation |
+| Official Steam client | The full Steam client |
+| Aurora fallback for supported games without anti-cheat or Steam DRM | Aurora's own 32-bit or 64-bit `steamclient` |
+| Plain start for compatible games | None |
+
+Aurora asks for confirmation the first time it starts each detected anti-cheat
+game through the host. Continuing saves that acknowledgement for the game.
 
 ## 1. Our steamclient (games without anti-cheat)
 
@@ -299,17 +302,11 @@ While developing, the launcher also finds
   `+connect_lobby`) isn't wired to Aurora's friends list yet; join from
   the game's own lobby browser.
 
-## 2. Official Steam (games with anti-cheat)
+## 2. Anti-cheat and the official Steam fallback
 
-Games with anti-cheat never get our DLL. Their anti-cheat expects Valve's
-client, and replacing it would mean the anti-cheat doesn't run as intended:
-that's bypassing it and risks a ban. Two more reasons this covers every
-anti-cheat, not only VAC:
-
-- Easy Anti-Cheat and BattlEye check which DLLs are loaded into the game.
-  Our DLL isn't signed by Valve and can be refused or flagged.
-- Their servers usually check the game with the anti-cheat's own service
-  too, which expects Valve's client next to it.
+Detected anti-cheat games use Valve's engine through the windowless host or
+the official Steam client. The headless launch warning covers launch failures,
+kicks and bans.
 
 Detection (`launch::anti_cheat`), safe side when unsure:
 
@@ -321,7 +318,7 @@ Detection (`launch::anti_cheat`), safe side when unsure:
   "anticheat" in it;
 - an install folder that can't be read.
 
-How it runs:
+How the Windows official Steam fallback runs:
 
 1. Valve's DLL path is put back in the registry first, if a swap is active.
 2. Steam is found through `HKCU\Software\Valve\Steam\SteamExe`. If it isn't

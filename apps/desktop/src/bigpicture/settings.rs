@@ -28,9 +28,13 @@ pub struct SettingsState {
 impl SettingsState {
     /// Open on this section (previews).
     pub fn open_at(&mut self, section: usize) {
-        self.section = section.min(7);
+        self.section = section.min(sections().len() - 1);
     }
 }
+
+pub(super) const NOTIFICATIONS: usize = 3;
+pub(super) const CONTROLLER: usize = 4;
+pub(super) const OVERLAY: usize = 5;
 
 const SIZES: [f32; 4] = [0.85, 1.0, 1.15, 1.3];
 const SPEEDS_KBPS: [u32; 7] = [1_000, 2_500, 5_000, 10_000, 25_000, 50_000, 100_000];
@@ -74,6 +78,30 @@ fn flag(get: fn(&mut AppFlags) -> &mut bool) -> Act {
     })
 }
 
+fn controller_change(change: impl FnOnce(&mut client::ControllerSettings) + 'static) -> Act {
+    act(move |_, _, _| {
+        let mut settings = client::controller_settings();
+        change(&mut settings);
+        client::set_controller_settings(settings);
+    })
+}
+
+fn controller_toggle(label: &str, value: bool, field: fn(&mut client::ControllerSettings) -> &mut bool) -> Row {
+    toggle(label, "", value, controller_change(move |settings| {
+        let current = field(settings);
+        *current = !*current;
+    }))
+}
+
+fn deadzone(label: &str, value: f32, field: fn(&mut client::PadCalibration) -> &mut f32) -> Row {
+    choice(label, t!("Select to increase by 5%. After 50%, wraps to 0%."), format!("{:.0}%", value * 100.0),
+        controller_change(move |settings| {
+            let value = field(&mut settings.calibration);
+            let step = (*value * 20.0).round().clamp(0.0, 10.0) as u8;
+            *value = f32::from((step + 1) % 11) / 20.0;
+        }))
+}
+
 fn with_downloads<R>(f: &mut Frame, g: impl FnOnce(&mut Downloads, &mut extensions::Ctx) -> R) -> Option<R> {
     let app = &mut *f.app;
     let env = extensions::Env { state: &app.state, local: &app.local, theme: &app.prefs.theme, zoom: app.prefs.zoom, client: &app.client, actions: &mut *f.actions };
@@ -91,7 +119,7 @@ fn dl(change: impl FnOnce(&mut DownloadSettings) + 'static) -> Act {
     })
 }
 
-fn sections() -> [(&'static str, &'static str); 8] {
+fn sections() -> [(&'static str, &'static str); 8 + cfg!(target_os = "linux") as usize] {
     [
         (icons::MONITOR, t!("General")),
         (icons::DOWNLOAD, t!("Downloads")),
@@ -101,6 +129,8 @@ fn sections() -> [(&'static str, &'static str); 8] {
         (icons::STACK, t!("In-game overlay")),
         (icons::PALETTE, t!("Appearance")),
         (icons::USER_CIRCLE, t!("Account")),
+        #[cfg(target_os = "linux")]
+        (icons::WINDOWS, t!("Compatibility")),
     ]
 }
 
@@ -177,15 +207,59 @@ fn rows(bp: &mut BigPicture, f: &mut Frame) -> Vec<Row> {
             toggle(t!("New chat messages"), t!("Show a pop-up when a friend messages you."), flags.toast_messages, flag(|x| &mut x.toast_messages)),
             toggle(t!("Steam notifications"), t!("Show a pop-up for gifts, items, friend requests, sales and more."), flags.toast_notifications, flag(|x| &mut x.toast_notifications)),
         ],
-        4 => {
+        CONTROLLER => {
             let p = &f.app.prefs;
             let (swap, repeat, stick) = (p.bigpicture_swap_ab, p.bigpicture_repeat, p.bigpicture_stick);
-            vec![
-                Row::Info { label: t!("Controllers connected").to_string(), value: bp.pads.to_string() },
+            let cfg = client::controller_settings();
+            let cal = cfg.calibration;
+            let devices = client::poll_controllers();
+            let mut out = vec![
+                Row::Info { label: t!("Controllers connected").to_string(), value: bp.pads.max(devices.controllers.len()).to_string() },
+            ];
+            out.extend([
                 toggle(t!("Swap A and B"), t!("For controllers that have A and B the other way round."), swap, act(|_, f, _| f.app.prefs.bigpicture_swap_ab = !f.app.prefs.bigpicture_swap_ab)),
                 choice(t!("Held button repeat"), t!("How fast the selection moves while you hold a direction."), speed_name(repeat).to_string(), act(|_, f, _| f.app.prefs.bigpicture_repeat = (f.app.prefs.bigpicture_repeat + 1) % 3)),
                 choice(t!("Stick sensitivity"), t!("How little you need to push the stick to move the selection."), level_name(stick).to_string(), act(|_, f, _| f.app.prefs.bigpicture_stick = (f.app.prefs.bigpicture_stick + 1) % 3)),
-            ]
+                controller_toggle(t!("Enable Steam Input for Xbox controllers"), cfg.families.xbox, |c| &mut c.families.xbox),
+                controller_toggle(t!("Enable Steam Input for PlayStation controllers"), cfg.families.playstation, |c| &mut c.families.playstation),
+                controller_toggle(t!("Enable Steam Input for Switch Pro controllers"), cfg.families.switch_pro, |c| &mut c.families.switch_pro),
+                controller_toggle(t!("Enable Steam Input for generic controllers"), cfg.families.generic, |c| &mut c.families.generic),
+                controller_toggle(t!("Controller vibration (rumble)"), cal.rumble_enabled, |c| &mut c.calibration.rumble_enabled),
+                controller_toggle(t!("Enable gyroscope & motion sensors"), cal.gyro_enabled, |c| &mut c.calibration.gyro_enabled),
+                controller_toggle(t!("Use Nintendo button layout"), cal.nintendo_layout, |c| &mut c.calibration.nintendo_layout),
+                deadzone(t!("Left stick deadzone"), cal.left_deadzone, |c| &mut c.left_deadzone),
+                deadzone(t!("Right stick deadzone"), cal.right_deadzone, |c| &mut c.right_deadzone),
+                deadzone(t!("Trigger threshold"), cal.trigger_threshold, |c| &mut c.trigger_threshold),
+                Row::Button {
+                    icon: icons::RESTORE, label: t!("Reset calibration").into(), danger: false, checked: false,
+                    act: controller_change(|c| c.calibration = client::PadCalibration::default()),
+                },
+                Row::Button {
+                    icon: icons::GEAR, label: t!("Advanced controller settings (desktop)").into(), danger: false, checked: false,
+                    act: act(|bp, f, ctx| {
+                        bp.leave(ctx);
+                        f.actions.push(Action::Navigate { page: "settings".into(), arg: Some("controller".into()) });
+                    }),
+                },
+            ]);
+            if cal.gyro_enabled {
+                let step = (cal.gyro_sensitivity * 4.0).round().clamp(1.0, 16.0) as u8;
+                let next = if step == 16 { 1 } else { step + 1 };
+                out.insert(out.len() - 2, choice(t!("Gyro sensitivity"), "", format!("{:.2}×", cal.gyro_sensitivity),
+                    controller_change(move |c| c.calibration.gyro_sensitivity = f32::from(next) / 4.0)));
+            }
+            for pad in devices.controllers {
+                let value = pad.battery_percent.map(|n| format!("{n}%")).unwrap_or_else(|| pad.backend.to_string());
+                out.push(Row::Info { label: pad.name.clone(), value });
+                if pad.has_rumble && cal.rumble_enabled {
+                    out.push(Row::Button {
+                        icon: icons::CONTROLLER, label: t!("Test vibration: {controller}", controller = pad.name),
+                        danger: false, checked: false,
+                        act: act(move |_, _, _| client::trigger_test_rumble(&pad.id)),
+                    });
+                }
+            }
+            out
         }
         5 => {
             let corner = match flags.fps_counter {
@@ -252,6 +326,28 @@ fn rows(bp: &mut BigPicture, f: &mut Frame) -> Vec<Row> {
                 },
             ]
         }
+        #[cfg(target_os = "linux")]
+        8 => {
+            let current = client::proton_override();
+            let builds = client::proton_builds();
+            let mut out = vec![Row::Button {
+                icon: icons::WINDOWS, label: t!("Automatic").into(), danger: false, checked: current.is_none(),
+                act: act(|_, _, _| client::set_proton_override(None)),
+            }];
+            if builds.is_empty() {
+                out.push(Row::Info { label: t!("No installed Proton versions found.").into(), value: String::new() });
+            } else if let Some(saved) = current.as_deref().filter(|saved| !builds.iter().any(|(name, _)| saved.eq_ignore_ascii_case(name))) {
+                out.push(Row::Info { label: t!("Saved Proton is unavailable").into(), value: saved.to_string() });
+            }
+            out.extend(builds.into_iter().map(|(name, label)| {
+                let checked = current.as_deref().is_some_and(|saved| saved.eq_ignore_ascii_case(&name));
+                Row::Button {
+                    icon: icons::WINDOWS, label, danger: false, checked,
+                    act: act(move |_, _, _| client::set_proton_override(Some(name))),
+                }
+            }));
+            out
+        }
         _ => {
             let lang = i18n::language();
             let langs = i18n::Lang::ALL;
@@ -261,6 +357,8 @@ fn rows(bp: &mut BigPicture, f: &mut Frame) -> Vec<Row> {
                     let at = SIZES.iter().position(|x| (*x - f.app.prefs.bigpicture_scale).abs() < 0.01).unwrap_or(0);
                     f.app.prefs.bigpicture_scale = SIZES[(at + 1) % SIZES.len()];
                 })),
+                toggle(t!("Fullscreen"), t!("Press F11 to switch at any time in Big Picture."), !bp.is_windowed(),
+                    act(|bp, _, ctx| bp.toggle_fullscreen(ctx))),
                 toggle(t!("Start SteamInRust in Big Picture"), "", f.app.prefs.bigpicture_start, act(|_, f, _| f.app.prefs.bigpicture_start = !f.app.prefs.bigpicture_start)),
                 choice(t!("Language"), "", lang.native_name().to_string(), act(move |_, f, _| f.actions.push(Action::SetLanguage(other.code().into())))),
                 Row::Button {

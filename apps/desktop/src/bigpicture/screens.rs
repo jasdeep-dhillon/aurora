@@ -40,6 +40,11 @@ pub fn draw(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, pos: f32) -> f32 {
         Page::Tab(Tab::Downloads) => downloads(bp, ui, f, top),
         Page::Tab(Tab::Friends) => friends(bp, ui, f, top),
         Page::Game(id) => game(bp, ui, f, top, id),
+        Page::Controller(id) => controller_page(bp, ui, f, top, id),
+        Page::QuickAccess => quick_access(bp, ui, f, top),
+        Page::Notifications => notifications(bp, ui, f, top),
+        #[cfg(target_os = "linux")]
+        Page::Compatibility(id) => compatibility_page(bp, ui, f, top, id),
         Page::StoreApp(id) => store_app(bp, ui, f, top, id),
         Page::Review(id, review) => review_page(ui, f, top, id, &review),
         Page::Search => search(bp, ui, f, top),
@@ -166,6 +171,27 @@ fn button(bp: &mut BigPicture, ui: &Ui, f: &Frame, id: Id, at: egui::Pos2, min_w
         bp.focus.ring_around(shown, shown.height() / 2.0);
     }
     (r, hit)
+}
+
+/// Compact settings row with a clipped label and a separate status column.
+fn compact_row(bp: &mut BigPicture, ui: &Ui, f: &Frame, id: Id, rect: Rect, icon: &str, label: &str, value: &str) -> Hit {
+    let s = f.s;
+    let hit = bp.focus.item(ui, id, rect, ui.clip_rect(), Place::Page);
+    let p = ui.painter();
+    p.rect_filled(rect, paint::radius(10.0 * s), w::mix(f.t.surface, f.t.surface_hover, hit.glow));
+    let text_x = rect.left() + 49.0 * s;
+    let value_width = if value.is_empty() { 0.0 } else { rect.width() * 0.30 };
+    p.text(pos2(rect.left() + 23.0 * s, rect.center().y), Align2::CENTER_CENTER, icon, w::font(21.0 * s), f.t.accent);
+    paint::line(p, pos2(text_x, rect.center().y), Align2::LEFT_CENTER, label, w::font_semibold(21.0 * s),
+        f.t.text, rect.right() - text_x - value_width - 16.0 * s);
+    if !value.is_empty() {
+        paint::line(p, pos2(rect.right() - 16.0 * s, rect.center().y), Align2::RIGHT_CENTER, value, w::font_medium(18.0 * s),
+            f.t.text_dim, value_width);
+    }
+    if hit.focused {
+        bp.focus.ring_around(rect, 10.0 * s);
+    }
+    hit
 }
 
 /// A big empty-state message with one way forward.
@@ -512,7 +538,22 @@ fn game(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppId) ->
             f.app.client.send(if verifying { Command::CancelVerify { app_id: id } } else { Command::CancelDownload { app_id: id } });
         }
     }
+    #[cfg(target_os = "linux")]
+    if installed.is_some() && !f.app.demo && !matches!(action, MainAction::Busy { .. }) {
+        let (_, hit) = button(bp, ui, f, Id::unique(("bp-game-compatibility", id)), pos2(x, y), 0.0, Some(icons::GEAR), t!("Compatibility"), Kind::Secondary, None);
+        if hit.activated {
+            bp.open(Page::Compatibility(id), f.now);
+        }
+    }
     y += 72.0 * s + 50.0 * s;
+
+    if installed.is_some() && !f.app.demo {
+        let (_, hit) = button(bp, ui, f, Id::unique(("bp-game-controller", id)), pos2(f.view.left() + f.pad, y), 0.0, Some(icons::CONTROLLER), t!("Controller"), Kind::Secondary, None);
+        if hit.activated {
+            bp.open(Page::Controller(id), f.now);
+        }
+        y += 98.0 * s;
+    }
 
     // Facts.
     let played = installed.as_ref().and_then(|g| g.playtime_minutes).or_else(|| match f.app.state.player_games.get(&f.app.state.steam_id) {
@@ -598,6 +639,213 @@ fn game(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppId) ->
         y += 80.0 * s;
     }
     y - top + 40.0 * s
+}
+
+#[cfg(target_os = "linux")]
+fn compatibility_choices<'a>(native: Option<(bool, bool)>, default: Option<&str>, builds: &'a [(String, String)]) -> Vec<(Option<&'a str>, String)> {
+    let mut choices = vec![(None, t!("Automatic").to_string())];
+    if let Some((_, windows)) = native {
+        choices.push((Some(client::NATIVE), t!("Native (Linux)").to_string()));
+        if !windows {
+            return choices;
+        }
+        if let Some(tool) = default {
+            choices.push((Some(client::DEFAULT_PROTON), t!("Default Proton ({tool})", tool = tool)));
+        }
+    }
+    choices.extend(builds.iter().map(|(name, label)| (Some(name.as_str()), label.clone())));
+    choices
+}
+
+#[cfg(target_os = "linux")]
+fn compatibility_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppId) -> f32 {
+    let s = f.s;
+    let left = f.view.left() + f.pad;
+    let mut y = top + 24.0 * s;
+    heading(ui, f, &mut y, t!("Compatibility"));
+    let Some(installed) = f.app.local.games.iter().find(|game| game.app_id == id) else {
+        empty(bp, ui, f, y, icons::WARNING, t!("Game is not installed"), "", None);
+        return y - top + 320.0 * s;
+    };
+    bp.bg_want = Some(id);
+    let name = f.app.state.app_name(id).unwrap_or(&installed.name);
+    let width = f.view.width() - 2.0 * f.pad;
+    paint::line(ui.painter(), pos2(left, y), Align2::LEFT_TOP, name, w::font_bold(26.0 * s), f.t.text, width);
+    y += 42.0 * s;
+    let note = t!("Choose how Aurora runs this game. Games handed off to Steam use Steam’s own settings.");
+    let note_rect = paint::wrapped(ui.painter(), pos2(left, y), note, w::font(20.0 * s), f.t.text_dim, width, usize::MAX);
+    y = note_rect.bottom() + 24.0 * s;
+
+    let native = f.app.state.apps.as_ref().and_then(|apps| apps.get(&id)).and_then(|app| client::native_build(app, &installed.install_dir));
+    let default = client::default_proton(id);
+    let builds = client::proton_builds();
+    let current = client::app_proton(id);
+    let choices = compatibility_choices(native, default.as_deref(), &builds);
+    let is_selected = |choice: Option<&str>| match (current.as_deref(), choice) {
+        (None, None) => true,
+        (Some(saved), Some(name)) => saved.eq_ignore_ascii_case(name),
+        _ => false,
+    };
+    if !choices.iter().any(|(choice, _)| is_selected(*choice)) {
+        let text = t!("The saved compatibility choice is unavailable for this installation.");
+        let warning = paint::wrapped(ui.painter(), pos2(left, y), text, w::font(20.0 * s), f.t.text_dim, width, usize::MAX);
+        y = warning.bottom() + 16.0 * s;
+    } else if builds.is_empty() && !matches!(native, Some((_, false))) {
+        let text = t!("No installed Proton versions found.");
+        paint::line(ui.painter(), pos2(left, y), Align2::LEFT_TOP, text, w::font(20.0 * s), f.t.text_dim, width);
+        y += 38.0 * s;
+    }
+
+    heading(ui, f, &mut y, t!("Launch preference"));
+    let mut installed_group = false;
+    for (choice, label) in choices {
+        if !installed_group && choice.is_some_and(|tool| !matches!(tool, client::NATIVE | client::DEFAULT_PROTON)) {
+            y += 12.0 * s;
+            heading(ui, f, &mut y, t!("Installed Proton versions"));
+            installed_group = true;
+        }
+        let row = Id::unique(("bp-compatibility-choice", id, choice));
+        let selected = is_selected(choice);
+        if choice.is_none() || selected {
+            bp.preferred = Some(row);
+        }
+        let rect = Rect::from_min_size(pos2(left, y), vec2(width.min(950.0 * s), 52.0 * s));
+        let icon = if selected { icons::CHECK } else { icons::GEAR };
+        let status = if selected { t!("Selected") } else { "" };
+        let hit = compact_row(bp, ui, f, row, rect, icon, &label, status);
+        if hit.activated && !selected {
+            client::set_app_proton(id, choice.map(String::from));
+        }
+        y += 60.0 * s;
+    }
+    y - top + 24.0 * s
+}
+
+fn controller_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppId) -> f32 {
+    let s = f.s;
+    let left = f.view.left() + f.pad;
+    let mut y = top + 24.0 * s;
+    heading(ui, f, &mut y, t!("Steam Input"));
+    bp.bg_want = Some(id);
+    let current = client::app_controller(id);
+    let width = f.view.width() - 2.0 * f.pad;
+    let note = t!("Override controller handling for this game.");
+    let line = paint::wrapped(ui.painter(), pos2(left, y), note, w::font(20.0 * s), f.t.text_dim, width, usize::MAX);
+    y = line.bottom() + 24.0 * s;
+    for (choice, label) in [(0, t!("Use the default settings")), (1, t!("Enable Steam Input")), (2, t!("Disable Steam Input"))] {
+        let row = Id::unique(("bp-game-steam-input", id, choice));
+        if choice == current {
+            bp.preferred = Some(row);
+        }
+        let selected = choice == current;
+        let (_, hit) = button(bp, ui, f, row, pos2(left, y), 520.0 * s, selected.then_some(icons::CHECK), label,
+            if selected { Kind::Primary } else { Kind::Secondary }, None);
+        if hit.activated && !selected {
+            with_library(f.app, f.actions, |lib, _| lib.set_game_controller(id, choice));
+        }
+        y += 84.0 * s;
+    }
+    let (_, hit) = button(bp, ui, f, Id::unique(("bp-game-controller-settings", id)), pos2(left, y), 520.0 * s, Some(icons::GEAR), t!("Controller settings"), Kind::Secondary, None);
+    if hit.activated {
+        bp.settings.open_at(super::settings::CONTROLLER);
+        bp.open(Page::Settings, f.now);
+    }
+    y - top + 96.0 * s
+}
+
+fn quick_access(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
+    use super::settings::{CONTROLLER, OVERLAY};
+    let s = f.s;
+    let width = (f.view.width() - 2.0 * f.pad).min(550.0 * s);
+    let left = f.view.right() - f.pad - width;
+    let mut y = top + 22.0 * s;
+    let panel = Rect::from_min_size(pos2(left - 18.0 * s, y), vec2(width + 36.0 * s, 450.0 * s));
+    ui.painter().rect_filled(panel, paint::radius(18.0 * s), f.t.chrome.gamma_multiply(0.96));
+    y += 18.0 * s;
+    ui.painter().text(pos2(left, y), Align2::LEFT_TOP, t!("Quick Access"), w::font_bold(31.0 * s), f.t.text);
+    y += 55.0 * s;
+
+    let inbox_id = Id::unique("bp-quick-inbox");
+    bp.preferred = Some(inbox_id);
+    let unread = f.app.state.notifications.as_ref().map_or(0, |data| data.unread);
+    let waiting = if unread > 0 { t!("{count} unread", count = unread) } else { String::new() };
+    let mut row = |bp: &mut BigPicture, f: &Frame, id, icon, label: &str, status: &str| {
+        let rect = Rect::from_min_size(pos2(left, y), vec2(width, 55.0 * s));
+        y += 63.0 * s;
+        compact_row(bp, ui, f, id, rect, icon, label, status).activated
+    };
+    if row(bp, f, inbox_id, icons::BELL, t!("Notifications"), &waiting) {
+        bp.open(Page::Notifications, f.now);
+    }
+    let flags = f.app.shared_flags();
+    let overlay = flags.lock().unwrap().overlay_enabled;
+    let pad_count = bp.pads.to_string();
+    for (section, icon, label, status) in [
+        (CONTROLLER, icons::CONTROLLER, t!("Controller"), pad_count.as_str()),
+        (OVERLAY, icons::STACK, t!("In-game overlay"), if overlay { t!("On") } else { t!("Off") }),
+    ] {
+        if row(bp, f, Id::unique(("bp-quick-access", section)), icon, label, status) {
+            bp.settings.open_at(section);
+            bp.open(Page::Settings, f.now);
+        }
+    }
+    for (tab, icon) in [(Tab::Friends, icons::USERS), (Tab::Downloads, icons::DOWNLOAD)] {
+        if row(bp, f, Id::unique(("bp-quick-tab", tab.index())), icon, &super::tab_label(f, tab), "") {
+            bp.switch_tab(tab, f.now, true);
+        }
+    }
+    panel.bottom() - top + 24.0 * s
+}
+
+fn notifications(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
+    let s = f.s;
+    let left = f.view.left() + f.pad;
+    let mut y = top + 24.0 * s;
+    heading(ui, f, &mut y, t!("Notifications"));
+    let settings_id = Id::unique("bp-notification-settings");
+    let (r, settings) = button(bp, ui, f, settings_id, pos2(left, y), 0.0, Some(icons::GEAR), t!("Settings"), Kind::Secondary, None);
+    if settings.activated {
+        bp.settings.open_at(super::settings::NOTIFICATIONS);
+        bp.open(Page::Settings, f.now);
+    }
+    let data = f.app.state.notifications.as_ref();
+    if data.is_some_and(|data| data.unread > 0) && !f.app.demo {
+        let (_, read) = button(bp, ui, f, Id::unique("bp-notifications-mark-all"), pos2(r.right() + 20.0 * s, y), 0.0,
+            Some(icons::CHECK), t!("Mark all as read"), Kind::Secondary, None);
+        if read.activated {
+            f.app.client.send(Command::MarkNotificationsRead { ids: vec![] });
+        }
+    }
+    y += 96.0 * s;
+    let width = (f.view.width() - 2.0 * f.pad).min(1100.0 * s);
+    if let Some(data) = data.filter(|data| !data.items.is_empty()) {
+        for n in data.items.iter().take(40) {
+            let id = Id::unique(("bp-notification", n.id));
+            let rect = Rect::from_min_size(pos2(left, y), vec2(width, 68.0 * s));
+            let hit = bp.focus.item(ui, id, rect, ui.clip_rect(), Place::Page);
+            let (icon, label) = crate::shell::notification_text(&f.app.state, n);
+            let painter = ui.painter();
+            painter.rect_filled(rect, paint::radius(12.0 * s), w::mix(f.t.surface, f.t.raised, hit.glow));
+            let color = if n.read { f.t.text_dim } else { f.t.text };
+            painter.text(pos2(left + 20.0 * s, rect.center().y), Align2::LEFT_CENTER, icon, w::font(24.0 * s), color);
+            paint::line(painter, pos2(left + 58.0 * s, rect.center().y), Align2::LEFT_CENTER, &label, w::font_medium(21.0 * s), color, width - 78.0 * s);
+            if hit.focused {
+                bp.focus.ring_around(rect, 12.0 * s);
+            }
+            if hit.activated {
+                if !n.read && !f.app.demo {
+                    f.app.client.send(Command::MarkNotificationsRead { ids: vec![n.id] });
+                }
+                crate::shell::open_notification(&f.app.state, n, f.actions);
+            }
+            y += 80.0 * s;
+        }
+    } else {
+        let label = if data.is_some() { t!("You're all caught up.") } else { t!("Notifications unavailable") };
+        paint::line(ui.painter(), pos2(left, y), Align2::LEFT_TOP, label, w::font(20.0 * s), f.t.text_dim, width);
+        y += 34.0 * s;
+    }
+    y - top + 24.0 * s
 }
 
 // ---------- Store ----------
@@ -1845,4 +2093,25 @@ fn embedded(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, page: &str, arg: Op
         ui.painter().text(area.center(), Align2::CENTER_CENTER, t!("This page isn't available"), w::font(24.0 * f.s), f.t.text_dim);
     }
     f.view.height()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod compatibility_tests {
+    use super::compatibility_choices;
+
+    #[test]
+    fn a_native_only_install_cannot_select_a_windows_tool() {
+        let builds = vec![("proton_10".into(), "Proton 10".into())];
+        let choices = compatibility_choices(Some((true, false)), Some("Proton 10"), &builds);
+        assert_eq!(choices.iter().map(|row| row.0).collect::<Vec<_>>(), [None, Some(client::NATIVE)]);
+    }
+
+    #[test]
+    fn a_dual_install_can_reset_or_select_either_build() {
+        let builds = vec![("proton_10".into(), "Proton 10".into())];
+        let choices = compatibility_choices(Some((true, true)), Some("Proton 10"), &builds);
+        assert_eq!(choices.iter().map(|row| row.0).collect::<Vec<_>>(), [
+            None, Some(client::NATIVE), Some(client::DEFAULT_PROTON), Some("proton_10"),
+        ]);
+    }
 }

@@ -146,7 +146,7 @@ Details: [steam-compatibility.md](steam-compatibility.md).
 
 | | |
 | --- | --- |
-| Games without anti-cheat use Aurora's own `steamclient` DLL, 64-bit and 32-bit | Done |
+| Games can use Aurora's 64-bit or 32-bit `steamclient` as a fallback | Done |
 | Games with VAC, Easy Anti-Cheat or BattlEye start through the official client, silently | Done. Our DLL is never used for them |
 | User, apps, achievements, stats, cloud, friends, auth tickets, encrypted app tickets | Done |
 | Lobbies (`ISteamMatchmaking`) through Steam's matchmaking service | Done |
@@ -172,7 +172,7 @@ Details: [steam-compatibility.md](steam-compatibility.md).
 | Mouse and keyboard go to the overlay while it's open; the cursor shows and the game gets `GameOverlayActivated_t` | Done |
 | Game overview, achievements, friends, chat, notes, guides, discussions, hub, store page | Done, in floating windows |
 | Pin windows over the game with adjustable opacity | Done |
-| Games with anti-cheat | They start through the official client, so they get Steam's own overlay |
+| Games with anti-cheat | The official-client fallback uses Steam's overlay. Headless launches show a warning the first time. |
 | Game invites in chat show as cards with a Join button (Steam's `[gameinvite]` markup). Friend menus offer "Invite to lobby" or "Invite to game" from what the game reports, else "Invite to play", all sent as real Steam invites | Done |
 | In-game web browser, screenshots (F12), FPS counter | Not yet |
 

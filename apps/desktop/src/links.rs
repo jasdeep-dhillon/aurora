@@ -187,10 +187,46 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 
 pub(crate) const BIG_PICTURE: &str = "bigpicture";
 pub(crate) const BIG_PICTURE_WINDOW: &str = "bigpicture-window";
+pub(crate) const DECK_PREVIEW: &str = "deck-preview";
+pub(crate) const DECK_PREVIEW_WINDOW: &str = "deck-preview-window";
+
+pub(crate) fn big_picture_request(args: impl IntoIterator<Item = impl AsRef<str>>) -> Option<&'static str> {
+    let (mut deck, mut window, mut fullscreen) = (false, false, false);
+    for arg in args {
+        match arg.as_ref() {
+            "--steam-deck" => deck = true,
+            "--steam-deck=window" => {
+                deck = true;
+                window = true;
+            }
+            "--bigpicture=window" => window = true,
+            "--bigpicture" => fullscreen = true,
+            _ => {}
+        }
+    }
+    match (deck, window, fullscreen) {
+        (true, true, _) => Some(DECK_PREVIEW_WINDOW),
+        (true, false, _) => Some(DECK_PREVIEW),
+        (false, true, _) => Some(BIG_PICTURE_WINDOW),
+        (false, false, true) => Some(BIG_PICTURE),
+        _ => None,
+    }
+}
+
+pub(crate) fn big_picture_mode(request: &str) -> Option<(bool, bool)> {
+    match request {
+        BIG_PICTURE => Some((false, false)),
+        BIG_PICTURE_WINDOW => Some((false, true)),
+        DECK_PREVIEW => Some((true, false)),
+        DECK_PREVIEW_WINDOW => Some((true, true)),
+        _ => None,
+    }
+}
+
 
 pub(crate) fn is_allowed_payload(payload: &str) -> bool {
     let p = payload.trim();
-    matches!(p, "show" | BIG_PICTURE | BIG_PICTURE_WINDOW) || parse(p).is_some()
+    p == "show" || big_picture_mode(p).is_some() || parse(p).is_some()
 }
 
 pub struct LinkRequest {
@@ -604,5 +640,21 @@ mod tests {
         ctx.include_bytes(ui::brand::LOGO_URI, ui::brand::LOGO_SVG);
         let poll = ctx.try_load_image(ui::brand::LOGO_URI, egui::SizeHint::Size { width: 32, height: 32, maintain_aspect_ratio: true });
         assert!(matches!(poll, Ok(egui::load::ImagePoll::Ready { .. })), "expected Aurora SVG logo to decode, got {:?}", poll.err());
+    }
+}
+
+#[cfg(test)]
+mod deck_launch_tests {
+    use super::*;
+
+    #[test]
+    fn deck_flags_request_distinct_preview_modes() {
+        assert_eq!(big_picture_request(["--steam-deck"]), Some(DECK_PREVIEW));
+        assert_eq!(big_picture_request(["--steam-deck=window"]), Some(DECK_PREVIEW_WINDOW));
+        assert_eq!(big_picture_request(["--bigpicture=window", "--steam-deck"]), Some(DECK_PREVIEW_WINDOW));
+        assert_eq!(big_picture_request(["--bigpicture"]), Some(BIG_PICTURE));
+        assert_eq!(big_picture_request(["--steam-deckish"]), None);
+        assert!(is_allowed_payload(DECK_PREVIEW));
+        assert!(is_allowed_payload(DECK_PREVIEW_WINDOW));
     }
 }

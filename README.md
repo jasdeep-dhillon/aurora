@@ -30,30 +30,18 @@ kind of game in your library.
 
 ## Every game launches
 
-On Linux, Aurora picks how to start each game:
+Aurora starts installed Steam games through the windowless Steam host by
+default when Aurora is online and the host is available. The host uses your
+installed Steam engine for Steamworks and ownership checks.
 
-| Game | How it starts | Steam features in the game |
-| --- | --- | --- |
-| Native Linux games | Directly | From your own Steam's `steamclient.so`, on a windowless Steam host |
-| Windows games | Proton (Steam's default, or one you pick in Manage › Compatibility) | Aurora's own `steamclient`: achievements, stats, cloud, lobbies, Workshop |
-| Steam DRM (SteamStub) | Proton, on the windowless Steam host | Valve's engine answers the DRM check itself |
-| Anti-cheat (VAC, Easy Anti-Cheat, BattlEye) | Through the official Steam client, or on the windowless Steam host (experimental, Settings › Library) | Steam's own, from Valve's engine either way |
-
-The windowless Steam host is your installed Steam's engine without its
-interface: no `steamwebhelper`, no Chromium. It checks ownership itself, so it
-can't start a game you don't own.
-
-Games with both a Linux and a Windows build run the Linux build by default.
+On Linux, games with both builds installed use the native build by default.
 Manage › Compatibility switches a game to Proton or to a specific Proton
-version.
+version. On Windows, games run natively.
 
-Needs Steam installed (for Proton and the Steam host). Anti-cheat games also
-need it signed in, unless they run on the windowless Steam host: that option
-(Settings › Library, experimental) starts them without the official client.
-The anti-cheat may count that as an unsupported setup and ban you.
-
-On Windows, games run as in Aurora: Aurora's `steamclient` for most games,
-the official client for anti-cheat.
+The first time you try an anti-cheat game on the headless host, Aurora asks
+you to acknowledge the risk of launch failures, kicks or bans. The official
+Steam client is still available for games that need it. Compatible games can
+also start when the host is unavailable.
 
 ## Status
 
@@ -79,7 +67,7 @@ and package.
 | Workshop | 0.75 | Browse, subscribe, and download mods. Publishing support covers single-file uploads through the in-game API. |
 | Inventory, trading, and Market | 0.5 | View inventory, check prices, list items, and send basic trade offers. The trade inbox and Market browsing open Steam's website. |
 | Steam Cloud | 1 | Per-game sync, conflict resolution with local backups, and viewing and deleting remote saves. |
-| Game launch and Proton | 1 | Native Linux launches and per-game Proton selection. Some launch paths require Valve's installed Steam components. Anti-cheat defaults to the official client. Headless anti-cheat support is experimental. |
+| Game launch and Proton | 1 | Native Linux launches and per-game Proton selection. The windowless Steam host is the default when available. Anti-cheat games show a first-launch warning. |
 | In-game Steam features | 0.75 | Achievements, stats, lobbies, and other Steamworks features on supported routes. Aurora's own implementation lacks Steam Datagram Relay for modern multiplayer. |
 | Steam Input | 0.5 | Controller testing, calibration, per-game overrides, community layouts, and binding editing. In-game support depends on the game and launch route. |
 | Shift+Tab overlay | 1 | In-game rendering on supported Windows games and via a Vulkan layer on Linux, with a window fallback on some launch paths. Includes notes, screenshots, and an FPS counter. An in-game browser is outside Aurora's scope. |
@@ -93,6 +81,13 @@ and package.
 Open Big Picture with the monitor button, the app menu, the controller's
 Guide button while Aurora is focused, or `aurora --bigpicture`. Use
 `--bigpicture=window` to open it in a window.
+
+To try Aurora’s Deck interface on a desktop, use `aurora --steam-deck`
+(full screen) or `aurora --steam-deck=window`. Press F2 or click **Quick Access**
+while Big Picture has focus. Press Esc to go back, F1 for the main menu, and
+F11 to toggle fullscreen.
+The preview uses your normal Aurora library and settings. It does not emulate
+Deck hardware, claim a SteamOS session, or activate system-level controls.
 
 See [Steamworks compatibility](docs/steam-compatibility.md) for in-game API
 details and the [changelog](CHANGELOG.md) for release history.
@@ -158,8 +153,8 @@ The Windows `steamclient` DLLs that Proton games load are built by CI
 
 - **Your account.** Aurora signs in the way the official client and the Steam
   Mobile app do. Your sign-in stays on your PC and is only sent to Steam.
-- **Anti-cheat.** By default, anti-cheat games always run through Valve's
-  client.
+- **Anti-cheat.** Aurora shows a risk warning before each anti-cheat game's
+  first launch through the windowless Steam host.
 - **Other connections.** Steam, GitHub (updates), an exchange-rate service
   (gift regions) and, if you add a key, IsThereAnyDeal. No telemetry.
 

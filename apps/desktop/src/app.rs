@@ -4,7 +4,7 @@ use client::{Client, Command, Event, SavedAccount, State, state::Phase};
 use extensions::{Action, Env, Registry};
 use local::LocalState;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use ui::Theme;
@@ -76,10 +76,8 @@ pub struct Prefs {
     /// Linux: a Proton forced for single games (their Manage menu).
     #[serde(default)]
     pub proton_per_app: std::collections::BTreeMap<model::AppId, String>,
-    /// Experimental: anti-cheat games start on the headless host instead of
-    /// the official Steam client (accepted in Settings > Library).
-    #[serde(default)]
-    pub anti_cheat_headless: bool,
+    /// Games whose first-launch anti-cheat warning was accepted.
+    pub anti_cheat_acknowledged: BTreeSet<model::AppId>,
     /// Linux: compile a game's shaders before it starts (Settings > Downloads).
     #[serde(default = "yes")]
     pub precompile_shaders: bool,
@@ -148,7 +146,7 @@ impl Default for Prefs {
             drm_host_ack: false,
             proton_override: None,
             proton_per_app: Default::default(),
-            anti_cheat_headless: false,
+            anti_cheat_acknowledged: BTreeSet::new(),
             precompile_shaders: true,
             gameplay_downloads: false,
             controller: client::ControllerSettings::default(),
@@ -179,6 +177,13 @@ pub struct Toast {
     pub title: String,
     pub body: String,
     pub until: f64,
+}
+
+struct AntiCheatNotice {
+    app_id: model::AppId,
+    install_dir: PathBuf,
+    args: client::LaunchArgs,
+    skip_cloud: bool,
 }
 
 pub struct SteamApp {
@@ -224,6 +229,7 @@ pub struct SteamApp {
     pub friends_window: crate::friends_window::FriendsWindow,
     links: std::sync::mpsc::Receiver<crate::links::LinkRequest>,
     pub launch_popup: Option<crate::launch_popup::LaunchPopup>,
+    anti_cheat_notices: VecDeque<AntiCheatNotice>,
     /// Links waiting for sign-in to finish.
     pending_links: Vec<String>,
     /// Main window is hidden in the tray.
@@ -344,7 +350,7 @@ impl SteamApp {
         }));
         client::set_proton_override(prefs.proton_override.clone());
         client::set_app_protons(prefs.proton_per_app.clone());
-        client::set_anti_cheat_headless(prefs.anti_cheat_headless);
+        client::set_anti_cheat_acknowledged(prefs.anti_cheat_acknowledged.clone());
         client::set_gameplay_downloads(prefs.gameplay_downloads);
         client::set_controller_settings(prefs.controller.clone());
         client::set_app_bindings(prefs.controller_bindings.clone());
@@ -410,6 +416,7 @@ impl SteamApp {
             friends_window: Default::default(),
             links: crate::links::listen(cc.egui_ctx.clone()),
             launch_popup: None,
+            anti_cheat_notices: VecDeque::new(),
             pending_links: link.into_iter().collect(),
             hidden: false,
             tray_restore_retry_at: None,
@@ -506,6 +513,7 @@ impl SteamApp {
                     self.login = Default::default();
                 }
                 Event::LoggedOut { reason } => {
+                    self.anti_cheat_notices.clear();
                     self.bigpicture.leave(ctx);
                     self.window_mode = None;
                     if reason == "Logged out" {
@@ -535,6 +543,18 @@ impl SteamApp {
                     if self.friends_window.chat == Some(crate::builtin::group_chat::ChatTarget::Group(*gid)) {
                         self.friends_window.chat = None;
                         self.friends_window.group_ui.chat_id = None;
+                    }
+                }
+                Event::AntiCheatWarning { app_id, install_dir, args, skip_cloud } => {
+                    if !self.prefs.anti_cheat_acknowledged.contains(app_id)
+                        && !self.anti_cheat_notices.iter().any(|notice| notice.app_id == *app_id)
+                    {
+                        self.anti_cheat_notices.push_back(AntiCheatNotice {
+                            app_id: *app_id,
+                            install_dir: install_dir.clone(),
+                            args: args.clone(),
+                            skip_cloud: *skip_cloud,
+                        });
                     }
                 }
                 Event::GameStarted { app_id } => {
@@ -760,7 +780,6 @@ impl SteamApp {
         }
         self.prefs.proton_override = client::proton_override();
         self.prefs.proton_per_app = client::app_protons();
-        self.prefs.anti_cheat_headless = client::anti_cheat_headless();
         self.prefs.gameplay_downloads = client::gameplay_downloads();
         self.prefs.controller = client::controller_settings();
         self.prefs.controller_bindings = client::app_bindings();
@@ -873,6 +892,60 @@ impl SteamApp {
         sync_texture(ctx, &mut self.logo_tex, logo_path.as_deref(), egui::TextureWrapMode::ClampToEdge, "theme-logo");
     }
 
+    fn anti_cheat_notice(&mut self, ctx: &egui::Context) {
+        use i18n::t;
+        use ui::{icons, widgets as w};
+
+        let Some(notice) = self.anti_cheat_notices.front() else { return };
+        let app_id = notice.app_id;
+        let name = self.state.app_name(app_id).unwrap_or_default();
+        let theme = &self.prefs.theme;
+        let mut play = false;
+        let mut cancel = false;
+        let modal = w::modal(ctx, egui::Id::new(("anti-cheat-launch", app_id))).show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.label(w::text(icons::WARNING, 28.0, theme.danger));
+            ui.label(w::text_bold(t!("Play anti-cheat games at your own risk"), 20.0, theme.text));
+            ui.add_space(6.0);
+            for text in [
+                t!("{name} uses anti-cheat. Aurora will start it through the windowless Steam host.", name = name).to_string(),
+                t!("The anti-cheat may see this as an unsupported setup. That can mean a kick, a game ban or a Steam (VAC) ban on your account, and bans are usually permanent.").to_string(),
+                t!("Some games won't start, or can't go online, without the official client.").to_string(),
+            ] {
+                ui.add(egui::Label::new(w::text(text, 14.0, theme.text_dim)).wrap());
+                ui.add_space(6.0);
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let button = w::button(ui, theme, None, t!("Cancel"), w::Kind::Secondary, w::Size::Md);
+                w::autofocus(&button, true);
+                cancel = button.clicked();
+                play = w::button(ui, theme, Some(icons::PLAY), t!("Continue"), w::Kind::Danger, w::Size::Md).clicked();
+            });
+        });
+        if !play && !cancel && !modal.should_close() {
+            return;
+        }
+        let notice = self.anti_cheat_notices.pop_front().unwrap();
+        if let Some(popup) = self.launch_popup.as_mut().filter(|popup| popup.app_id == app_id) {
+            if play {
+                popup.since = ctx.input(|i| i.time);
+            } else {
+                self.launch_popup = None;
+            }
+        }
+        if play {
+            self.prefs.anti_cheat_acknowledged.insert(app_id);
+            client::acknowledge_anti_cheat(app_id);
+            let AntiCheatNotice { app_id, install_dir, args, skip_cloud } = notice;
+            self.client.send(if skip_cloud {
+                Command::LaunchWithoutCloud { app_id, install_dir, args }
+            } else {
+                Command::Launch { app_id, install_dir, args }
+            });
+        }
+    }
+
     fn show_window(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame, token: Option<String>) {
         self.tray.activate_window(frame, token);
         self.hidden = false;
@@ -906,8 +979,8 @@ impl SteamApp {
         }
         for raw in std::mem::take(&mut self.pending_links) {
             let nav = |page: &str, arg: Option<String>| Action::Navigate { page: page.into(), arg };
-            if matches!(raw.as_str(), crate::links::BIG_PICTURE | crate::links::BIG_PICTURE_WINDOW) {
-                self.bigpicture.enter_requested(ctx, raw == crate::links::BIG_PICTURE_WINDOW);
+            if let Some((deck_preview, windowed)) = crate::links::big_picture_mode(&raw) {
+                self.bigpicture.enter_requested(ctx, deck_preview, windowed);
                 continue;
             }
             match crate::links::parse(&raw) {
@@ -1036,6 +1109,9 @@ impl eframe::App for SteamApp {
         self.drain_events(ctx, &mut actions);
         self.handle_tray(ctx, frame, &mut actions);
         self.handle_links(ctx, frame, &mut actions);
+        if !self.anti_cheat_notices.is_empty() && (self.hidden || ctx.input(|i| i.viewport().minimized == Some(true))) {
+            self.show_window(ctx, frame, None);
+        }
         if frame.is_window_attached() || self.tray.available() {
             self.tray_restore_retry_at = None;
         } else {
@@ -1179,6 +1255,7 @@ impl eframe::App for SteamApp {
         let launch_dialog = signed_in_now && self.registry.with_ext::<crate::builtin::library::Library, _>(
             "library", env, |lib, _| lib.launch_dialog_pending(),
         ).unwrap_or(false);
+        let launch_dialog = launch_dialog || !self.anti_cheat_notices.is_empty();
         self.bigpicture.launch_dialog = launch_dialog;
         let big_picture = signed_in_now && self.bigpicture.active;
         let fullscreen = big_picture && !self.bigpicture.is_windowed();
@@ -1203,7 +1280,12 @@ impl eframe::App for SteamApp {
             WindowMode::SignIn
         };
         if fullscreen {
-            self.window_mode = None;
+            if self.window_mode.take().is_some() {
+                // A fixed-size login window leaves size constraints behind on Wayland.
+                ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::vec2(16384.0, 16384.0)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(2.0, 1.0)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+            }
             self.pending_size = None;
             self.center_window = None;
         } else if self.window_mode != Some(mode) {
@@ -1372,6 +1454,7 @@ impl eframe::App for SteamApp {
         };
         if signed_in {
             self.registry.with_ext::<crate::builtin::library::Library, _>("library", env, |lib, cx| lib.background_dialogs(ui, cx));
+            self.anti_cheat_notice(&ctx);
         }
         let env = Env {
             state: &self.state, local: &self.local, theme: &self.prefs.theme,

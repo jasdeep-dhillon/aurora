@@ -69,7 +69,7 @@ pub use pads::{
 };
 #[cfg(windows)]
 pub use pads::listen_for_controller_guide;
-pub use launch::{LaunchArgs, LaunchMode, STEAM_DRM, anti_cheat_headless, app_overlay_enabled, mode as launch_mode, mode_cached as launch_mode_cached, mode_peek as launch_mode_peek, overlay_enabled, proton_builds, proton_override, app_proton, app_protons, default_proton, native_build, NATIVE, DEFAULT_PROTON, safe_connect_args, set_app_overlay, set_app_proton, set_app_protons, set_anti_cheat_headless, set_overlay_disabled_apps, set_overlay_enabled, set_overlay_hotkeys, set_prefer_official as launch_through_steam, set_proton_override, set_steam_setting, steam_setting, steam_settings_locked, SteamSetting, apply_steam_prefs, gameplay_downloads, set_gameplay_downloads, spawn_non_steam};
+pub use launch::{LaunchArgs, LaunchMode, STEAM_DRM, acknowledge_anti_cheat, app_overlay_enabled, mode as launch_mode, mode_cached as launch_mode_cached, mode_peek as launch_mode_peek, overlay_enabled, proton_builds, proton_override, app_proton, app_protons, default_proton, native_build, NATIVE, DEFAULT_PROTON, safe_connect_args, set_app_overlay, set_app_proton, set_app_protons, set_anti_cheat_acknowledged, set_overlay_disabled_apps, set_overlay_enabled, set_overlay_hotkeys, set_prefer_official as launch_through_steam, set_proton_override, set_steam_setting, steam_setting, steam_settings_locked, SteamSetting, apply_steam_prefs, gameplay_downloads, set_gameplay_downloads, spawn_non_steam};
 pub use state::State;
 pub use store::SavedAccount;
 
@@ -556,8 +556,9 @@ pub enum Event {
     /// A game asked for Steam's overlay (see `ipc::protocol::Request::Overlay`
     /// for `dialog` and `target`): Aurora's overlay should open there.
     GameOverlay { app_id: AppId, dialog: String, target: String },
-    /// How a game is being started: with Aurora's steamclient, through
-    /// the official Steam client (anti-cheat), or without Steam features.
+    /// Launch paused before a detected anti-cheat game uses the headless host.
+    AntiCheatWarning { app_id: AppId, install_dir: PathBuf, args: LaunchArgs, skip_cloud: bool },
+    /// How a game is being started.
     LaunchMode { app_id: AppId, mode: LaunchMode },
     /// A game's shaders are compiling before it starts (`done` of `total`
     /// pipelines; `total` is 0 until Fossilize has counted them).
