@@ -1,10 +1,20 @@
 # Changelog
 
-## Unreleased
+## [1.0.0-rc4](https://github.com/mollie2999/Aurora/compare/v1.0.0-rc3...v1.0.0-rc4) (2026-11-24)
 
 ### New
 
-* Installed Steam games use the windowless Steam host by default when available. A per-game warning before the first headless launch of an anti-cheat game replaces the experimental Library toggle.
+* **Steam Deck Game Mode & Big Picture overhaul:**
+  * Added an opt-in Steam Deck preview (`--steam-deck` / `--steam-deck=window`, `F2` for Quick Access, `F11` for fullscreen/windowed) alongside Gamescope and session diagnostics. ([#84](https://github.com/mollie2999/Aurora/pull/84))
+  * Added a four-tab slide-over **Quick Access** drawer (**System**, **Performance**, **Notifications**, **Friends**) accessible via `Guide + A`, `[` / `]`, or `F2`, plus an upgraded **Main Menu** with account/clock/battery header, running-game controls, and Power submenu. ([#85](https://github.com/mollie2999/Aurora/pull/85))
+  * Added native controller-first **Profile** and **Edit Profile** pages (backgrounds, animated avatars and frames, badges, card collections, games, reviews, groups, comments, and privacy/theme settings). ([#85](https://github.com/mollie2999/Aurora/pull/85))
+  * Added a shared **On-Screen Keyboard** (English/Cyrillic), a comprehensive per-game **Manage** screen (Steam Cloud sync and conflict resolution, Betas, DLC, integrity verification, move, and uninstall), **Storage** and **System** settings with Linux battery/backlight/audio controls, Downloads queue reordering and history, and updated French, Spanish, and Russian translations. ([#85](https://github.com/mollie2999/Aurora/pull/85))
+* **Controller Guide button:** pressing the Xbox, PlayStation, or other controller Guide button opens or restores fullscreen Big Picture while Aurora is signed in (including from the tray), while staying inactive when an Aurora-launched game is running and Aurora is unfocused. ([#83](https://github.com/mollie2999/Aurora/pull/83))
+* **Headless Steam host default:** installed Steam games now use the windowless Steam host by default when available, with a per-game warning before the first headless launch of an anti-cheat game replacing the experimental Library toggle. ([#82](https://github.com/mollie2999/Aurora/pull/82))
+
+### Performance
+
+* Replaced Big Picture's unconditional 33 ms idle repaint loop with event-driven repaint scheduling, relaxed idle `gilrs` polling to 250 ms, cached host telemetry and Library/Chat layouts, and added an auto-hiding top bar. ([#85](https://github.com/mollie2999/Aurora/pull/85))
 
 ## [1.0.0-rc3](https://github.com/mollie2999/Aurora/compare/v1.0.0-rc2...v1.0.0-rc3) (2026-11-23)
 
