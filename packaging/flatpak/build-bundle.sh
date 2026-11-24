@@ -22,6 +22,7 @@ build="$work/build"
 # The platform doubles as the SDK here because the payload is prebuilt.
 flatpak build-init --arch=x86_64 "$build" "$id" "$platform" "$platform" "$branch"
 install -Dm755 "$src/aurora" "$build/files/bin/aurora"
+install -Dm755 "$src/steamhost" "$build/files/bin/steamhost"
 install -Dm644 "$src/LICENSE" "$build/files/share/licenses/$id/LICENSE"
 install -Dm644 "$src/icon-256.png" \
     "$build/files/share/icons/hicolor/256x256/apps/$id.png"
