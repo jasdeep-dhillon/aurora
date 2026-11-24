@@ -130,7 +130,7 @@ From [the latest release](https://github.com/mollie2999/Aurora/releases/latest):
 | `Aurora-Setup-<version>.exe` | Windows 10/11 installer, updates itself |
 | `Aurora-<version>-portable.zip` | Windows, no installer |
 
-The experimental Flatpak keeps its own settings and library data. Use a native package for host Steam, Proton, and in-game overlay integration. To update the Flatpak, install the new bundle from the release page.
+The experimental Flatpak keeps its own settings and library data. It bundles the `steamhost` helper, which needs access to Valve’s Steam engine to launch games through the headless Steam path. Use a native package for host Steam, Proton, and in-game overlay integration. To update the Flatpak, install the new bundle from the release page.
 
 Store trailers on Linux need `ffmpeg`, and `libpulse` for sound.
 
