@@ -550,6 +550,8 @@ pub enum Event {
     Personas(Vec<Persona>),
     /// Names of games outside your library (e.g. what friends are playing).
     AppNames(Vec<(AppId, String)>),
+    /// A game has been asked to launch and is preparing (workshop/cloud/host startup).
+    GameLaunching { app_id: AppId },
     GameStarted { app_id: AppId },
     /// The `STEAMINRUST_IPC` value for a game started by hand ([`Command::AttachGame`]).
     GameAttached { app_id: AppId, env: String },

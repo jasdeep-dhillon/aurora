@@ -1821,6 +1821,12 @@ impl Library {
                                 ui.add_enabled_ui(false, |ui| w::button(ui, t, Some(icons::CLOUD_CHECK), t!("Syncing Steam Cloud…"), w::Kind::Play, w::Size::Lg));
                                 ui.add(egui::Spinner::new().color(t.accent));
                             }
+                            Some(_) if ctx.state.launching == Some(id) => {
+                                if w::button(ui, t, Some(icons::X), t!("Launching…"), w::Kind::Danger, w::Size::Lg).on_hover_text(t!("Cancel")).clicked() {
+                                    ctx.send(Command::StopGame { app_id: id });
+                                }
+                                ui.add(egui::Spinner::new().color(t.accent));
+                            }
                             Some(g) => {
                                 let r = w::button(ui, t, Some(icons::PLAY), t!("Play"), w::Kind::Play, w::Size::Lg);
                                 if r.clicked() {
@@ -2351,6 +2357,7 @@ impl Library {
         match installed {
             Some(_) if self.uninstalling.contains_key(&id) => MainAction::Uninstalling,
             Some(_) if ctx.state.playing == Some(id) => MainAction::Running,
+            Some(_) if ctx.state.launching == Some(id) => MainAction::Preparing,
             Some(g) if self.needs_update(ctx, &g) => MainAction::Update,
             Some(_) if ctx.state.cloud_syncing.contains(&id) => MainAction::Syncing,
             Some(_) => MainAction::Play,
@@ -2446,6 +2453,8 @@ impl Library {
             ui.add_enabled_ui(false, |ui| w::button(ui, t, Some(icons::CLOCK), t!("Queued"), w::Kind::Secondary, w::Size::Lg));
         } else if ctx.state.playing == Some(id) {
             ui.add_enabled_ui(false, |ui| w::button(ui, t, Some(icons::PLAY), t!("Running"), w::Kind::Play, w::Size::Lg));
+        } else if ctx.state.launching == Some(id) {
+            ui.add_enabled_ui(false, |ui| w::button(ui, t, Some(icons::CLOCK), t!("Launching…"), w::Kind::Play, w::Size::Lg));
         } else if self.needs_update(ctx, g) {
             if w::button(ui, t, Some(icons::DOWNLOAD), t!("Update"), w::Kind::Primary, w::Size::Lg).clicked() {
                 self.queue_install(ctx, id, Some(g.library.clone()));
@@ -3449,6 +3458,7 @@ impl crate::theme_renderer::LibraryHost for Library {
                 let (fid, fname, _) = &account_recent[0];
                 let finstalled = ctx.local.games.iter().find(|g| g.app_id == *fid).cloned();
                 let fplaying = ctx.state.playing == Some(*fid);
+                let flaunching = !fplaying && ctx.state.launching == Some(*fid);
                 let feat_w = featured_width.min(avail).max(1.0);
                 let (rect, resp) = ui.allocate_exact_size(vec2(feat_w, capsule_height), Sense::click());
                 let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
@@ -3471,13 +3481,15 @@ impl crate::theme_renderer::LibraryHost for Library {
                 let bhover = ui.ctx().animate_bool_with_time(btn_resp.id, btn_resp.hovered(), 0.08);
                 let (btn_bg, btn_icon, btn_tip) = if fplaying {
                     (t.danger, icons::STOP, t!("Stop"))
+                } else if flaunching {
+                    (t.danger, icons::CLOCK, t!("Launching…"))
                 } else if finstalled.is_some() {
                     (t.play, icons::PLAY, t!("Play"))
                 } else {
                     (t.accent, icons::DOWNLOAD, t!("Install"))
                 };
                 ui.painter().rect_filled(btn_rect, CornerRadius::same(2), w::mix(btn_bg, Color32::WHITE, bhover * 0.14));
-                if !fplaying && finstalled.is_some() {
+                if !fplaying && !flaunching && finstalled.is_some() {
                     // Crisp filled white play triangle matching Steam's Play button.
                     let c = btn_rect.center();
                     let tri = vec![
@@ -3490,7 +3502,7 @@ impl crate::theme_renderer::LibraryHost for Library {
                     ui.painter().text(btn_rect.center(), Align2::CENTER_CENTER, btn_icon, w::font(20.0), Color32::WHITE);
                 }
                 if btn_resp.on_hover_text(btn_tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                    if fplaying {
+                    if fplaying || flaunching {
                         stop = Some(*fid);
                     } else if let Some(g) = &finstalled {
                         launch = Some((*fid, g.install_dir.clone()));

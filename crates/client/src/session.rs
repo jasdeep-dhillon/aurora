@@ -489,6 +489,8 @@ struct Online {
     playing: Option<AppId>,
     /// Process ids of games we started.
     running: HashMap<AppId, u32>,
+    /// Per-game stop flags to cancel launch waits or post-exit grace immediately.
+    stop_flags: HashMap<AppId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     cell_id: u32,
     /// Content host the player picked (a partner CDN), tried first.
     download_host: Option<String>,
@@ -641,6 +643,7 @@ async fn online(
         apps: HashMap::new(),
         playing: None,
         running: HashMap::new(),
+        stop_flags: HashMap::new(),
         cell_id: info.cell_id,
         download_cell: None,
         names_asked: Default::default(),
@@ -995,6 +998,9 @@ async fn online(
                         } else {
                             false
                         };
+                        if !st.running.contains_key(&app_id) {
+                            sink(Event::GameLaunching { app_id });
+                        }
                         let library = crate::workshop::library_of(&install_dir).filter(|_| sync && st.link == Link::Online && !st.running.contains_key(&app_id));
                         match library {
                             Some(library) => {
@@ -1053,7 +1059,12 @@ async fn online(
                         sink(Event::ControllerLayoutDownloaded { key, result });
                     });
                 }
-                Some(Command::LaunchWithoutCloud { app_id, install_dir, args }) => launch_now!(app_id, install_dir, args),
+                Some(Command::LaunchWithoutCloud { app_id, install_dir, args }) => {
+                    if !st.running.contains_key(&app_id) {
+                        sink(Event::GameLaunching { app_id });
+                    }
+                    launch_now!(app_id, install_dir, args);
+                }
                 Some(Command::SkipShaderCompile { app_id }) => {
                     if let Some(cancel) = st.shader_jobs.get(&app_id) {
                         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1146,6 +1157,9 @@ async fn online(
                     }
                 }
                 Some(Command::StopGame { app_id }) => {
+                    if let Some(flag) = st.stop_flags.get(&app_id) {
+                        flag.store(true, std::sync::atomic::Ordering::Release);
+                    }
                     if let Some(dir) = st.official.get(&app_id).cloned() {
                         tokio::task::spawn_blocking(move || launch::kill_in_folder(&dir));
                     } else if let Some(pid) = st.running.get(&app_id).copied() {
@@ -1751,6 +1765,7 @@ async fn online(
             Some(call) = ipc_rx.recv() => st.ipc_call(call, sink),
             Some((app_id, host_cloud_dir)) = exit_rx.recv() => {
                 st.running.remove(&app_id);
+                st.stop_flags.remove(&app_id);
                 st.launch_layouts.remove(&app_id);
                 st.official.remove(&app_id);
                 if st.pad_users.remove(&app_id) {
@@ -3046,11 +3061,14 @@ impl Online {
         }
         tracing::info!("{} starts as {mode:?}", app.name);
         sink(Event::LaunchMode { app_id, mode: mode.clone() });
+        sink(Event::GameLaunching { app_id });
+        let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         match mode {
             crate::LaunchMode::OfficialSteam { .. } => {
                 // The official client runs it; we only follow along. No
                 // GamesPlayed from us (Steam sends its own) and no cloud sync.
                 self.running.insert(app_id, 0);
+                self.stop_flags.insert(app_id, stop_flag);
                 self.official.insert(app_id, dir.to_path_buf());
                 let (tx, sink, args, me, offline) = (exit_tx.clone(), sink.clone(), args.clone(), self.me, self.link != Link::Online);
                 tokio::task::spawn_blocking(move || {
@@ -3069,6 +3087,7 @@ impl Online {
                 let app = app.clone();
                 let (account, token, me) = (self.account.clone(), self.refresh_token.clone(), self.me);
                 self.running.insert(app_id, 0);
+                self.stop_flags.insert(app_id, stop_flag.clone());
                 self.official.insert(app_id, dir.to_path_buf());
                 #[cfg(not(windows))]
                 let overlay = if launch::app_overlay_enabled(app_id) {
@@ -3086,7 +3105,7 @@ impl Online {
                 tokio::task::spawn_blocking(move || {
                     let started = || sink(Event::GameStarted { app_id });
                     let ov = overlay.as_ref().map(|(p, t)| (*p, t.as_str()));
-                    let cloud_dir = match launch::run_through_host(&app, &dir2, &args, &account, &token, me, ov, started) {
+                    let cloud_dir = match launch::run_through_host_cancellable(&app, &dir2, &args, &account, &token, me, ov, Some(&stop_flag), started) {
                         Ok(()) if !steam_drm => Some(dir2),
                         Ok(()) => None,
                         Err(e) => {
@@ -3188,7 +3207,9 @@ impl Online {
 
     /// A game we started ourselves: we're the one "playing" it.
     fn track(&mut self, app_id: AppId, dir: &std::path::Path, child: std::process::Child, sink: &Sink, exit_tx: &mpsc::UnboundedSender<(AppId, Option<std::path::PathBuf>)>) -> Result<(), Error> {
+        let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.running.insert(app_id, child.id());
+        self.stop_flags.insert(app_id, stop_flag.clone());
         self.launched_dirs.insert(app_id, dir.to_path_buf());
         self.playing = Some(app_id);
         if self.link == Link::Online {
@@ -3201,7 +3222,7 @@ impl Online {
         let tx = exit_tx.clone();
         let dir_owned = dir.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            let _ = tx.send((launch::wait_in_dir(app_id, &dir_owned, child), None));
+            let _ = tx.send((launch::wait_in_dir_cancellable(app_id, &dir_owned, child, Some(&stop_flag)), None));
         });
         Ok(())
     }

@@ -718,19 +718,53 @@ pub fn kill_in_folder(dir: &Path) {
     }
 }
 
+/// Adaptive post-exit grace period for launcher-to-game handoffs.
+///
+/// - If the user explicitly clicked Stop, return as soon as no process is alive.
+/// - If a process lived long enough to be the real game (>= 15s initial process
+///   or >= 10s descendant), only wait briefly (250ms) once nothing is alive.
+/// - If the initial process exited quickly (< 15s, typical of a bootstrapper
+///   like Paradox's `dowser` or a game launcher), wait up to 2s for the child
+///   game process to appear.
+fn post_exit_grace(initial_lifetime: Duration, descendant_lifetime: Option<Duration>, stop_requested: bool) -> Duration {
+    if stop_requested {
+        return Duration::ZERO;
+    }
+    const LONG_RUN: Duration = Duration::from_secs(15);
+    const LONG_DESCENDANT: Duration = Duration::from_secs(10);
+    if initial_lifetime >= LONG_RUN || descendant_lifetime.is_some_and(|d| d >= LONG_DESCENDANT) {
+        Duration::from_millis(250)
+    } else {
+        Duration::from_secs(2)
+    }
+}
+
 /// Wait for a game process and any launcher-spawned child processes. On
 /// Windows, attaches the child to a Job Object so descendant processes
 /// (even outside `install_dir`) keep IPC and shared controller publishing
 /// alive through launcher handoff. Also check the install directory when the job
 /// is empty, since a launcher can spawn the game before job assignment.
-pub fn wait_in_dir(app_id: AppId, install_dir: &Path, mut child: Child) -> AppId {
+#[cfg(test)]
+pub fn wait_in_dir(app_id: AppId, install_dir: &Path, child: Child) -> AppId {
+    wait_in_dir_cancellable(app_id, install_dir, child, None)
+}
+
+pub(crate) fn wait_in_dir_cancellable(
+    app_id: AppId,
+    install_dir: &Path,
+    mut child: Child,
+    stop: Option<&std::sync::atomic::AtomicBool>,
+) -> AppId {
     #[cfg(windows)]
     let job = win::JobGuard::attach(&child);
-    wait_all(&mut child);
+    let started = Instant::now();
+    wait_all_inner(&mut child, started, stop);
     #[cfg(windows)]
     {
-        const GRACE: Duration = Duration::from_secs(5);
+        let initial_lifetime = started.elapsed();
         let mut logged = false;
+        let mut descendant_since: Option<Instant> = None;
+        let mut descendant_lifetime: Option<Duration> = None;
         let mut empty_since: Option<Instant> = None;
         loop {
             let alive = job.as_ref().is_some_and(win::JobGuard::has_processes)
@@ -740,11 +774,20 @@ pub fn wait_in_dir(app_id: AppId, install_dir: &Path, mut child: Child) -> AppId
                     tracing::info!("initial game process exited; waiting for launcher-spawned processes");
                     logged = true;
                 }
+                descendant_since.get_or_insert_with(Instant::now);
                 empty_since = None;
-            } else if empty_since.get_or_insert_with(Instant::now).elapsed() >= GRACE {
-                break;
+            } else {
+                if let Some(since) = descendant_since.take() {
+                    let dur = since.elapsed();
+                    descendant_lifetime = Some(descendant_lifetime.map_or(dur, |prev| prev.max(dur)));
+                }
+                let stopped = stop.is_some_and(|s| s.load(std::sync::atomic::Ordering::Acquire));
+                let grace = post_exit_grace(initial_lifetime, descendant_lifetime, stopped);
+                if grace.is_zero() || empty_since.get_or_insert_with(Instant::now).elapsed() >= grace {
+                    break;
+                }
             }
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
     #[cfg(not(windows))]
@@ -756,16 +799,23 @@ pub fn wait_in_dir(app_id: AppId, install_dir: &Path, mut child: Child) -> AppId
 /// that's still in its process group, like Steam's reaper. Launchers
 /// (Cities: Skylines' Paradox Launcher, War Thunder's) start the game and
 /// exit at once; the game, and the Steam host it needs, must outlive them.
+#[cfg(test)]
 pub fn wait_all(child: &mut Child) {
+    wait_all_inner(child, Instant::now(), None);
+}
+
+fn wait_all_inner(child: &mut Child, started: Instant, stop: Option<&std::sync::atomic::AtomicBool>) {
     let _ = child.wait();
     #[cfg(not(windows))]
     {
         // A launcher handing over can leave its group empty for a moment
         // (dowser: none for ~0.1 s, then the Paradox Launcher), so the game
-        // only counts as closed once the group stays empty for a while.
-        const GRACE: Duration = Duration::from_secs(5);
+        // only counts as closed once the group stays empty for the adaptive grace.
+        let initial_lifetime = started.elapsed();
         let group = child.id();
         let mut logged = false;
+        let mut descendant_since: Option<Instant> = None;
+        let mut descendant_lifetime: Option<Duration> = None;
         let mut empty_since: Option<Instant> = None;
         loop {
             if group_alive(group) {
@@ -773,13 +823,24 @@ pub fn wait_all(child: &mut Child) {
                     tracing::info!("process {group} exited; waiting for the processes it started");
                     logged = true;
                 }
+                descendant_since.get_or_insert_with(Instant::now);
                 empty_since = None;
-            } else if empty_since.get_or_insert_with(Instant::now).elapsed() >= GRACE {
-                break;
+            } else {
+                if let Some(since) = descendant_since.take() {
+                    let dur = since.elapsed();
+                    descendant_lifetime = Some(descendant_lifetime.map_or(dur, |prev| prev.max(dur)));
+                }
+                let stopped = stop.is_some_and(|s| s.load(std::sync::atomic::Ordering::Acquire));
+                let grace = post_exit_grace(initial_lifetime, descendant_lifetime, stopped);
+                if grace.is_zero() || empty_since.get_or_insert_with(Instant::now).elapsed() >= grace {
+                    break;
+                }
             }
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
+    #[cfg(windows)]
+    let _ = (started, stop);
 }
 
 /// Any live (not zombie) process in process group `pgid`?
@@ -1026,15 +1087,19 @@ fn app_running(app_id: AppId) -> bool {
     win::reg_dword(&format!("Software\\Valve\\Steam\\Apps\\{app_id}"), "Running").unwrap_or(0) == 1 || win::steam_launch_running(app_id)
 }
 
-fn wait_until(limit: Duration, mut f: impl FnMut() -> bool) -> bool {
+fn wait_until_every(limit: Duration, poll: Duration, mut f: impl FnMut() -> bool) -> bool {
     let start = Instant::now();
     while start.elapsed() < limit {
         if f() {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(poll);
     }
     f()
+}
+
+fn wait_until(limit: Duration, f: impl FnMut() -> bool) -> bool {
+    wait_until_every(limit, Duration::from_millis(150), f)
 }
 
 /// Run a game through the official client (started with `-silent` if it
@@ -1092,7 +1157,7 @@ pub fn run_through_steam(app_id: AppId, args: &LaunchArgs, steam_id: u64, offlin
     }
     started();
     while app_running(app_id) {
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(250));
     }
     if ours {
         tracing::info!("the game closed; shutting down the Steam client started for it");
@@ -1148,13 +1213,21 @@ fn official_steam_open() -> bool {
 
 pub use local::steam_settings::Setting as SteamSetting;
 
-/// Headless hosts running now (Valve's engine holds Steam's config then).
-static HOSTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Lifecycle of the single global headless Steam host.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostLifecycle {
+    Idle,
+    Running,
+    Stopping,
+}
+
+static HOST_STATE: std::sync::LazyLock<(Mutex<HostLifecycle>, std::sync::Condvar)> =
+    std::sync::LazyLock::new(|| (Mutex::new(HostLifecycle::Idle), std::sync::Condvar::new()));
 
 /// Why Steam's own settings can't be changed right now: Steam (the official
 /// client or the headless host) is running and would overwrite them.
 pub fn steam_settings_locked() -> Option<&'static str> {
-    if HOSTS.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+    if *HOST_STATE.0.lock().unwrap_or_else(|e| e.into_inner()) != HostLifecycle::Idle {
         Some("Steam is running for a game. Change these after it closes.")
     } else if official_steam_open() {
         Some("Close the official Steam client to change these.")
@@ -1229,21 +1302,48 @@ pub fn apply_steam_prefs() {
     *SETTINGS_CACHE.lock().unwrap() = None;
 }
 
-/// Counts a running host in [`HOSTS`] while alive.
+/// Tracks the active headless host lifecycle in [`HOST_STATE`] while alive.
 struct HostCount;
 
 impl HostCount {
     fn acquire() -> Result<Self, &'static str> {
-        HOSTS
-            .compare_exchange(0, 1, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
-            .map(|_| Self)
-            .map_err(|_| "Close the game using the windowless Steam host before starting another.")
+        let (lock, cv) = &*HOST_STATE;
+        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            match *state {
+                HostLifecycle::Idle => {
+                    *state = HostLifecycle::Running;
+                    return Ok(Self);
+                }
+                HostLifecycle::Running => {
+                    return Err("Close the game using the windowless Steam host before starting another.");
+                }
+                HostLifecycle::Stopping => {
+                    let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
+                        return Err("Previous headless Steam host is still shutting down; try again in a moment.");
+                    };
+                    let (next, _) = cv.wait_timeout(state, rem).unwrap_or_else(|e| e.into_inner());
+                    state = next;
+                }
+            }
+        }
+    }
+
+    fn begin_stopping(&self) {
+        let (lock, _) = &*HOST_STATE;
+        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if *state == HostLifecycle::Running {
+            *state = HostLifecycle::Stopping;
+        }
     }
 }
 
 impl Drop for HostCount {
     fn drop(&mut self) {
-        HOSTS.store(0, std::sync::atomic::Ordering::Release);
+        let (lock, cv) = &*HOST_STATE;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = HostLifecycle::Idle;
+        cv.notify_all();
     }
 }
 
@@ -1259,6 +1359,8 @@ const STEAMHOST_READY: &str = "STEAMHOST-READY";
 /// the host, waits for the game to close, then drops the pipe so the host
 /// shuts down. Nothing of Valve's is bundled or modified; the engine does its
 /// own ownership check, so a game the user doesn't own won't start.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn run_through_host(
     app: &OwnedApp,
     install_dir: &Path,
@@ -1267,6 +1369,21 @@ pub fn run_through_host(
     token: &str,
     steam_id: u64,
     overlay: Option<(u16, &str)>,
+    started: impl FnOnce(),
+) -> Result<(), String> {
+    run_through_host_cancellable(app, install_dir, args, account, token, steam_id, overlay, None, started)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_through_host_cancellable(
+    app: &OwnedApp,
+    install_dir: &Path,
+    args: &LaunchArgs,
+    account: &str,
+    token: &str,
+    steam_id: u64,
+    overlay: Option<(u16, &str)>,
+    stop: Option<&std::sync::atomic::AtomicBool>,
     started: impl FnOnce(),
 ) -> Result<(), String> {
     use std::io::{BufRead, BufReader, Write};
@@ -1285,7 +1402,7 @@ pub fn run_through_host(
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let _counted = HostCount::acquire()?;
+    let counted = HostCount::acquire()?;
     let mut host = cmd.spawn().map_err(|e| format!("couldn't start the headless Steam host: {e}"))?;
 
     // Its diagnostics go to our log; the last line explains a failure.
@@ -1318,7 +1435,29 @@ pub fn run_through_host(
         let _ = tx.send(false); // stdout closed without ready = host gave up
     });
 
-    let ready = rx.recv_timeout(Duration::from_secs(90)).unwrap_or(false);
+    let wait_start = Instant::now();
+    let mut ready = false;
+    let mut cancelled = false;
+    while wait_start.elapsed() < Duration::from_secs(90) {
+        if stop.is_some_and(|s| s.load(std::sync::atomic::Ordering::Acquire)) {
+            cancelled = true;
+            break;
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(v) => {
+                ready = v;
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    if cancelled {
+        drop(stdin);
+        let _ = host.kill();
+        let _ = host.wait();
+        return Ok(());
+    }
     if !ready {
         let _ = host.kill();
         let _ = host.wait();
@@ -1333,12 +1472,12 @@ pub fn run_through_host(
     // Windows: steam_api finds Steam through this registry entry; point it at
     // the host (and Valve's own DLLs) while the game runs.
     #[cfg(windows)]
-    let _active = HostRegistry::point_at(host.id(), &root, model::account_id(steam_id));
+    let active = HostRegistry::point_at(host.id(), &root, model::account_id(steam_id));
     // Linux: newer steam_api checks that ~/.steam/steam.pid names a live
     // process before it connects ("did not locate a running instance of
     // Steam": the Paradox Launcher of Cities: Skylines); name the host.
     #[cfg(not(windows))]
-    let _pid_file = HostPidFile::point_at(host.id());
+    let pid_file = HostPidFile::point_at(host.id());
     tracing::info!("headless Steam host ready; launching {}", app.name);
 
     // Launch the game through Proton with lsteamclient ON (the default), so the
@@ -1359,15 +1498,28 @@ pub fn run_through_host(
         }
     };
     started();
-    wait_in_dir(app.app_id, install_dir, child);
+    wait_in_dir_cancellable(app.app_id, install_dir, child, stop);
 
-    // Game closed: drop the pipe so the host signs out and exits.
+    // Game closed: drop the pipe so the host signs out and exits, and reap it
+    // asynchronously so the launcher's Play/Stop state updates right away.
     tracing::info!("{} closed; shutting down the headless Steam host", app.name);
+    counted.begin_stopping();
     drop(stdin);
-    if !wait_until(Duration::from_secs(10), || host.try_wait().ok().flatten().is_some()) {
-        let _ = host.kill();
+    let reap = move || {
+        let _counted = counted;
+        #[cfg(windows)]
+        let _active = active;
+        #[cfg(not(windows))]
+        let _pid_file = pid_file;
+        if !wait_until_every(Duration::from_secs(5), Duration::from_millis(50), || host.try_wait().ok().flatten().is_some()) {
+            let _ = host.kill();
+        }
+        let _ = host.wait();
+    };
+    if std::thread::Builder::new().name("steamhost-reap".into()).spawn(reap).is_err() {
+        // Fallback if thread creation fails: clean up synchronously (rare).
+        tracing::warn!("couldn't spawn steamhost-reap thread");
     }
-    let _ = host.wait();
     Ok(())
 }
 
@@ -3473,6 +3625,32 @@ mod tests {
         set_overlay_enabled(false);
         assert!(!app_overlay_enabled(553850));
         set_overlay_enabled(true);
+    }
+
+    #[test]
+    fn post_exit_grace_is_short_for_normal_games_and_stop_requests() {
+        // Explicit Stop returns immediately once no processes remain.
+        assert_eq!(post_exit_grace(Duration::from_secs(1), None, true), Duration::ZERO);
+        // Short-lived launcher/bootstrapper keeps a 2s handoff window.
+        assert_eq!(post_exit_grace(Duration::from_secs(2), None, false), Duration::from_secs(2));
+        // Long-running initial game process drops to a 250ms confirmation window.
+        assert_eq!(post_exit_grace(Duration::from_secs(30), None, false), Duration::from_millis(250));
+        // Short launcher followed by a long-running child game also drops to 250ms.
+        assert_eq!(post_exit_grace(Duration::from_secs(1), Some(Duration::from_secs(20)), false), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn host_count_waits_for_stopping_host_and_rejects_running_host() {
+        let first = HostCount::acquire().expect("idle host acquires");
+        assert!(HostCount::acquire().is_err(), "running host must reject concurrent acquire");
+        first.begin_stopping();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            drop(first);
+        });
+        let second = HostCount::acquire().expect("stopping host should hand off once dropped");
+        releaser.join().unwrap();
+        drop(second);
     }
 }
 
