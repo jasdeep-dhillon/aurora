@@ -42,15 +42,7 @@ fn main() -> eframe::Result {
     let activation_token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
     #[cfg(not(target_os = "linux"))]
     let activation_token: Option<String> = None;
-    let request = link.as_deref().unwrap_or_else(|| {
-        if std::env::args().any(|a| a == "--bigpicture=window") {
-            links::BIG_PICTURE_WINDOW
-        } else if std::env::args().any(|a| a == "--bigpicture") {
-            links::BIG_PICTURE
-        } else {
-            "show"
-        }
-    });
+    let request = link.as_deref().or_else(|| links::big_picture_request(std::env::args().skip(1))).unwrap_or("show");
     if !separate && links::forward_to_running(request, activation_token.as_deref()) {
         return Ok(());
     }

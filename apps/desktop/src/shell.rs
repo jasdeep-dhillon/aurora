@@ -590,7 +590,7 @@ fn notification_target(state: &client::State, n: &model::Notification) -> Notifi
 }
 
 /// Where clicking a notification takes you.
-fn open_notification(state: &client::State, n: &model::Notification, actions: &mut Vec<Action>) {
+pub(crate) fn open_notification(state: &client::State, n: &model::Notification, actions: &mut Vec<Action>) {
     match notification_target(state, n) {
         NotificationTarget::Action(a) => actions.push(a),
         NotificationTarget::Web(url) => {
