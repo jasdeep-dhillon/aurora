@@ -458,7 +458,9 @@ impl Library {
             ui.add(egui::TextEdit::singleline(&mut s.args).hint_text("MANGOHUD=1 %command% -novid").desired_width(f32::INFINITY).margin(vec2(10.0, 8.0))).with_edit_menu();
         });
         section(ui, t, t!("In-game overlay"), t!("Open friends and chat with Shift+Tab while playing."), |ui| {
-            ui.add(crate::builtin::settings::toggle(&mut s.overlay_on));
+            if ui.add(crate::builtin::settings::toggle(&mut s.overlay_on)).changed() {
+                client::set_app_overlay(app, s.overlay_on);
+            }
         });
         let langs: Vec<String> = {
             let mut v: Vec<String> = owned.map(|o| o.depots.iter().map(|d| d.language.clone()).filter(|l| !l.is_empty()).collect()).unwrap_or_default();

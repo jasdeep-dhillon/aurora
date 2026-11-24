@@ -235,6 +235,11 @@ impl Downloads {
         }
     }
 
+    /// Format a transfer speed using the user's bytes/bits preference.
+    pub(crate) fn tv_rate(&self, bytes_per_sec: u64) -> String {
+        self.rate(bytes_per_sec)
+    }
+
     /// The regions to pick from, fastest first: (id, name). Measures them
     /// the first time.
     pub(crate) fn tv_regions(&mut self, ctx: &Ctx) -> Vec<(String, String)> {

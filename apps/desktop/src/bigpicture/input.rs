@@ -18,6 +18,10 @@ pub enum Press {
     Y,
     Lb,
     Rb,
+    Lt,
+    Rt,
+    /// Right-stick vertical scroll tick: positive scrolls down, negative scrolls up.
+    Scroll(i8),
     Start,
     Guide,
     QuickAccess,
@@ -107,6 +111,8 @@ fn button_press(b: gilrs::Button, swap: bool) -> Option<Press> {
         Button::North => Press::Y,
         Button::LeftTrigger => Press::Lb,
         Button::RightTrigger => Press::Rb,
+        Button::LeftTrigger2 => Press::Lt,
+        Button::RightTrigger2 => Press::Rt,
         Button::Start => Press::Start,
         #[cfg(not(windows))]
         Button::Mode => Press::Guide,
@@ -194,32 +200,108 @@ struct HeldDirections {
     dpad: [bool; 4],
     stick: [bool; 4],
     next: [Option<Instant>; 4],
+    /// Right stick Y scroll direction (-1 up, 0 neutral, 1 down) and repeat timer.
+    scroll_dir: i8,
+    next_scroll: Option<Instant>,
+    /// Analog trigger latching (for pads that report triggers via axis rather than buttons).
+    lt_down: bool,
+    rt_down: bool,
+    /// Guide button held: Guide + A emits QuickAccess without also emitting Guide or A.
+    guide_down: bool,
+    guide_chorded: bool,
 }
+
+const SCROLL_REPEAT: Duration = Duration::from_millis(65);
 
 impl HeldDirections {
     fn update(&mut self, event: gilrs::EventType) -> Option<Press> {
-        use gilrs::{Axis, Button, EventType};
+        use gilrs::EventType;
         match event {
-            EventType::ButtonPressed(button, _) | EventType::ButtonReleased(button, _) => {
-                let pressed = matches!(event, EventType::ButtonPressed(..));
-                let index = match button {
-                    Button::DPadUp => 0,
-                    Button::DPadDown => 1,
-                    Button::DPadLeft => 2,
-                    Button::DPadRight => 3,
-                    other => return pressed.then(|| button_press(other, SWAP_AB.load(Ordering::Relaxed))).flatten(),
-                };
-                self.dpad[index] = pressed;
+            EventType::ButtonPressed(button, _) => self.update_button(button, true),
+            EventType::ButtonReleased(button, _) => self.update_button(button, false),
+            EventType::AxisChanged(axis, value, _) => self.update_axis(axis, value),
+            _ => None,
+        }
+    }
+
+    fn update_button(&mut self, button: gilrs::Button, pressed: bool) -> Option<Press> {
+        use gilrs::Button;
+        let swap = SWAP_AB.load(Ordering::Relaxed);
+        if button == Button::Mode {
+            if pressed {
+                self.guide_down = true;
+                self.guide_chorded = false;
+                return None;
             }
-            EventType::AxisChanged(axis, value, _) => {
-                let (positive, negative) = match axis {
-                    Axis::LeftStickY => (0, 1),
-                    Axis::LeftStickX => (3, 2),
-                    _ => return None,
-                };
+            let emit_guide = self.guide_down && !self.guide_chorded;
+            self.guide_down = false;
+            self.guide_chorded = false;
+            return emit_guide.then_some(Press::Guide);
+        }
+        if self.guide_down {
+            let is_confirm = button_press(button, swap) == Some(Press::A);
+            if is_confirm {
+                if pressed {
+                    self.guide_chorded = true;
+                    return Some(Press::QuickAccess);
+                }
+                return None;
+            }
+        }
+        let index = match button {
+            Button::DPadUp => 0,
+            Button::DPadDown => 1,
+            Button::DPadLeft => 2,
+            Button::DPadRight => 3,
+            Button::LeftTrigger2 => {
+                let fire = pressed && !self.lt_down;
+                self.lt_down = pressed;
+                return fire.then_some(Press::Lt);
+            }
+            Button::RightTrigger2 => {
+                let fire = pressed && !self.rt_down;
+                self.rt_down = pressed;
+                return fire.then_some(Press::Rt);
+            }
+            other => return pressed.then(|| button_press(other, swap)).flatten(),
+        };
+        self.dpad[index] = pressed;
+        None
+    }
+
+    fn update_axis(&mut self, axis: gilrs::Axis, value: f32) -> Option<Press> {
+        use gilrs::Axis;
+        match axis {
+            Axis::LeftStickY | Axis::LeftStickX => {
+                let (positive, negative) = if axis == Axis::LeftStickY { (0, 1) } else { (3, 2) };
                 let (on, off) = stick_edges(STICK_LEVEL.load(Ordering::Relaxed));
                 self.stick[positive] = value > if self.stick[positive] { off } else { on };
                 self.stick[negative] = -value > if self.stick[negative] { off } else { on };
+            }
+            Axis::RightStickY => {
+                let prev = self.scroll_dir;
+                let (on, off) = (0.45, 0.25);
+                self.scroll_dir = if value < -if prev == 1 { off } else { on } {
+                    1
+                } else if value > if prev == -1 { off } else { on } {
+                    -1
+                } else {
+                    0
+                };
+            }
+            Axis::LeftZ => {
+                let was = self.lt_down;
+                self.lt_down = if was { value > 0.35 } else { value > 0.65 };
+                if self.lt_down && !was {
+                    return Some(Press::Lt);
+                }
+            }
+            Axis::RightZ => {
+                let was = self.rt_down;
+                self.rt_down = if was { value > 0.35 } else { value > 0.65 };
+                if self.rt_down && !was {
+                    return Some(Press::Rt);
+                }
             }
             _ => {}
         }
@@ -240,6 +322,44 @@ impl HeldDirections {
             Some(dir)
         })
     }
+
+    fn due_scroll(&mut self, now: Instant) -> Option<i8> {
+        if self.scroll_dir == 0 {
+            self.next_scroll = None;
+            return None;
+        }
+        match self.next_scroll {
+            None => {
+                self.next_scroll = Some(now + SCROLL_REPEAT);
+                Some(self.scroll_dir)
+            }
+            Some(at) if now >= at => {
+                self.next_scroll = Some(now + SCROLL_REPEAT);
+                Some(self.scroll_dir)
+            }
+            Some(_) => None,
+        }
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.next.into_iter().flatten().chain(self.next_scroll).min()
+    }
+
+    fn has_active_hold(&self) -> bool {
+        self.dpad.iter().any(|b| *b) || self.stick.iter().any(|b| *b) || self.scroll_dir != 0
+    }
+}
+
+fn next_poll_timeout(held: &std::collections::HashMap<gilrs::GamepadId, HeldDirections>, now: Instant) -> Duration {
+    let earliest = held.values().filter_map(HeldDirections::next_deadline).min();
+    if let Some(deadline) = earliest {
+        return deadline.saturating_duration_since(now).clamp(Duration::from_millis(5), Duration::from_millis(50));
+    }
+    if held.values().any(HeldDirections::has_active_hold) {
+        return Duration::from_millis(16);
+    }
+    // Idle: wake immediately on any gilrs event, otherwise check infrequently to save battery.
+    Duration::from_millis(250)
 }
 
 /// Read pads until the app is gone or, on Windows, the last pad is unplugged.
@@ -258,7 +378,8 @@ fn read_connected(mut gilrs: gilrs::Gilrs, tx: &mpsc::Sender<PadEvent>, ctx: &eg
         return false;
     }
     loop {
-        if let Some(ev) = gilrs.next_event_blocking(Some(Duration::from_millis(30))) {
+        let wait = next_poll_timeout(&held, Instant::now());
+        if let Some(ev) = gilrs.next_event_blocking(Some(wait)) {
             match ev.event {
                 EventType::Connected | EventType::Disconnected => {
                     if matches!(ev.event, EventType::Disconnected) {
@@ -293,6 +414,11 @@ fn read_connected(mut gilrs: gilrs::Gilrs, tx: &mpsc::Sender<PadEvent>, ctx: &eg
                     return false;
                 }
             }
+            if let Some(scroll) = state.due_scroll(now) {
+                if !send(PadEvent::Press(Press::Scroll(scroll))) {
+                    return false;
+                }
+            }
         }
     }
 }
@@ -323,6 +449,8 @@ pub fn key_map(typing: bool) -> Vec<(Key, Press)> {
             (Key::X, Press::X),
             (Key::Y, Press::Y),
             (Key::M, Press::Start),
+            (Key::OpenBracket, Press::Lt),
+            (Key::CloseBracket, Press::Rt),
             // WASD moves too.
             (Key::W, Press::Move(Dir::Up)),
             (Key::S, Press::Move(Dir::Down)),
@@ -446,5 +574,46 @@ mod tests {
         assert_eq!(s, "");
         backspace(&mut s, true);
         assert_eq!(s, "");
+    }
+
+    #[test]
+    fn guide_chord_emits_quick_access_without_guide_or_a() {
+        use gilrs::Button;
+        SWAP_AB.store(false, Ordering::Relaxed);
+        let mut held = HeldDirections::default();
+        // Standalone Guide emits on release.
+        assert_eq!(held.update_button(Button::Mode, true), None);
+        assert_eq!(held.update_button(Button::Mode, false), Some(Press::Guide));
+
+        // Guide + A emits QuickAccess immediately and suppresses Guide on release.
+        assert_eq!(held.update_button(Button::Mode, true), None);
+        assert_eq!(held.update_button(Button::South, true), Some(Press::QuickAccess));
+        assert_eq!(held.update_button(Button::South, false), None);
+        assert_eq!(held.update_button(Button::Mode, false), None);
+    }
+
+    #[test]
+    fn right_stick_scrolls_and_triggers_fire_once() {
+        use gilrs::Axis;
+        let mut held = HeldDirections::default();
+        let now = Instant::now();
+        held.update_axis(Axis::RightStickY, -0.8);
+        assert_eq!(held.due_scroll(now), Some(1));
+        assert_eq!(held.due_scroll(now + Duration::from_millis(20)), None);
+        assert_eq!(held.due_scroll(now + SCROLL_REPEAT), Some(1));
+        held.update_axis(Axis::RightStickY, 0.0);
+        assert_eq!(held.due_scroll(now + SCROLL_REPEAT * 2), None);
+
+        assert_eq!(held.update_axis(Axis::LeftZ, 0.8), Some(Press::Lt));
+        assert_eq!(held.update_axis(Axis::LeftZ, 0.9), None);
+        assert_eq!(held.update_axis(Axis::LeftZ, 0.1), None);
+        assert_eq!(held.update_axis(Axis::LeftZ, 0.8), Some(Press::Lt));
+    }
+
+    #[test]
+    fn idle_poll_timeout_relaxes_when_nothing_held() {
+        let held = std::collections::HashMap::new();
+        let now = Instant::now();
+        assert_eq!(next_poll_timeout(&held, now), Duration::from_millis(250));
     }
 }

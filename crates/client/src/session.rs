@@ -501,6 +501,8 @@ struct Online {
     /// Steam Cloud: where `userdata` is, and games the player turned it off for.
     steam_root: Option<std::path::PathBuf>,
     cloud_off: std::collections::HashSet<AppId>,
+    /// Apps with an in-flight CloudSync/CloudDelete task (serialized per app).
+    cloud_in_flight: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AppId>>>,
     /// Install folders of games we started (for the upload after they close).
     launched_dirs: HashMap<AppId, std::path::PathBuf>,
     queue: std::collections::VecDeque<crate::download::InstallRequest>,
@@ -646,6 +648,7 @@ async fn online(
         download_host: None,
         steam_root: None,
         cloud_off: Default::default(),
+        cloud_in_flight: Default::default(),
         launched_dirs: HashMap::new(),
         queue: Default::default(),
         active_req: None,
@@ -1073,11 +1076,31 @@ async fn online(
                 Some(Command::CloudSync { app_id, install_dir, mode, keep_local, keep_cloud, then_launch }) => {
                     if let Some(Err(e)) = then_launch.as_ref().map(|a| launch::safe_connect_args(&a.connect)) {
                         sink(Event::Error(e));
+                    } else if mode != crate::cloud::Mode::Check && st.playing == Some(app_id) {
+                        sink(Event::Error("Close the game before syncing Steam Cloud.".into()));
                     } else if let Some(target) = st.cloud_target_any(app_id, &install_dir) {
+                        // Serialize CloudSync / CloudDelete per app so writes never overlap.
+                        let acquired = st.cloud_in_flight.lock().unwrap().insert(app_id);
+                        if !acquired {
+                            continue;
+                        }
                         // A manual sync works even when automatic sync is off.
                         sink(Event::CloudSyncing { app_id });
-                        let (conn, sink, tx, me) = (conn.clone(), sink.clone(), launch_tx.clone(), st.me);
+                        let (conn, sink, tx, me, in_flight) = (
+                            conn.clone(),
+                            sink.clone(),
+                            launch_tx.clone(),
+                            st.me,
+                            std::sync::Arc::clone(&st.cloud_in_flight),
+                        );
                         tokio::spawn(async move {
+                            struct Guard(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AppId>>>, AppId);
+                            impl Drop for Guard {
+                                fn drop(&mut self) {
+                                    self.0.lock().unwrap().remove(&self.1);
+                                }
+                            }
+                            let _guard = Guard(in_flight, app_id);
                             let report = crate::cloud::sync(&conn, &target, mode, &keep_local, &keep_cloud).await;
                             let blocked = !report.conflicts.is_empty();
                             if matches!(mode, crate::cloud::Mode::Upload | crate::cloud::Mode::Sync) && report.errors.is_empty() && !blocked {
@@ -1092,10 +1115,27 @@ async fn online(
                     }
                 }
                 Some(Command::CloudDelete { app_id, install_dir, names }) => {
-                    if let Some(target) = st.cloud_target_any(app_id, &install_dir) {
+                    if st.playing == Some(app_id) {
+                        sink(Event::Error("Close the game before deleting Steam Cloud files.".into()));
+                    } else if let Some(target) = st.cloud_target_any(app_id, &install_dir) {
+                        let acquired = st.cloud_in_flight.lock().unwrap().insert(app_id);
+                        if !acquired {
+                            continue;
+                        }
                         sink(Event::CloudSyncing { app_id });
-                        let (conn, sink) = (conn.clone(), sink.clone());
+                        let (conn, sink, in_flight) = (
+                            conn.clone(),
+                            sink.clone(),
+                            std::sync::Arc::clone(&st.cloud_in_flight),
+                        );
                         tokio::spawn(async move {
+                            struct Guard(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AppId>>>, AppId);
+                            impl Drop for Guard {
+                                fn drop(&mut self) {
+                                    self.0.lock().unwrap().remove(&self.1);
+                                }
+                            }
+                            let _guard = Guard(in_flight, app_id);
                             let deleted = crate::cloud::delete(&conn, &target, &names).await;
                             let mut report = crate::cloud::sync(&conn, &target, crate::cloud::Mode::Check, &[], &[]).await;
                             if let Err(e) = deleted {

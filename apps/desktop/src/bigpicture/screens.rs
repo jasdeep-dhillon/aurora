@@ -40,17 +40,25 @@ pub fn draw(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, pos: f32) -> f32 {
         Page::Tab(Tab::Downloads) => downloads(bp, ui, f, top),
         Page::Tab(Tab::Friends) => friends(bp, ui, f, top),
         Page::Game(id) => game(bp, ui, f, top, id),
+        Page::GameManage(id) => super::manage::page(bp, ui, f, top, id),
         Page::Controller(id) => controller_page(bp, ui, f, top, id),
-        Page::QuickAccess => quick_access(bp, ui, f, top),
         Page::Notifications => notifications(bp, ui, f, top),
         #[cfg(target_os = "linux")]
         Page::Compatibility(id) => compatibility_page(bp, ui, f, top, id),
         Page::StoreApp(id) => store_app(bp, ui, f, top, id),
         Page::Review(id, review) => review_page(ui, f, top, id, &review),
+        Page::News(id, index) => news_page(bp, ui, f, top, id, index),
         Page::Search => search(bp, ui, f, top),
         Page::Shots(id, i) => shots(bp, ui, f, id, i),
         Page::Settings => super::settings::page(bp, ui, f),
         Page::Friend(id) => friend_page(bp, ui, f, top, id),
+        Page::Profile(id) => super::profile::profile_page(bp, ui, f, top, id),
+        Page::ProfileGames(id) => super::profile::games_page(bp, ui, f, top, id),
+        Page::ProfileBadges(id) => super::profile::badges_page(bp, ui, f, top, id),
+        Page::ProfileCards(id, app, foil) => super::profile::cards_page(bp, ui, f, top, id, app, foil),
+        Page::ProfileReviews(id) => super::profile::reviews_page(bp, ui, f, top, id),
+        Page::ProfileGroups(id) => super::profile::groups_page(bp, ui, f, top, id),
+        Page::ProfileEdit => super::profile::edit_page(bp, ui, f),
         Page::Group(id) => group_page(bp, ui, f, top, id),
         Page::Chat(id) => chat_page(bp, ui, f, top, id),
         Page::Embedded(page, arg) => embedded(bp, ui, f, &page, arg.as_deref()),
@@ -62,9 +70,29 @@ pub fn draw(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, pos: f32) -> f32 {
 /// What X does on this page, for the hints.
 pub fn x_hint(bp: &BigPicture) -> Option<String> {
     match bp.page() {
+        Page::Tab(Tab::Library) if bp.library_search_open => Some(t!("Delete").into()),
         Page::Tab(Tab::Library) => Some(t!("Change filter").into()),
+        Page::Game(_) => Some(t!("Favorite").into()),
         Page::Install(_) => Some(t!("Desktop shortcut").into()),
+        Page::Profile(_) if bp.profile.comment_open => Some(t!("Delete").into()),
+        Page::ProfileGames(_) if bp.profile.games_search_open => Some(t!("Delete").into()),
+        Page::ProfileEdit if bp.profile.edit_typing() => Some(t!("Delete").into()),
         Page::Search | Page::Chat(_) => Some(t!("Delete").into()),
+        _ => None,
+    }
+}
+
+/// What Y does on this page, for the hints.
+pub fn y_hint(bp: &BigPicture) -> Option<String> {
+    match bp.page() {
+        Page::Tab(Tab::Library) if bp.library_search_open => Some(t!("Space").into()),
+        Page::Tab(Tab::Library) => Some(t!("Sort").into()),
+        Page::Game(_) => Some(t!("Manage").into()),
+        Page::Profile(_) if bp.profile.comment_open => Some(t!("Space").into()),
+        Page::ProfileGames(_) if bp.profile.games_search_open => Some(t!("Space").into()),
+        Page::ProfileGames(_) => Some(t!("Sort").into()),
+        Page::ProfileEdit if bp.profile.edit_typing() => Some(t!("Space").into()),
+        Page::Search | Page::Chat(_) => Some(t!("Space").into()),
         _ => None,
     }
 }
@@ -77,7 +105,7 @@ fn appear(ui: &Ui, bp: &BigPicture, order: usize) -> (f32, f32) {
     (k, (1.0 - k) * 26.0)
 }
 
-fn heading(ui: &Ui, f: &Frame, y: &mut f32, title: &str) {
+pub(super) fn heading(ui: &Ui, f: &Frame, y: &mut f32, title: &str) {
     ui.painter().text(pos2(f.view.left() + f.pad, *y), Align2::LEFT_TOP, title, w::font_bold(30.0 * f.s), f.t.text);
     *y += 54.0 * f.s;
 }
@@ -161,7 +189,7 @@ fn wide(bp: &mut BigPicture, ui: &mut Ui, f: &Frame, r: Rect, hit: &Hit, order: 
 
 /// A pill button that's focusable. Returns its hit.
 #[allow(clippy::too_many_arguments)]
-fn button(bp: &mut BigPicture, ui: &Ui, f: &Frame, id: Id, at: egui::Pos2, min_w: f32, icon: Option<&str>, label: &str, kind: Kind, progress: Option<f32>) -> (Rect, Hit) {
+pub(super) fn button(bp: &mut BigPicture, ui: &Ui, f: &Frame, id: Id, at: egui::Pos2, min_w: f32, icon: Option<&str>, label: &str, kind: Kind, progress: Option<f32>) -> (Rect, Hit) {
     let h = 72.0 * f.s;
     let wdt = paint::pill_width(ui, icon.is_some(), label, f.s).max(min_w);
     let r = Rect::from_min_size(at, vec2(wdt, h));
@@ -174,7 +202,7 @@ fn button(bp: &mut BigPicture, ui: &Ui, f: &Frame, id: Id, at: egui::Pos2, min_w
 }
 
 /// Compact settings row with a clipped label and a separate status column.
-fn compact_row(bp: &mut BigPicture, ui: &Ui, f: &Frame, id: Id, rect: Rect, icon: &str, label: &str, value: &str) -> Hit {
+pub(super) fn compact_row(bp: &mut BigPicture, ui: &Ui, f: &Frame, id: Id, rect: Rect, icon: &str, label: &str, value: &str) -> Hit {
     let s = f.s;
     let hit = bp.focus.item(ui, id, rect, ui.clip_rect(), Place::Page);
     let p = ui.painter();
@@ -195,7 +223,7 @@ fn compact_row(bp: &mut BigPicture, ui: &Ui, f: &Frame, id: Id, rect: Rect, icon
 }
 
 /// A big empty-state message with one way forward.
-fn empty(bp: &mut BigPicture, ui: &Ui, f: &Frame, y: f32, icon: &str, title: &str, body: &str, action: Option<(&str, &str)>) -> Option<bool> {
+pub(super) fn empty(bp: &mut BigPicture, ui: &Ui, f: &Frame, y: f32, icon: &str, title: &str, body: &str, action: Option<(&str, &str)>) -> Option<bool> {
     let c = pos2(f.view.center().x, y + 150.0 * f.s);
     let p = ui.painter();
     p.text(c, Align2::CENTER_CENTER, icon, w::font(96.0 * f.s), f.t.text_faint);
@@ -245,12 +273,32 @@ fn main_button(a: MainAction) -> (String, &'static str, Kind, Option<f32>) {
     }
 }
 
-/// Recently played games across the account, newest first: (id, name, when).
+/// Recently played games merged across account history and local installs, newest first.
 fn recent_games(app: &SteamApp) -> Vec<(AppId, String, u64)> {
-    let mut list: Vec<(AppId, String, u64)> = match app.state.player_games.get(&app.state.steam_id) {
-        Some(Ok(list)) if !list.is_empty() => list.iter().filter_map(|g| Some((g.app_id, g.name.clone(), g.last_played?))).collect(),
-        _ => app.local.games.iter().filter_map(|g| Some((g.app_id, g.name.clone(), g.last_played?))).collect(),
-    };
+    let mut by_id: std::collections::HashMap<AppId, (String, u64)> = std::collections::HashMap::new();
+    if let Some(Ok(list)) = app.state.player_games.get(&app.state.steam_id) {
+        for g in list {
+            if let Some(when) = g.last_played {
+                by_id.insert(g.app_id, (g.name.clone(), when));
+            }
+        }
+    }
+    for g in &app.local.games {
+        if let Some(when) = g.last_played {
+            by_id
+                .entry(g.app_id)
+                .and_modify(|e| {
+                    if when > e.1 {
+                        e.1 = when;
+                    }
+                    if e.0.is_empty() {
+                        e.0 = g.name.clone();
+                    }
+                })
+                .or_insert_with(|| (g.name.clone(), when));
+        }
+    }
+    let mut list: Vec<(AppId, String, u64)> = by_id.into_iter().map(|(id, (n, w))| (id, n, w)).collect();
     list.sort_by_key(|g| std::cmp::Reverse(g.2));
     list
 }
@@ -261,36 +309,51 @@ fn home(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
     let s = f.s;
     let mut y = top + 16.0 * s;
     let recent = recent_games(f.app);
-    // The hero: the installed game played last (or any installed game).
-    let mut installed: Vec<&model::InstalledGame> = f.app.local.games.iter().collect();
-    installed.sort_by_key(|g| std::cmp::Reverse(g.last_played.unwrap_or(0)));
-    let hero = installed.first().map(|g| (g.app_id, g.name.clone(), g.playtime_minutes, g.last_played));
+    // Prioritize a currently running game as hero, then most recently played installed game.
+    let playing = f.app.state.playing;
+    let hero = playing
+        .and_then(|pid| {
+            let inst = f.app.local.games.iter().find(|g| g.app_id == pid);
+            let name = f
+                .app
+                .state
+                .app_name(pid)
+                .map(String::from)
+                .or_else(|| inst.map(|g| g.name.clone()))
+                .unwrap_or_default();
+            Some((pid, name, inst.and_then(|g| g.playtime_minutes), inst.and_then(|g| g.last_played), true))
+        })
+        .or_else(|| {
+            f.app
+                .local
+                .games
+                .iter()
+                .max_by_key(|g| g.last_played.unwrap_or(0))
+                .map(|g| (g.app_id, g.name.clone(), g.playtime_minutes, g.last_played, false))
+        });
     match hero.clone() {
-        Some((id, name, minutes, last)) => {
+        Some((id, name, minutes, last, is_running)) => {
             bp.bg_want = Some(id);
-            let rect = Rect::from_min_size(pos2(f.view.left() + f.pad, y), vec2(f.view.width() - 2.0 * f.pad, 440.0 * s));
+            let rect = Rect::from_min_size(pos2(f.view.left() + f.pad, y), vec2(f.view.width() - 2.0 * f.pad, 430.0 * s));
             let (k, dy) = appear(ui, bp, 0);
             let rect = rect.translate(vec2(0.0, dy * s));
-            let mut c = paint::faded(ui, rect.expand(60.0 * s), k);
+            let c = paint::faded(ui, rect.expand(60.0 * s), k);
             let r = 18.0 * s;
+            let radius = paint::radius(r);
             paint::shadow(c.painter(), rect, r, s, 0.8, Color32::from_black_alpha(220));
-            // The art slowly settles in (a gentle zoom) when the page opens.
-            let zoom = 1.0 + 0.06 * (1.0 - since(ui, bp.page_since, 1.6));
-            let art_rect = paint::grow(rect, zoom);
-            let clip = c.clip_rect();
-            c.set_clip_rect(rect.intersect(clip));
-            if !w::paint_cover_first(&c, art_rect, &[&art::hero(id), &art::header(id)], paint::radius(r)) {
-                w::skeleton(&c, &f.t, rect, paint::radius(r));
+            if !w::paint_cover_first(&c, rect, &[&art::hero(id), &art::header(id)], radius) {
+                paint::skeleton(&c, &f.t, rect, radius);
             }
-            c.set_clip_rect(clip);
-            w::fade_right(&c, rect, Color32::from_black_alpha(220), 0.7);
-            w::fade_down(&c, rect, Color32::from_black_alpha(170), 0.45);
-            let inner = rect.shrink(44.0 * s);
+            w::fade_right_rounded(&c, rect, Color32::from_black_alpha(220), 0.7, radius);
+            w::fade_down_rounded(&c, rect, Color32::from_black_alpha(170), 0.45, radius);
+            let inner = rect.shrink(40.0 * s);
             let p = c.painter().clone();
-            p.text(inner.left_top(), Align2::LEFT_TOP, t!("CONTINUE PLAYING"), w::font_bold(18.0 * s), f.t.accent);
+            let kicker = if is_running { t!("NOW PLAYING") } else { t!("CONTINUE PLAYING") };
+            let kicker_col = if is_running { f.t.play } else { f.t.accent };
+            p.text(inner.left_top(), Align2::LEFT_TOP, kicker, w::font_bold(18.0 * s), kicker_col);
             let logo = Rect::from_min_max(inner.left_top() + vec2(0.0, 40.0 * s), pos2(inner.left() + 560.0 * s, inner.bottom() - 150.0 * s));
             if !w::paint_contain(&c, logo, &art::logo(id), Align2::LEFT_BOTTOM) {
-                paint::wrapped(&p, pos2(logo.left(), logo.bottom() - 120.0 * s), &name, w::font_bold(52.0 * s), Color32::WHITE, 760.0 * s, 2);
+                paint::wrapped(&p, pos2(logo.left(), logo.bottom() - 120.0 * s), &name, w::font_bold(50.0 * s), Color32::WHITE, 740.0 * s, 2);
             }
             let mut facts = Vec::new();
             if let Some(m) = minutes.filter(|m| *m > 0) {
@@ -303,8 +366,8 @@ fn home(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
             let action = with_library(f.app, f.actions, |lib, cx| lib.main_action(cx, id)).unwrap_or(MainAction::Play);
             let (label, icon, kind, progress) = main_button(action);
             let main_id = Id::unique(("bp-home-main", id));
-            let (b, main) = button(bp, &c, f, main_id, pos2(inner.left(), inner.bottom() - 72.0 * s), 260.0 * s, Some(icon), &label, kind, progress);
-            let (_, details) = button(bp, &c, f, Id::unique(("bp-home-details", id)), pos2(b.right() + 20.0 * s, b.top()), 0.0, Some(icons::INFO), t!("Game details"), Kind::Secondary, None);
+            let (b, main) = button(bp, &c, f, main_id, pos2(inner.left(), inner.bottom() - 72.0 * s), 250.0 * s, Some(icon), &label, kind, progress);
+            let (_, details) = button(bp, &c, f, Id::unique(("bp-home-details", id)), pos2(b.right() + 18.0 * s, b.top()), 0.0, Some(icons::INFO), t!("Game details"), Kind::Secondary, None);
             bp.preferred = Some(main_id);
             if main.activated {
                 if action == MainAction::StorePage {
@@ -316,7 +379,7 @@ fn home(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
             if details.activated {
                 bp.open(Page::Game(id), f.now);
             }
-            y += 440.0 * s + 56.0 * s;
+            y += 430.0 * s + 52.0 * s;
         }
         None => {
             if let Some(go) = empty(bp, ui, f, y, icons::BOOKS, t!("Nothing installed yet"), t!("Install a game from your library to see it here."), Some((icons::BOOKS, t!("Go to your library")))) {
@@ -328,13 +391,13 @@ fn home(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
         }
     }
 
-    // Recently played.
+    // Recently played (semantic AppId-based focus IDs).
     let first = hero.as_ref().map(|h| h.0);
     let shelf_games: Vec<(AppId, String, u64)> = recent.iter().filter(|g| Some(g.0) != first).take(20).cloned().collect();
     if !shelf_games.is_empty() {
         heading(ui, f, &mut y, t!("Recently played"));
         let tile = vec2(200.0 * s, 300.0 * s);
-        let tiles = shelf(bp, ui, f, &mut y, "recent", shelf_games.len(), tile, |i| Id::unique(("bp-recent", i)));
+        let tiles = shelf(bp, ui, f, &mut y, "recent", shelf_games.len(), tile, |i| Id::unique(("bp-recent", shelf_games[i].0)));
         for (i, r, hit) in tiles {
             let (id, name, when) = &shelf_games[i];
             let dim = !f.app.local.games.iter().any(|g| g.app_id == *id);
@@ -346,7 +409,7 @@ fn home(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
         y += 90.0 * s;
     }
 
-    // What's new in the games you play (the hero's first).
+    // What's new in the games you play (cards open the inline article reader).
     let mut ids: Vec<AppId> = first.into_iter().collect();
     ids.extend(recent.iter().map(|g| g.0).filter(|id| Some(*id) != first));
     let (posts, loading) = with_library(f.app, f.actions, |lib, _| lib.whats_new_posts(&ids)).unwrap_or_default();
@@ -356,14 +419,14 @@ fn home(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
         if posts.is_empty() {
             for i in 0..4 {
                 let r = Rect::from_min_size(pos2(f.view.left() + f.pad + i as f32 * (tile.x + 26.0 * s), y), tile);
-                w::skeleton(ui, &f.t, r, paint::radius(10.0 * s));
+                paint::skeleton(ui, &f.t, r, paint::radius(10.0 * s));
             }
             y += tile.y;
         } else {
             let posts: Vec<_> = posts.into_iter().take(12).collect();
-            let tiles = shelf(bp, ui, f, &mut y, "news", posts.len(), tile, |i| Id::unique(("bp-news", i)));
+            let tiles = shelf(bp, ui, f, &mut y, "news", posts.len(), tile, |i| Id::unique(("bp-news", posts[i].0, posts[i].1)));
             for (i, r, hit) in tiles {
-                let (id, _, e) = &posts[i];
+                let (id, idx, e) = &posts[i];
                 let game = f.app.state.app_name(*id).unwrap_or_default().to_string();
                 let header = art::header(*id);
                 let urls: Vec<&str> = e.capsule.as_deref().into_iter().chain(e.header.as_deref()).chain(std::iter::once(header.as_str())).collect();
@@ -378,11 +441,80 @@ fn home(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
                     bp.bg_want = Some(*id);
                 }
                 if hit.activated {
-                    open_game(bp, f, *id);
+                    bp.open(Page::News(*id, *idx), f.now);
                 }
             }
         }
         y += 90.0 * s;
+    }
+    y - top + 40.0 * s
+}
+
+/// Inline What's New article reader (scrolls with up/down or right stick).
+fn news_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppId, index: usize) -> f32 {
+    let s = f.s;
+    let left = f.view.left() + f.pad;
+    let width = (f.view.width() - 2.0 * f.pad).min(1100.0 * s);
+    let mut y = top + 20.0 * s;
+    bp.bg_want = Some(id);
+
+    let (posts, _) = with_library(f.app, f.actions, |lib, _| lib.whats_new_posts(&[id])).unwrap_or_default();
+    let Some((_, _, event)) = posts.into_iter().find(|(app, idx, _)| *app == id && *idx == index) else {
+        empty(bp, ui, f, y, icons::NOTE, t!("Article unavailable"), "", None);
+        return 420.0 * s;
+    };
+
+    let game_name = f.app.state.app_name(id).unwrap_or_default().to_string();
+    let (r, open_hit) = button(bp, ui, f, Id::unique(("bp-news-open-game", id)), pos2(left, y), 0.0, Some(icons::CONTROLLER), &game_name, Kind::Secondary, None);
+    bp.preferred = Some(Id::unique(("bp-news-open-game", id)));
+    if open_hit.activated {
+        open_game(bp, f, id);
+    }
+    let _ = r;
+    y += 92.0 * s;
+
+    let p = ui.painter().clone();
+    let title_r = paint::wrapped(&p, pos2(left, y), &event.title, w::font_bold(38.0 * s), f.t.text, width, 3);
+    y = title_r.bottom() + 10.0 * s;
+    p.text(pos2(left, y), Align2::LEFT_TOP, ui::date(event.time), w::font_medium(19.0 * s), f.t.text_dim);
+    y += 38.0 * s;
+
+    if let Some(url) = event.header.as_deref().or(event.capsule.as_deref()) {
+        let img_h = (width * 0.42).min(360.0 * s);
+        let img_r = Rect::from_min_size(pos2(left, y), vec2(width, img_h));
+        if w::paint_cover(ui, img_r, url, paint::radius(14.0 * s)) {
+            y = img_r.bottom() + 26.0 * s;
+        }
+    }
+
+    if event.body.is_empty() && !event.summary.is_empty() {
+        let r = paint::wrapped(&p, pos2(left, y), &event.summary, w::font(22.0 * s), f.t.text, width, usize::MAX);
+        y = r.bottom() + 20.0 * s;
+    } else {
+        for block in &event.body {
+            match block {
+                store::html::Block::Heading(h) => {
+                    y += 10.0 * s;
+                    let r = paint::wrapped(&p, pos2(left, y), h, w::font_bold(27.0 * s), f.t.text, width, 4);
+                    y = r.bottom() + 14.0 * s;
+                }
+                store::html::Block::Paragraph(runs) => {
+                    let text: String = runs.iter().map(|(t, _)| t.as_str()).collect();
+                    if !text.trim().is_empty() {
+                        let r = paint::wrapped(&p, pos2(left, y), text.trim(), w::font(21.0 * s), f.t.text_dim, width, usize::MAX);
+                        y = r.bottom() + 16.0 * s;
+                    }
+                }
+                store::html::Block::Bullet(runs) => {
+                    let text: String = runs.iter().map(|(t, _)| t.as_str()).collect();
+                    if !text.trim().is_empty() {
+                        let r = paint::wrapped(&p, pos2(left + 20.0 * s, y), &format!("•  {}", text.trim()), w::font(20.0 * s), f.t.text_dim, width - 20.0 * s, usize::MAX);
+                        y = r.bottom() + 10.0 * s;
+                    }
+                }
+                store::html::Block::Image(_) | store::html::Block::Video(_) => {}
+            }
+        }
     }
     y - top + 40.0 * s
 }
@@ -407,86 +539,367 @@ fn runs_here(app: &model::OwnedApp) -> bool {
     })
 }
 
-fn library_tab(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
-    let s = f.s;
-    let mut y = top + 16.0 * s;
-    let entries = crate::builtin::entries(&f.app.state, &f.app.local);
-    // Games that can run here (a Mac lists Windows-only games too).
-    let runs: std::collections::HashSet<AppId> = entries.iter().filter(|e| e.installed.is_some() || e.owned.is_none_or(|o| runs_here(o))).map(|e| e.app_id).collect();
-    let mut games: Vec<(AppId, String, bool)> = entries.iter().map(|e| (e.app_id, e.name.to_string(), e.installed.is_some())).collect();
-    let ids: Vec<AppId> = games.iter().map(|g| g.0).collect();
-    let hidden: std::collections::HashSet<AppId> = with_library(f.app, f.actions, |lib, _| ids.iter().copied().filter(|id| lib.is_hidden(*id)).collect()).unwrap_or_default();
-    games.retain(|g| !hidden.contains(&g.0));
-    games.sort_by_key(|g| g.1.to_lowercase());
-    let n_installed = games.iter().filter(|g| g.2).count();
-    let n_runs = games.iter().filter(|g| runs.contains(&g.0)).count();
-    let installed_only = *bp.installed_only.get_or_insert_with(|| {
-        bp.this_os_only = f.app.prefs.bigpicture_library == 1;
-        f.app.prefs.bigpicture_library == 0
-    });
-    // Installed, runs on this computer (only when some don't), or all.
-    let mut chips: Vec<(u8, String)> = vec![(0, t!("Installed ({n})", n = n_installed))];
-    if n_runs < games.len() {
-        chips.push((1, t!("Runs on this computer ({n})", n = n_runs)));
-    }
-    chips.push((2, t!("All games ({n})", n = games.len())));
-    let current = if installed_only { 0 } else if bp.this_os_only && n_runs < games.len() { 1 } else { 2 };
-    if f.x {
-        // X steps through the filters.
-        let next = chips[(chips.iter().position(|c| c.0 == current).unwrap_or(0) + 1) % chips.len()].0;
-        bp.installed_only = Some(next == 0);
-        bp.this_os_only = next == 1;
-    }
-    let mut x = f.view.left() + f.pad;
-    for (i, (value, label)) in chips.iter().enumerate() {
-        let id = Id::unique(("bp-filter", i));
-        let on = current == *value;
-        let icon = (*value == 1).then_some(if cfg!(target_os = "macos") { icons::APPLE } else if cfg!(windows) { icons::WINDOWS } else { icons::LINUX });
-        let (r, hit) = button(bp, ui, f, id, pos2(x, y), 0.0, icon, label, if on { Kind::Primary } else { Kind::Secondary }, None);
-        if hit.activated {
-            bp.installed_only = Some(*value == 0);
-            bp.this_os_only = *value == 1;
+fn library_fingerprint(bp: &BigPicture, f: &mut Frame) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bp.library_cache_rev.hash(&mut h);
+    (bp.library_sort as u8).hash(&mut h);
+    if let Some(apps) = &f.app.state.apps {
+        apps.len().hash(&mut h);
+        let mut id_sum = 0u64;
+        for id in apps.keys() {
+            id_sum = id_sum.wrapping_add(u64::from(*id));
         }
-        x = r.right() + 18.0 * s;
+        id_sum.hash(&mut h);
+    } else {
+        0usize.hash(&mut h);
     }
-    y += 72.0 * s + 40.0 * s;
+    f.app.local.games.len().hash(&mut h);
+    for g in &f.app.local.games {
+        g.app_id.hash(&mut h);
+        g.size_on_disk.hash(&mut h);
+        g.last_played.hash(&mut h);
+        g.playtime_minutes.hash(&mut h);
+    }
+    if let Some(Ok(pg)) = f.app.state.player_games.get(&f.app.state.steam_id) {
+        pg.len().hash(&mut h);
+        let (mut play_sum, mut last_sum) = (0u64, 0u64);
+        for g in pg {
+            play_sum = play_sum.wrapping_add(g.playtime_minutes);
+            last_sum = last_sum.wrapping_add(g.last_played.unwrap_or(0));
+        }
+        play_sum.hash(&mut h);
+        last_sum.hash(&mut h);
+    }
+    let (fav_hash, hid_hash, col_hash) = with_library(f.app, f.actions, |lib, _| {
+        let mut fh = std::collections::hash_map::DefaultHasher::new();
+        for id in lib.favorites_set() {
+            id.hash(&mut fh);
+        }
+        let mut hh = std::collections::hash_map::DefaultHasher::new();
+        for id in lib.hidden_set() {
+            id.hash(&mut hh);
+        }
+        let mut ch = std::collections::hash_map::DefaultHasher::new();
+        for (name, set) in lib.collections_summary() {
+            name.hash(&mut ch);
+            set.len().hash(&mut ch);
+            for id in set {
+                id.hash(&mut ch);
+            }
+        }
+        (fh.finish(), hh.finish(), ch.finish())
+    })
+    .unwrap_or_default();
+    fav_hash.hash(&mut h);
+    hid_hash.hash(&mut h);
+    col_hash.hash(&mut h);
+    h.finish()
+}
 
-    let list: Vec<&(AppId, String, bool)> = games.iter().filter(|g| match current {
-        0 => g.2,
-        1 => runs.contains(&g.0),
-        _ => true,
-    }).collect();
-    if list.is_empty() {
-        let loading = f.app.state.apps.is_none();
-        let (title, body) = if loading { (t!("Loading your library…"), "") } else { (t!("No games here"), t!("Switch to All games to see everything you own.")) };
-        empty(bp, ui, f, y - 60.0 * s, icons::BOOKS, title, body, None);
-        return y - top + 400.0 * s;
+fn ensure_library_cache(bp: &mut BigPicture, f: &mut Frame) {
+    let fingerprint = library_fingerprint(bp, f);
+    if bp.library_cache.as_ref().is_some_and(|c| c.fingerprint == fingerprint) {
+        return;
     }
+    let (favorites, hidden, collections) = with_library(f.app, f.actions, |lib, _| {
+        (lib.favorites_set(), lib.hidden_set(), lib.collections_summary())
+    })
+    .unwrap_or_default();
+    let entries = crate::builtin::entries(&f.app.state, &f.app.local);
+    let playtime_map: std::collections::HashMap<AppId, (u64, u64)> = match f.app.state.player_games.get(&f.app.state.steam_id) {
+        Some(Ok(list)) => list.iter().map(|g| (g.app_id, (g.playtime_minutes, g.last_played.unwrap_or(0)))).collect(),
+        _ => std::collections::HashMap::new(),
+    };
+    let mut all_games: Vec<super::LibraryEntry> = entries
+        .iter()
+        .filter(|e| !hidden.contains(&e.app_id))
+        .map(|e| {
+            let runs = e.installed.is_some() || e.owned.is_none_or(|o| runs_here(o));
+            let (acct_min, acct_last) = playtime_map.get(&e.app_id).copied().unwrap_or((0, 0));
+            let inst_min = e.installed.and_then(|g| g.playtime_minutes).unwrap_or(0);
+            let inst_last = e.installed.and_then(|g| g.last_played).unwrap_or(0);
+            super::LibraryEntry {
+                id: e.app_id,
+                name: e.name.to_string(),
+                installed: e.installed.is_some(),
+                runs,
+                favorite: favorites.contains(&e.app_id),
+                last_played: inst_last.max(acct_last),
+                playtime_minutes: inst_min.max(acct_min),
+                size_on_disk: e.installed.map_or(0, |g| g.size_on_disk),
+            }
+        })
+        .collect();
+    match bp.library_sort {
+        super::LibrarySort::Title => all_games.sort_by(|a, b| model::cmp_ignore_case(&a.name, &b.name)),
+        super::LibrarySort::Recent => all_games.sort_by(|a, b| {
+            b.last_played
+                .cmp(&a.last_played)
+                .then_with(|| model::cmp_ignore_case(&a.name, &b.name))
+        }),
+        super::LibrarySort::Playtime => all_games.sort_by(|a, b| {
+            b.playtime_minutes
+                .cmp(&a.playtime_minutes)
+                .then_with(|| model::cmp_ignore_case(&a.name, &b.name))
+        }),
+        super::LibrarySort::Size => all_games.sort_by(|a, b| {
+            b.size_on_disk
+                .cmp(&a.size_on_disk)
+                .then_with(|| model::cmp_ignore_case(&a.name, &b.name))
+        }),
+    }
+    let n_installed = all_games.iter().filter(|g| g.installed).count();
+    let n_favorites = all_games.iter().filter(|g| g.favorite).count();
+    let n_runs = all_games.iter().filter(|g| g.runs).count();
+    bp.library_cache = Some(super::LibraryCache {
+        fingerprint,
+        all_games,
+        collections,
+        n_installed,
+        n_favorites,
+        n_runs,
+    });
+}
+
+fn library_tab(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
+    use super::LibraryFilter;
+    let s = f.s;
+    let left = f.view.left() + f.pad;
+    let right = f.view.right() - f.pad;
+    let mut y = top + 16.0 * s;
+
+    // Reset filter from preference when Settings → Library changed it.
+    if bp.installed_only.is_none() || bp.library_filter.is_none() {
+        let pref = f.app.prefs.bigpicture_library;
+        bp.installed_only = Some(pref == 0);
+        bp.this_os_only = pref == 1;
+        bp.library_filter = Some(match pref {
+            0 => LibraryFilter::Installed,
+            1 => LibraryFilter::RunsHere,
+            _ => LibraryFilter::All,
+        });
+    }
+
+    ensure_library_cache(bp, f);
+    let cache = bp.library_cache.as_ref().unwrap();
+    let total_games = cache.all_games.len();
+    let n_installed = cache.n_installed;
+    let n_favorites = cache.n_favorites;
+    let n_runs = cache.n_runs;
+    let collection_chips: Vec<(String, usize)> = cache
+        .collections
+        .iter()
+        .take(5)
+        .map(|(name, set)| (name.clone(), set.len()))
+        .collect();
+
+    // Build available filter chips.
+    let mut chips: Vec<(LibraryFilter, Option<&'static str>, String)> = vec![(
+        LibraryFilter::Installed,
+        None,
+        t!("Installed ({n})", n = n_installed),
+    )];
+    if n_favorites > 0 {
+        chips.push((LibraryFilter::Favorites, Some(icons::STAR), t!("Favorites ({n})", n = n_favorites)));
+    }
+    if n_runs < total_games {
+        let os_icon = if cfg!(target_os = "macos") {
+            icons::APPLE
+        } else if cfg!(windows) {
+            icons::WINDOWS
+        } else {
+            icons::LINUX
+        };
+        chips.push((LibraryFilter::RunsHere, Some(os_icon), t!("Runs here ({n})", n = n_runs)));
+    }
+    chips.push((LibraryFilter::All, None, t!("All ({n})", n = total_games)));
+    for (cname, count) in &collection_chips {
+        chips.push((LibraryFilter::Collection(cname.clone()), Some(icons::TAG), format!("{cname} ({count})")));
+    }
+
+    let current = bp.library_filter.clone().unwrap_or(LibraryFilter::Installed);
+    let current = if chips.iter().any(|c| c.0 == current) {
+        current
+    } else {
+        bp.library_filter = Some(LibraryFilter::Installed);
+        LibraryFilter::Installed
+    };
+
+    if bp.library_search_open {
+        if f.x {
+            bp.library_query.pop();
+        }
+        if f.y {
+            bp.library_query.push(' ');
+        }
+    } else {
+        if f.x {
+            let idx = chips.iter().position(|c| c.0 == current).unwrap_or(0);
+            let next = chips[(idx + 1) % chips.len()].0.clone();
+            bp.library_filter = Some(next);
+        }
+        if f.y {
+            bp.library_sort = bp.library_sort.next();
+        }
+    }
+
+    // Top controls row: filter chips + Search + Sort (wrapping gracefully on 1280×800).
+    let current = bp.library_filter.clone().unwrap_or(LibraryFilter::Installed);
+    let mut x = left;
+    let chip_gap = 14.0 * s;
+    let place_chip = |bp: &mut BigPicture, ui: &Ui, f: &Frame, id: Id, icon: Option<&str>, label: &str, kind: Kind, x: &mut f32, y: &mut f32| -> bool {
+        let wdt = paint::pill_width(ui, icon.is_some(), label, s);
+        if *x > left && *x + wdt > right {
+            *x = left;
+            *y += 82.0 * s;
+        }
+        let (r, hit) = button(bp, ui, f, id, pos2(*x, *y), 0.0, icon, label, kind, None);
+        *x = r.right() + chip_gap;
+        hit.activated
+    };
+
+    for (value, icon, label) in &chips {
+        let on = current == *value;
+        let chip_id = match value {
+            LibraryFilter::Installed => Id::unique("bp-lib-filter-installed"),
+            LibraryFilter::Favorites => Id::unique("bp-lib-filter-favorites"),
+            LibraryFilter::RunsHere => Id::unique("bp-lib-filter-runs"),
+            LibraryFilter::All => Id::unique("bp-lib-filter-all"),
+            LibraryFilter::Collection(name) => Id::unique(("bp-lib-filter-col", name)),
+        };
+        if place_chip(bp, ui, f, chip_id, *icon, label, if on { Kind::Primary } else { Kind::Secondary }, &mut x, &mut y) {
+            bp.library_filter = Some(value.clone());
+        }
+    }
+    let sort_label = format!("{}", bp.library_sort.label());
+    if place_chip(bp, ui, f, Id::unique("bp-lib-sort"), Some(icons::SORT), &sort_label, Kind::Secondary, &mut x, &mut y) {
+        bp.library_sort = bp.library_sort.next();
+    }
+    let search_label = if bp.library_query.trim().is_empty() {
+        t!("Filter").to_string()
+    } else {
+        format!("“{}”", bp.library_query.trim())
+    };
+    if place_chip(
+        bp,
+        ui,
+        f,
+        Id::unique("bp-lib-search-btn"),
+        Some(icons::SEARCH),
+        &search_label,
+        if bp.library_search_open || !bp.library_query.is_empty() { Kind::Primary } else { Kind::Secondary },
+        &mut x,
+        &mut y,
+    ) {
+        bp.library_search_open = !bp.library_search_open;
+    }
+    y += 72.0 * s + 24.0 * s;
+
+    // Inline local library search box + OSK when open.
+    if bp.library_search_open {
+        let field_w = (right - left).min(960.0 * s);
+        let field = Rect::from_min_size(pos2(left, y), vec2(field_w, 72.0 * s));
+        let p = ui.painter().clone();
+        p.rect_filled(field, paint::radius(36.0 * s), Color32::from_black_alpha(125));
+        p.rect_stroke(field, paint::radius(36.0 * s), egui::Stroke::new(2.0 * s, f.t.accent.gamma_multiply(0.75)), egui::StrokeKind::Inside);
+        p.text(pos2(field.left() + 30.0 * s, field.center().y), Align2::LEFT_CENTER, icons::SEARCH, w::font(26.0 * s), f.t.text_dim);
+        let tx = field.left() + 72.0 * s;
+        if bp.library_query.is_empty() {
+            p.text(pos2(tx, field.center().y), Align2::LEFT_CENTER, t!("Filter your library…"), w::font(26.0 * s), f.t.text_faint);
+        } else {
+            paint::line(&p, pos2(tx, field.center().y), Align2::LEFT_CENTER, &bp.library_query, w::font_semibold(26.0 * s), f.t.text, field.right() - tx - 28.0 * s);
+        }
+        y += 88.0 * s;
+        match super::osk::draw(bp, ui, f, left, right - left, &mut y, t!("Done")) {
+            Some(super::osk::Key::Char(ch)) => bp.library_query.push(ch),
+            Some(super::osk::Key::Del) => {
+                bp.library_query.pop();
+            }
+            Some(super::osk::Key::Clear) => bp.library_query.clear(),
+            Some(super::osk::Key::Go) => bp.library_search_open = false,
+            None => {}
+        }
+        y += 22.0 * s;
+    }
+
+    // LT / RT fast-jump through large libraries.
+    if !bp.library_search_open {
+        let jump = f.view.height() * 0.85;
+        if f.lt {
+            bp.scroller("page").target -= jump;
+        }
+        if f.rt {
+            bp.scroller("page").target += jump;
+        }
+    }
+
+    let q_lower = bp.library_query.trim().to_lowercase();
+    let active_filter = bp.library_filter.clone().unwrap_or(LibraryFilter::Installed);
+    let filtered: Vec<(AppId, String, bool, bool, bool, u64, u64)> = {
+        let cache = bp.library_cache.as_ref().unwrap();
+        let col_set = match &active_filter {
+            LibraryFilter::Collection(name) => cache.collections.iter().find(|(n, _)| n == name).map(|(_, s)| s),
+            _ => None,
+        };
+        cache
+            .all_games
+            .iter()
+            .filter(|g| match &active_filter {
+                LibraryFilter::Installed => g.installed,
+                LibraryFilter::Favorites => g.favorite,
+                LibraryFilter::RunsHere => g.runs,
+                LibraryFilter::All => true,
+                LibraryFilter::Collection(_) => col_set.is_some_and(|s| s.contains(&g.id)),
+            })
+            .filter(|g| q_lower.is_empty() || g.name.to_lowercase().contains(&q_lower))
+            .map(|g| (g.id, g.name.clone(), g.installed, g.runs, g.favorite, g.playtime_minutes, g.size_on_disk))
+            .collect()
+    };
+
+    if filtered.is_empty() {
+        let loading = f.app.state.apps.is_none();
+        let (title, body) = if loading {
+            (t!("Loading your library…"), "")
+        } else if !q_lower.is_empty() {
+            (t!("No matching games"), t!("Try clearing the search filter."))
+        } else {
+            (t!("No games here"), t!("Switch to All games to see everything you own."))
+        };
+        empty(bp, ui, f, y - 40.0 * s, icons::BOOKS, title, body, None);
+        return y - top + 380.0 * s;
+    }
+
     let tile = vec2(190.0 * s, 285.0 * s);
-    let gap = 28.0 * s;
+    let gap = 26.0 * s;
     let row_h = tile.y + 76.0 * s;
-    let width = f.view.width() - 2.0 * f.pad;
+    let width = right - left;
     let cols = (((width + gap) / (tile.x + gap)).floor() as usize).max(1);
     let clip = ui.clip_rect();
-    for (k, (id, name, installed)) in list.iter().enumerate() {
+    for (k, (id, name, installed, runs, fav, mins, size)) in filtered.iter().enumerate() {
         let (row, col) = (k / cols, k % cols);
-        let r = Rect::from_min_size(pos2(f.view.left() + f.pad + col as f32 * (tile.x + gap), y + row as f32 * row_h), tile);
+        let r = Rect::from_min_size(pos2(left + col as f32 * (tile.x + gap), y + row as f32 * row_h), tile);
         let hit = bp.focus.item(ui, Id::unique(("bp-lib", *id)), r, clip, Place::Page);
         if r.bottom() + row_h > clip.top() && r.top() - row_h < clip.bottom() {
-            let caption = if *installed {
-                String::new()
-            } else if !runs.contains(id) {
-                t!("Doesn't run on this computer").to_string()
-            } else {
-                t!("Not installed").to_string()
+            let caption = match bp.library_sort {
+                super::LibrarySort::Playtime if *mins > 0 => ui::playtime(*mins),
+                super::LibrarySort::Size if *size > 0 => ui::bytes(*size),
+                _ if *installed => String::new(),
+                _ if !runs => t!("Doesn't run on this computer").to_string(),
+                _ => t!("Not installed").to_string(),
             };
-            capsule(bp, ui, f, r, &hit, k, *id, name, &caption, !installed);
+            capsule(bp, ui, f, r, &hit, k.min(10), *id, name, &caption, !installed);
+            if *fav {
+                let star_c = pos2(r.right() - 18.0 * s, r.top() + 18.0 * s);
+                ui.painter().circle_filled(star_c, 14.0 * s, Color32::from_black_alpha(165));
+                ui.painter().text(star_c, Align2::CENTER_CENTER, icons::STAR, w::font(16.0 * s), f.t.away);
+            }
         }
         if hit.activated {
             bp.open(Page::Game(*id), f.now);
         }
     }
-    let rows = list.len().div_ceil(cols);
+    let rows = filtered.len().div_ceil(cols);
     y += rows as f32 * row_h;
     y - top + 30.0 * s
 }
@@ -506,13 +919,23 @@ fn game(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppId) ->
         paint::wrapped(c.painter(), pos2(logo.left(), logo.bottom() - 130.0 * s), &name, w::font_bold(58.0 * s), Color32::WHITE, 900.0 * s, 2);
     }
 
-    // Buttons.
-    let mut y = top + 360.0 * s;
+    // Buttons (wrap cleanly on 1280×800 handheld widths).
+    let left = f.view.left() + f.pad;
+    let right = f.view.right() - f.pad;
+    let mut y = top + 350.0 * s;
     let action = with_library(f.app, f.actions, |lib, cx| lib.main_action(cx, id)).unwrap_or(MainAction::StorePage);
+    let is_fav = with_library(f.app, f.actions, |lib, _| lib.is_favorite(id)).unwrap_or(false);
+    if f.x {
+        with_library(f.app, f.actions, |lib, cx| lib.toggle_favorite(cx, id));
+        bp.library_cache_rev = bp.library_cache_rev.wrapping_add(1);
+    }
+    if f.y {
+        bp.open(Page::GameManage(id), f.now);
+    }
     let (label, icon, kind, progress) = main_button(action);
     let main_id = Id::unique(("bp-game-main", id));
     bp.preferred = Some(main_id);
-    let (b, main) = button(bp, ui, f, main_id, pos2(f.view.left() + f.pad, y), 300.0 * s, Some(icon), &label, kind, progress);
+    let (b, main) = button(bp, ui, f, main_id, pos2(left, y), 260.0 * s, Some(icon), &label, kind, progress);
     if main.activated {
         if action == MainAction::StorePage {
             bp.open(Page::StoreApp(id), f.now);
@@ -524,36 +947,59 @@ fn game(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppId) ->
             with_library(f.app, f.actions, |lib, cx| lib.run_main_action(cx, id));
         }
     }
-    let mut x = b.right() + 20.0 * s;
-    if action != MainAction::StorePage {
-        let (r, hit) = button(bp, ui, f, Id::unique(("bp-game-store", id)), pos2(x, y), 0.0, Some(icons::STORE), t!("Store page"), Kind::Secondary, None);
-        if hit.activated {
-            bp.open(Page::StoreApp(id), f.now);
+    let mut x = b.right() + 18.0 * s;
+    let place_btn = |bp: &mut BigPicture, ui: &Ui, f: &Frame, btn_id: Id, ic: &str, lbl: &str, k: Kind, x: &mut f32, y: &mut f32| -> bool {
+        let wdt = paint::pill_width(ui, true, lbl, s);
+        if *x > left && *x + wdt > right {
+            *x = left;
+            *y += 84.0 * s;
         }
-        x = r.right() + 20.0 * s;
+        let (r, hit) = button(bp, ui, f, btn_id, pos2(*x, *y), 0.0, Some(ic), lbl, k, None);
+        *x = r.right() + 18.0 * s;
+        hit.activated
+    };
+    if let MainAction::Busy { verifying, .. } = action
+        && place_btn(bp, ui, f, Id::unique(("bp-game-cancel", id)), icons::X, t!("Cancel"), Kind::Secondary, &mut x, &mut y)
+    {
+        f.app.client.send(if verifying { Command::CancelVerify { app_id: id } } else { Command::CancelDownload { app_id: id } });
     }
-    if let MainAction::Busy { verifying, .. } = action {
-        let (_, hit) = button(bp, ui, f, Id::unique(("bp-game-cancel", id)), pos2(x, y), 0.0, Some(icons::X), t!("Cancel"), Kind::Secondary, None);
-        if hit.activated {
-            f.app.client.send(if verifying { Command::CancelVerify { app_id: id } } else { Command::CancelDownload { app_id: id } });
-        }
+    if place_btn(bp, ui, f, Id::unique(("bp-game-manage", id)), icons::SLIDERS, t!("Manage"), Kind::Secondary, &mut x, &mut y) {
+        bp.open(Page::GameManage(id), f.now);
+    }
+    if place_btn(
+        bp,
+        ui,
+        f,
+        Id::unique(("bp-game-fav", id)),
+        icons::STAR,
+        if is_fav { t!("Favorited") } else { t!("Favorite") },
+        if is_fav { Kind::Primary } else { Kind::Secondary },
+        &mut x,
+        &mut y,
+    ) {
+        with_library(f.app, f.actions, |lib, cx| lib.toggle_favorite(cx, id));
+        bp.library_cache_rev = bp.library_cache_rev.wrapping_add(1);
+    }
+    if action != MainAction::StorePage
+        && place_btn(bp, ui, f, Id::unique(("bp-game-store", id)), icons::STORE, t!("Store page"), Kind::Secondary, &mut x, &mut y)
+    {
+        bp.open(Page::StoreApp(id), f.now);
     }
     #[cfg(target_os = "linux")]
-    if installed.is_some() && !f.app.demo && !matches!(action, MainAction::Busy { .. }) {
-        let (_, hit) = button(bp, ui, f, Id::unique(("bp-game-compatibility", id)), pos2(x, y), 0.0, Some(icons::GEAR), t!("Compatibility"), Kind::Secondary, None);
-        if hit.activated {
-            bp.open(Page::Compatibility(id), f.now);
-        }
+    if installed.is_some()
+        && !f.app.demo
+        && !matches!(action, MainAction::Busy { .. })
+        && place_btn(bp, ui, f, Id::unique(("bp-game-compatibility", id)), icons::GEAR, t!("Compatibility"), Kind::Secondary, &mut x, &mut y)
+    {
+        bp.open(Page::Compatibility(id), f.now);
     }
-    y += 72.0 * s + 50.0 * s;
-
-    if installed.is_some() && !f.app.demo {
-        let (_, hit) = button(bp, ui, f, Id::unique(("bp-game-controller", id)), pos2(f.view.left() + f.pad, y), 0.0, Some(icons::CONTROLLER), t!("Controller"), Kind::Secondary, None);
-        if hit.activated {
-            bp.open(Page::Controller(id), f.now);
-        }
-        y += 98.0 * s;
+    if installed.is_some()
+        && !f.app.demo
+        && place_btn(bp, ui, f, Id::unique(("bp-game-controller", id)), icons::CONTROLLER, t!("Controller"), Kind::Secondary, &mut x, &mut y)
+    {
+        bp.open(Page::Controller(id), f.now);
     }
+    y += 72.0 * s + 44.0 * s;
 
     // Facts.
     let played = installed.as_ref().and_then(|g| g.playtime_minutes).or_else(|| match f.app.state.player_games.get(&f.app.state.steam_id) {
@@ -614,7 +1060,7 @@ fn game(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppId) ->
                     ui.painter().rect_filled(shown, paint::radius(12.0 * s), f.t.raised);
                     ui.painter().text(shown.center(), Align2::CENTER_CENTER, icons::TROPHY, w::font(48.0 * s), if a.unlocked { f.t.away } else { f.t.text_faint });
                 } else {
-                    w::skeleton(ui, &f.t, shown, paint::radius(12.0 * s));
+                    paint::skeleton(ui, &f.t, shown, paint::radius(12.0 * s));
                 }
             }
             if !a.unlocked {
@@ -676,9 +1122,19 @@ fn compatibility_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32,
     let note_rect = paint::wrapped(ui.painter(), pos2(left, y), note, w::font(20.0 * s), f.t.text_dim, width, usize::MAX);
     y = note_rect.bottom() + 24.0 * s;
 
-    let native = f.app.state.apps.as_ref().and_then(|apps| apps.get(&id)).and_then(|app| client::native_build(app, &installed.install_dir));
-    let default = client::default_proton(id);
-    let builds = client::proton_builds();
+    // Cache native_build / default_proton / proton_builds per page visit (no per-frame disk I/O).
+    let (native, default, builds) = match &bp.compat_cache {
+        Some((cached_id, native, default, builds)) if *cached_id == id => {
+            (*native, default.clone(), builds.clone())
+        }
+        _ => {
+            let native = f.app.state.apps.as_ref().and_then(|apps| apps.get(&id)).and_then(|app| client::native_build(app, &installed.install_dir));
+            let default = client::default_proton(id);
+            let builds = client::proton_builds();
+            bp.compat_cache = Some((id, native, default.clone(), builds.clone()));
+            (native, default, builds)
+        }
+    };
     let current = client::app_proton(id);
     let choices = compatibility_choices(native, default.as_deref(), &builds);
     let is_selected = |choice: Option<&str>| match (current.as_deref(), choice) {
@@ -753,50 +1209,6 @@ fn controller_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id
     y - top + 96.0 * s
 }
 
-fn quick_access(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
-    use super::settings::{CONTROLLER, OVERLAY};
-    let s = f.s;
-    let width = (f.view.width() - 2.0 * f.pad).min(550.0 * s);
-    let left = f.view.right() - f.pad - width;
-    let mut y = top + 22.0 * s;
-    let panel = Rect::from_min_size(pos2(left - 18.0 * s, y), vec2(width + 36.0 * s, 450.0 * s));
-    ui.painter().rect_filled(panel, paint::radius(18.0 * s), f.t.chrome.gamma_multiply(0.96));
-    y += 18.0 * s;
-    ui.painter().text(pos2(left, y), Align2::LEFT_TOP, t!("Quick Access"), w::font_bold(31.0 * s), f.t.text);
-    y += 55.0 * s;
-
-    let inbox_id = Id::unique("bp-quick-inbox");
-    bp.preferred = Some(inbox_id);
-    let unread = f.app.state.notifications.as_ref().map_or(0, |data| data.unread);
-    let waiting = if unread > 0 { t!("{count} unread", count = unread) } else { String::new() };
-    let mut row = |bp: &mut BigPicture, f: &Frame, id, icon, label: &str, status: &str| {
-        let rect = Rect::from_min_size(pos2(left, y), vec2(width, 55.0 * s));
-        y += 63.0 * s;
-        compact_row(bp, ui, f, id, rect, icon, label, status).activated
-    };
-    if row(bp, f, inbox_id, icons::BELL, t!("Notifications"), &waiting) {
-        bp.open(Page::Notifications, f.now);
-    }
-    let flags = f.app.shared_flags();
-    let overlay = flags.lock().unwrap().overlay_enabled;
-    let pad_count = bp.pads.to_string();
-    for (section, icon, label, status) in [
-        (CONTROLLER, icons::CONTROLLER, t!("Controller"), pad_count.as_str()),
-        (OVERLAY, icons::STACK, t!("In-game overlay"), if overlay { t!("On") } else { t!("Off") }),
-    ] {
-        if row(bp, f, Id::unique(("bp-quick-access", section)), icon, label, status) {
-            bp.settings.open_at(section);
-            bp.open(Page::Settings, f.now);
-        }
-    }
-    for (tab, icon) in [(Tab::Friends, icons::USERS), (Tab::Downloads, icons::DOWNLOAD)] {
-        if row(bp, f, Id::unique(("bp-quick-tab", tab.index())), icon, &super::tab_label(f, tab), "") {
-            bp.switch_tab(tab, f.now, true);
-        }
-    }
-    panel.bottom() - top + 24.0 * s
-}
-
 fn notifications(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
     let s = f.s;
     let left = f.view.left() + f.pad;
@@ -818,17 +1230,56 @@ fn notifications(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f
     }
     y += 96.0 * s;
     let width = (f.view.width() - 2.0 * f.pad).min(1100.0 * s);
+    if let Some(d) = data {
+        let mut summary = Vec::new();
+        if d.pending_gifts > 0 {
+            summary.push(("gifts", icons::GIFT, t!("{n} gifts waiting for you", n = d.pending_gifts), 2));
+        }
+        if d.pending_friends > 0 {
+            summary.push(("friends", icons::USER_PLUS, t!("{n} friend requests", n = d.pending_friends), 5));
+        }
+        if d.confirmations > 0 {
+            summary.push(("confirmations", icons::SHIELD, t!("{n} confirmations waiting in the Steam Mobile app", n = d.confirmations), 26));
+        }
+        for (key, icon, text, kind) in summary {
+            let id = Id::unique(("bp-notification-summary", key));
+            let rect = Rect::from_min_size(pos2(left, y), vec2(width, 64.0 * s));
+            let hit = bp.focus.item(ui, id, rect, ui.clip_rect(), Place::Page);
+            let painter = ui.painter();
+            painter.rect_filled(rect, paint::radius(12.0 * s), w::mix(f.t.accent.gamma_multiply(0.14), f.t.accent.gamma_multiply(0.28), hit.glow));
+            painter.text(pos2(left + 22.0 * s, rect.center().y), Align2::LEFT_CENTER, icon, w::font(24.0 * s), f.t.accent);
+            paint::line(painter, pos2(left + 62.0 * s, rect.center().y), Align2::LEFT_CENTER, &text, w::font_semibold(20.0 * s), f.t.text, width - 108.0 * s);
+            painter.text(pos2(rect.right() - 20.0 * s, rect.center().y), Align2::RIGHT_CENTER, icons::CARET_RIGHT, w::font(18.0 * s), f.t.text_dim);
+            if hit.focused {
+                bp.focus.ring_around(rect, 12.0 * s);
+            }
+            if hit.activated {
+                let row = model::Notification { kind, ..Default::default() };
+                crate::shell::open_notification(&f.app.state, &row, f.actions);
+            }
+            y += 74.0 * s;
+        }
+    }
     if let Some(data) = data.filter(|data| !data.items.is_empty()) {
         for n in data.items.iter().take(40) {
             let id = Id::unique(("bp-notification", n.id));
-            let rect = Rect::from_min_size(pos2(left, y), vec2(width, 68.0 * s));
+            let rect = Rect::from_min_size(pos2(left, y), vec2(width, 84.0 * s));
             let hit = bp.focus.item(ui, id, rect, ui.clip_rect(), Place::Page);
             let (icon, label) = crate::shell::notification_text(&f.app.state, n);
-            let painter = ui.painter();
-            painter.rect_filled(rect, paint::radius(12.0 * s), w::mix(f.t.surface, f.t.raised, hit.glow));
             let color = if n.read { f.t.text_dim } else { f.t.text };
-            painter.text(pos2(left + 20.0 * s, rect.center().y), Align2::LEFT_CENTER, icon, w::font(24.0 * s), color);
-            paint::line(painter, pos2(left + 58.0 * s, rect.center().y), Align2::LEFT_CENTER, &label, w::font_medium(21.0 * s), color, width - 78.0 * s);
+            if rect.intersects(ui.clip_rect()) {
+                ui.painter().rect_filled(rect, paint::radius(12.0 * s), w::mix(f.t.surface, f.t.raised, hit.glow));
+                let pic = Rect::from_center_size(pos2(left + 44.0 * s, rect.center().y), vec2(54.0 * s, 54.0 * s));
+                crate::shell::notification_picture_scaled(ui, &f.t, &f.app.state, n, icon, pic, s);
+                let painter = ui.painter();
+                let x = pic.right() + 18.0 * s;
+                let text_w = (rect.right() - x - 34.0 * s).max(40.0);
+                paint::wrapped(painter, pos2(x, rect.top() + 14.0 * s), &label, w::font_medium(20.0 * s), color, text_w, 2);
+                paint::line(painter, pos2(x, rect.bottom() - 12.0 * s), Align2::LEFT_BOTTOM, &ui::ago(n.time), w::font(15.5 * s), f.t.text_faint, text_w);
+                if !n.read {
+                    painter.circle_filled(rect.right_center() - vec2(18.0 * s, 0.0), 5.0 * s, f.t.accent);
+                }
+            }
             if hit.focused {
                 bp.focus.ring_around(rect, 12.0 * s);
             }
@@ -838,7 +1289,7 @@ fn notifications(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f
                 }
                 crate::shell::open_notification(&f.app.state, n, f.actions);
             }
-            y += 80.0 * s;
+            y += 96.0 * s;
         }
     } else {
         let label = if data.is_some() { t!("You're all caught up.") } else { t!("Notifications unavailable") };
@@ -868,7 +1319,7 @@ fn store_tab(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
             heading(ui, f, &mut y, t!("Featured"));
             for i in 0..3 {
                 let r = Rect::from_min_size(pos2(f.view.left() + f.pad + i as f32 * 586.0 * s, y), vec2(560.0 * s, 320.0 * s));
-                w::skeleton(ui, &f.t, r, paint::radius(10.0 * s));
+                paint::skeleton(ui, &f.t, r, paint::radius(10.0 * s));
             }
             y += 400.0 * s;
         }
@@ -969,7 +1420,7 @@ fn store_app(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppI
     let header_url = details.as_ref().map(|d| d.header.clone()).unwrap_or_else(|| art::header(id));
     paint::shadow(c.painter(), header, 14.0 * s, s, 0.8, Color32::from_black_alpha(220));
     if !w::paint_cover(&c, header.translate(vec2(0.0, dy * s)), &header_url, paint::radius(14.0 * s)) {
-        w::skeleton(&c, &f.t, header, paint::radius(14.0 * s));
+        paint::skeleton(&c, &f.t, header, paint::radius(14.0 * s));
     }
     let tx = header.right() + 48.0 * s;
     let tw = f.view.right() - f.pad - tx;
@@ -987,7 +1438,7 @@ fn store_app(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: AppI
         None => {
             let name = f.app.state.app_name(id).unwrap_or_default().to_string();
             p.text(pos2(tx, y), Align2::LEFT_TOP, name, w::font_bold(44.0 * s), f.t.text);
-            w::skeleton(ui, &f.t, Rect::from_min_size(pos2(tx, y + 80.0 * s), vec2(tw.min(700.0 * s), 120.0 * s)), paint::radius(8.0 * s));
+            paint::skeleton(ui, &f.t, Rect::from_min_size(pos2(tx, y + 80.0 * s), vec2(tw.min(700.0 * s), 120.0 * s)), paint::radius(8.0 * s));
         }
     }
     y = header.bottom() + 44.0 * s;
@@ -1226,7 +1677,14 @@ fn install_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: A
     }
     bp.bg_want = Some(id);
     let platform = bp.install.as_ref().filter(|(game, _, _, _)| *game == id).map(|choice| choice.3).unwrap_or("windows");
-    let Some(plan) = with_library(f.app, f.actions, |lib, cx| lib.install_plan(cx, id, platform)) else { return 0.0 };
+    let plan = match &bp.install_plan_cache {
+        Some((cid, cplat, p)) if *cid == id && *cplat == platform => p.clone(),
+        _ => {
+            let Some(p) = with_library(f.app, f.actions, |lib, cx| lib.install_plan(cx, id, platform)) else { return 0.0 };
+            bp.install_plan_cache = Some((id, platform, p.clone()));
+            p
+        }
+    };
     if bp.install.as_ref().is_none_or(|(g, _, _, _)| *g != id) {
         bp.install = Some((id, plan.default.clone(), true, platform));
     }
@@ -1242,7 +1700,7 @@ fn install_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: A
     let header = Rect::from_min_size(pos2(left, y), vec2(560.0 * s, 262.0 * s));
     paint::shadow(ui.painter(), header, 14.0 * s, s, 0.8, Color32::from_black_alpha(220));
     if !w::paint_cover(ui, header, &art::header(id), paint::radius(14.0 * s)) {
-        w::skeleton(ui, &f.t, header, paint::radius(14.0 * s));
+        paint::skeleton(ui, &f.t, header, paint::radius(14.0 * s));
     }
     let p = ui.painter().clone();
     let tx = header.right() + 48.0 * s;
@@ -1300,9 +1758,17 @@ fn install_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: A
     bp.preferred = Some(go_id);
     let (r, go) = button(bp, ui, f, go_id, pos2(left, y), 280.0 * s, Some(icons::DOWNLOAD), t!("Install"), if enough { Kind::Play } else { Kind::Muted }, None);
     if go.activated && enough {
-        with_library(f.app, f.actions, |lib, cx| lib.install_to(cx, id, chosen.clone(), shortcut, platform));
-        bp.install = None;
-        bp.back(f.now);
+        // Revalidate free space on the chosen library right before starting the install.
+        let fresh_free = local::manage::available_space(&chosen).unwrap_or(free);
+        if plan.size == 0 || fresh_free == 0 || fresh_free >= plan.size {
+            with_library(f.app, f.actions, |lib, cx| lib.install_to(cx, id, chosen.clone(), shortcut, platform));
+            bp.install = None;
+            bp.install_plan_cache = None;
+            bp.back(f.now);
+        } else {
+            bp.install_plan_cache = None;
+            f.actions.push(Action::Toast(t!("There isn't enough free space on this drive.").into()));
+        }
     }
     let (_, cancel) = button(bp, ui, f, Id::unique(("bp-install-cancel", id)), pos2(r.right() + 20.0 * s, y), 0.0, Some(icons::X), t!("Cancel"), Kind::Secondary, None);
     if cancel.activated {
@@ -1363,7 +1829,7 @@ fn shots(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, id: AppId, i: usize) -
         bp.shot_wheel = 0.0;
     }
     let Some(shot) = list.get(i) else {
-        w::skeleton(ui, &f.t, area, paint::radius(12.0 * s));
+        paint::skeleton(ui, &f.t, area, paint::radius(12.0 * s));
         return f.view.height();
     };
     let (at, way) = bp.shot_since;
@@ -1373,7 +1839,7 @@ fn shots(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, id: AppId, i: usize) -
     // The thumbnail first (it's already loaded), then the full picture over it.
     let fit = |c: &Ui, url: &str| w::paint_contain(c, r, url, Align2::CENTER_CENTER);
     if !fit(&c, &shot.full) && !fit(&c, &shot.thumb) {
-        w::skeleton(ui, &f.t, area, paint::radius(12.0 * s));
+        paint::skeleton(ui, &f.t, area, paint::radius(12.0 * s));
     }
     let label = format!("{} / {}", i + 1, list.len());
     let pill = Rect::from_center_size(pos2(area.center().x, area.bottom() - 24.0 * s), vec2(130.0 * s, 44.0 * s));
@@ -1382,15 +1848,13 @@ fn shots(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, id: AppId, i: usize) -
     f.view.height()
 }
 
-// ---------- Search with the on-screen keyboard ----------
-
-const KEYS_EN: [&str; 4] = ["1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm-:."];
-const KEYS_RU: [&str; 4] = ["1234567890-", "йцукенгшщзх", "фывапролджэ", "ячсмитьбюъё"];
+// ---------- Search with the shared on-screen keyboard ----------
 
 fn search(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
     let s = f.s;
     let mut y = top + 16.0 * s;
     let left = f.view.left() + f.pad;
+    let width = f.view.width() - 2.0 * f.pad;
     // X deletes, Y types a space (on a controller).
     if f.x && bp.query.pop().is_some() {
         bp.query_changed = f.now;
@@ -1406,46 +1870,50 @@ fn search(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
     }
 
     // The text box.
-    let field = Rect::from_min_size(pos2(left, y), vec2((f.view.width() - 2.0 * f.pad).min(1100.0 * s), 84.0 * s));
+    let field = Rect::from_min_size(pos2(left, y), vec2(width.min(1100.0 * s), 80.0 * s));
     let p = ui.painter().clone();
-    p.rect_filled(field, paint::radius(42.0 * s), Color32::from_black_alpha(120));
-    p.rect_stroke(field, paint::radius(42.0 * s), egui::Stroke::new(2.0 * s, f.t.accent.gamma_multiply(0.7)), egui::StrokeKind::Inside);
-    p.text(pos2(field.left() + 36.0 * s, field.center().y), Align2::LEFT_CENTER, icons::SEARCH, w::font(30.0 * s), f.t.text_dim);
-    let tx = field.left() + 84.0 * s;
+    p.rect_filled(field, paint::radius(40.0 * s), Color32::from_black_alpha(120));
+    p.rect_stroke(field, paint::radius(40.0 * s), egui::Stroke::new(2.0 * s, f.t.accent.gamma_multiply(0.7)), egui::StrokeKind::Inside);
+    p.text(pos2(field.left() + 34.0 * s, field.center().y), Align2::LEFT_CENTER, icons::SEARCH, w::font(28.0 * s), f.t.text_dim);
+    let tx = field.left() + 80.0 * s;
     let typed = if bp.query.is_empty() {
-        p.text(pos2(tx, field.center().y), Align2::LEFT_CENTER, t!("Type a game's name"), w::font(30.0 * s), f.t.text_faint);
+        p.text(pos2(tx, field.center().y), Align2::LEFT_CENTER, t!("Type a game's name"), w::font(28.0 * s), f.t.text_faint);
         Rect::from_min_size(pos2(tx, field.center().y), Vec2::ZERO)
     } else {
         // Long text: the end stays in view (the start slides out to the left).
         let room = field.right() - tx - 40.0 * s;
-        let galley = p.layout_no_wrap(bp.query.clone(), w::font_semibold(32.0 * s), f.t.text);
+        let galley = p.layout_no_wrap(bp.query.clone(), w::font_semibold(30.0 * s), f.t.text);
         let x = tx - (galley.size().x - room).max(0.0);
         let rect = Align2::LEFT_CENTER.anchor_size(pos2(x, field.center().y), galley.size());
         p.with_clip_rect(Rect::from_min_max(pos2(tx, field.top()), pos2(tx + room + 8.0 * s, field.bottom()))).galley(rect.min, galley, f.t.text);
         rect
     };
-    // A blinking caret.
-    let blink = ((f.now * 3.0).sin() as f32 * 0.5 + 0.5).powf(0.6);
-    p.vline(typed.right() + 4.0 * s, (field.center().y - 20.0 * s)..=(field.center().y + 20.0 * s), egui::Stroke::new(3.0 * s, f.t.accent.gamma_multiply(blink)));
-    y += 84.0 * s + 36.0 * s;
+    let blink = if ((f.now * 2.0) as u64).is_multiple_of(2) { 1.0 } else { 0.25 };
+    p.vline(typed.right() + 4.0 * s, (field.center().y - 18.0 * s)..=(field.center().y + 18.0 * s), egui::Stroke::new(3.0 * s, f.t.accent.gamma_multiply(blink)));
+    y += 80.0 * s + 30.0 * s;
 
-    // The keyboard.
-    match keyboard(bp, ui, f, f.view.left() + f.pad, &mut y, t!("Search")) {
-        Some(Key::Char(ch)) => {
+    // The shared on-screen keyboard.
+    match super::osk::draw(bp, ui, f, left, width, &mut y, t!("Search")) {
+        Some(super::osk::Key::Char(ch)) => {
             bp.query.push(ch);
             bp.query_changed = f.now;
         }
-        Some(Key::Del) => {
+        Some(super::osk::Key::Del) => {
             bp.query.pop();
             bp.query_changed = f.now;
         }
-        Some(Key::Go) => bp.submitted = bp.query.trim().to_string(),
+        Some(super::osk::Key::Clear) => {
+            bp.query.clear();
+            bp.submitted.clear();
+            bp.query_changed = f.now;
+        }
+        Some(super::osk::Key::Go) => bp.submitted = bp.query.trim().to_string(),
         None => {}
     }
-    y += 50.0 * s - 10.0 * s;
+    y += 32.0 * s;
     bp.preferred = Some(Id::unique(("bp-key", 1, 0)));
 
-    // Results.
+    // Results (semantic AppId focus IDs).
     if bp.submitted.is_empty() {
         return y - top;
     }
@@ -1455,7 +1923,7 @@ fn search(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
         None => {
             for i in 0..4 {
                 let r = Rect::from_min_size(pos2(left + i as f32 * 446.0 * s, y), vec2(420.0 * s, 196.0 * s));
-                w::skeleton(ui, &f.t, r, paint::radius(10.0 * s));
+                paint::skeleton(ui, &f.t, r, paint::radius(10.0 * s));
             }
             y += 196.0 * s;
         }
@@ -1472,7 +1940,7 @@ fn search(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
             let shown: std::collections::HashMap<AppId, Option<bool>> = with_store(f.app, f.actions, |st, _| ids.iter().map(|id| (*id, st.shown(*id))).collect()).unwrap_or_default();
             let items: Vec<&store::Item> = items.iter().filter(|i| shown.get(&i.app_id).copied().flatten() != Some(false)).collect();
             let key = format!("results-{query}");
-            let tiles = shelf(bp, ui, f, &mut y, &key, items.len(), vec2(420.0 * s, 196.0 * s), |i| Id::unique(("bp-result", i)));
+            let tiles = shelf(bp, ui, f, &mut y, &key, items.len(), vec2(420.0 * s, 196.0 * s), |i| Id::unique(("bp-result", items[i].app_id)));
             for (i, r, hit) in tiles {
                 store_tile(bp, ui, f, r, &hit, i, items[i], shown.get(&items[i].app_id).copied().flatten(), false);
             }
@@ -1482,76 +1950,12 @@ fn search(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
     y - top + 20.0 * s
 }
 
-/// A key pressed on the on-screen keyboard.
-enum Key {
-    Char(char),
-    Del,
-    Go,
-}
-
-/// The on-screen keyboard (letters, Space, Delete, ABC/АБВ and `go`), from
-/// `y` down; `y` ends below it. Switching the alphabet is handled here.
-fn keyboard(bp: &mut BigPicture, ui: &mut Ui, f: &Frame, left: f32, y: &mut f32, go: &str) -> Option<Key> {
-    let s = f.s;
-    let rows = if bp.cyrillic { KEYS_RU } else { KEYS_EN };
-    let key = 74.0 * s;
-    let gap = 10.0 * s;
-    let mut out = None;
-    for (ri, row) in rows.iter().enumerate() {
-        for (ci, ch) in row.chars().enumerate() {
-            let r = Rect::from_min_size(pos2(left + ci as f32 * (key + gap), *y), vec2(key, key));
-            if key_cap(bp, ui, f, Id::unique(("bp-key", ri, ci)), r, &ch.to_string(), false) {
-                out = Some(Key::Char(ch));
-            }
-        }
-        *y += key + gap;
-    }
-    let unit = key + gap;
-    let specials = [(4.0, " ", t!("Space")), (2.0, "del", t!("Delete")), (2.0, "lang", if bp.cyrillic { "ABC" } else { "АБВ" }), (3.0, "go", go)];
-    let mut x = left;
-    for (i, (cols, what, label)) in specials.iter().enumerate() {
-        let r = Rect::from_min_size(pos2(x, *y), vec2(cols * unit - gap, key));
-        if key_cap(bp, ui, f, Id::unique(("bp-key-special", i)), r, label, *what == "go") {
-            out = match *what {
-                " " => Some(Key::Char(' ')),
-                "del" => Some(Key::Del),
-                "lang" => {
-                    bp.cyrillic = !bp.cyrillic;
-                    None
-                }
-                _ => Some(Key::Go),
-            };
-        }
-        x += cols * unit;
-    }
-    *y += key + gap;
-    out
-}
-
-/// One key of the on-screen keyboard; true when pressed. Keys pop when hit.
-fn key_cap(bp: &mut BigPicture, ui: &Ui, f: &Frame, id: Id, r: Rect, label: &str, accent: bool) -> bool {
-    let s = f.s;
-    let hit = bp.focus.item(ui, id, r, ui.clip_rect(), Place::Page);
-    if hit.activated {
-        bp.key_pop = Some((id, f.now));
-    }
-    let pop = bp.key_pop.filter(|(k, _)| *k == id).map(|(_, at)| ((f.now - at) / 0.18) as f32).filter(|e| *e < 1.0);
-    let bump = pop.map(|e| (e * std::f32::consts::PI).sin() * 0.1).unwrap_or(0.0);
-    if pop.is_some() {
-        ui.ctx().request_repaint();
-    }
-    let shown = paint::grow(r, 1.0 + 0.06 * hit.glow - bump);
-    let fill = if accent { f.t.accent } else { w::mix(f.t.raised, f.t.accent, hit.glow * 0.85) };
-    ui.painter().rect_filled(shown, paint::radius(12.0 * s), fill);
-    let size = if label.chars().count() == 1 { 32.0 } else { 22.0 };
-    ui.painter().text(shown.center(), Align2::CENTER_CENTER, label, w::font_semibold(size * s), f.t.text);
-    if hit.focused {
-        bp.focus.ring_around(shown, 12.0 * s);
-    }
-    hit.activated
-}
-
 // ---------- Downloads ----------
+
+fn with_downloads<R>(app: &mut SteamApp, actions: &mut Vec<Action>, f: impl FnOnce(&mut crate::builtin::downloads::Downloads, &mut extensions::Ctx) -> R) -> Option<R> {
+    let env = extensions::Env { state: &app.state, local: &app.local, theme: &app.prefs.theme, zoom: app.prefs.zoom, client: &app.client, actions };
+    app.registry.with_ext::<crate::builtin::downloads::Downloads, R>("downloads", env, f)
+}
 
 fn downloads(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
     let s = f.s;
@@ -1560,40 +1964,55 @@ fn downloads(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
     let width = f.view.width() - 2.0 * f.pad;
     let mut active: Vec<model::DownloadStatus> = f.app.state.downloads.values().filter(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)).cloned().collect();
     active.sort_by_key(|d| d.app_id);
+    let mut completed: Vec<model::DownloadStatus> = f.app.state.downloads.values().filter(|d| matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)).cloned().collect();
+    completed.sort_by_key(|d| d.app_id);
     let queue = f.app.state.download_queue.clone();
-    if active.is_empty() && queue.is_empty() {
+    let updates = with_library(f.app, f.actions, |lib, cx| lib.games_needing_update(cx)).unwrap_or_default();
+
+    if active.is_empty() && queue.is_empty() && updates.is_empty() && completed.is_empty() {
         if empty(bp, ui, f, y, icons::DOWNLOAD, t!("Nothing is downloading"), t!("Games you install or update show up here."), Some((icons::BOOKS, t!("Go to your library")))) == Some(true) {
             bp.switch_tab(Tab::Library, f.now, true);
         }
         return 500.0 * s;
     }
+
     let p = ui.painter().clone();
     for (n, d) in active.iter().enumerate() {
         let id = d.app_id;
-        let card = Rect::from_min_size(pos2(left, y), vec2(width, 220.0 * s));
+        let card = Rect::from_min_size(pos2(left, y), vec2(width, 210.0 * s));
         let (k, dy) = appear(ui, bp, n);
         let card = card.translate(vec2(0.0, dy * s));
         let c = paint::faded(ui, card.expand(30.0 * s), k);
         c.painter().rect_filled(card, paint::radius(18.0 * s), Color32::from_black_alpha(110));
-        let art_r = Rect::from_min_size(card.min + vec2(20.0 * s, 20.0 * s), vec2(386.0 * s, 180.0 * s));
+        let art_w = (360.0 * s).min(width * 0.28);
+        let art_r = Rect::from_min_size(card.min + vec2(18.0 * s, 18.0 * s), vec2(art_w, 174.0 * s));
         if !w::paint_cover(&c, art_r, &art::header(id), paint::radius(12.0 * s)) {
-            w::skeleton(&c, &f.t, art_r, paint::radius(12.0 * s));
+            paint::skeleton(&c, &f.t, art_r, paint::radius(12.0 * s));
         }
-        let tx = art_r.right() + 36.0 * s;
+        let tx = art_r.right() + 28.0 * s;
+        let right_reserve = 420.0 * s;
+        let text_w = (card.right() - tx - right_reserve).max(160.0 * s);
         let name = f.app.state.app_name(id).unwrap_or_default().to_string();
-        paint::line(c.painter(), pos2(tx, art_r.top() + 4.0 * s), Align2::LEFT_TOP, &name, w::font_bold(30.0 * s), f.t.text, card.right() - tx - 480.0 * s);
+        paint::line(c.painter(), pos2(tx, art_r.top() + 4.0 * s), Align2::LEFT_TOP, &name, w::font_bold(28.0 * s), f.t.text, text_w);
         let status = if d.paused { t!("Paused").to_string() } else { i18n::tr_dyn(d.activity()) };
-        c.painter().text(pos2(tx, art_r.top() + 52.0 * s), Align2::LEFT_TOP, status, w::font_medium(21.0 * s), if d.paused { f.t.away } else { f.t.accent });
+        c.painter().text(pos2(tx, art_r.top() + 48.0 * s), Align2::LEFT_TOP, status, w::font_medium(20.0 * s), if d.paused { f.t.away } else { f.t.accent });
         let (done, total) = d.shown();
-        let bar = Rect::from_min_size(pos2(tx, art_r.top() + 100.0 * s), vec2(card.right() - tx - 480.0 * s, 12.0 * s));
+        let bar = Rect::from_min_size(pos2(tx, art_r.top() + 94.0 * s), vec2(text_w, 12.0 * s));
         paint::bar(&c, &f.t, bar, d.fraction(), !d.paused);
+        let net_rate = with_downloads(f.app, f.actions, |dl, _| dl.tv_rate(d.speed))
+            .unwrap_or_else(|| format!("{}/s", ui::bytes(d.speed)));
         let mut line = format!("{} / {}", ui::bytes(done), ui::bytes(total));
         if !d.paused && d.speed > 0 {
-            line = format!("{line}   ·   {}/s", ui::bytes(d.speed));
+            let left_bytes = d.download_total.saturating_sub(d.downloaded);
+            let eta = ui::playtime(left_bytes / d.speed / 60 + 1);
+            line = format!("{line}  ·  {net_rate}  ·  {}", t!("{time} left", time = eta));
         }
-        c.painter().text(pos2(tx, bar.bottom() + 16.0 * s), Align2::LEFT_TOP, line, w::font(19.0 * s), f.t.text_dim);
+        if d.disk_speed > 0 && !d.paused {
+            line = format!("{line}  ·  {}", t!("disk {rate}", rate = format!("{}/s", ui::bytes(d.disk_speed))));
+        }
+        paint::line(c.painter(), pos2(tx, bar.bottom() + 14.0 * s), Align2::LEFT_TOP, &line, w::font(18.0 * s), f.t.text_dim, text_w);
         // Buttons on the right.
-        let mut bx = card.right() - 32.0 * s;
+        let mut bx = card.right() - 26.0 * s;
         let (r, cancel) = {
             let label = t!("Cancel");
             let wdt = paint::pill_width(ui, true, label, s);
@@ -1602,8 +2021,8 @@ fn downloads(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
         };
         if !d.verifying() {
             let (label, icon) = if d.paused { (t!("Resume"), icons::PLAY) } else { (t!("Pause"), icons::STOP) };
-            let wdt = paint::pill_width(ui, true, label, s).max(190.0 * s);
-            let at = pos2(r.left() - 18.0 * s - wdt, card.center().y - 36.0 * s);
+            let wdt = paint::pill_width(ui, true, label, s).max(170.0 * s);
+            let at = pos2(r.left() - 14.0 * s - wdt, card.center().y - 36.0 * s);
             let (_, hit) = button(bp, &c, f, Id::unique(("bp-dl-pause", id)), at, wdt, Some(icon), label, Kind::Primary, None);
             if n == 0 {
                 bp.preferred = Some(Id::unique(("bp-dl-pause", id)));
@@ -1616,28 +2035,111 @@ fn downloads(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
             f.app.client.send(if d.verifying() { Command::CancelVerify { app_id: id } } else { Command::CancelDownload { app_id: id } });
         }
         bp.bg_want = bp.bg_want.or(Some(id));
-        y += 220.0 * s + 24.0 * s;
+        y += 210.0 * s + 22.0 * s;
     }
+
+    // Queued downloads with controller-friendly Move Up / Move Down / Remove!
     if !queue.is_empty() {
-        y += 20.0 * s;
+        y += 14.0 * s;
         heading(ui, f, &mut y, t!("Up next"));
         for (n, id) in queue.iter().enumerate() {
-            let row = Rect::from_min_size(pos2(left, y), vec2(width, 120.0 * s));
+            let row = Rect::from_min_size(pos2(left, y), vec2(width, 116.0 * s));
             p.rect_filled(row, paint::radius(14.0 * s), Color32::from_black_alpha(80));
-            let art_r = Rect::from_min_size(row.min + vec2(14.0 * s, 12.0 * s), vec2(206.0 * s, 96.0 * s));
+            let art_r = Rect::from_min_size(row.min + vec2(14.0 * s, 12.0 * s), vec2(198.0 * s, 92.0 * s));
             if !w::paint_cover(ui, art_r, &art::header(*id), paint::radius(10.0 * s)) {
-                w::skeleton(ui, &f.t, art_r, paint::radius(10.0 * s));
+                paint::skeleton(ui, &f.t, art_r, paint::radius(10.0 * s));
             }
             let name = f.app.state.app_name(*id).unwrap_or_default().to_string();
-            paint::line(&p, pos2(art_r.right() + 28.0 * s, row.center().y - 4.0 * s), Align2::LEFT_BOTTOM, &name, w::font_semibold(25.0 * s), f.t.text, width - 700.0 * s);
-            p.text(pos2(art_r.right() + 28.0 * s, row.center().y + 4.0 * s), Align2::LEFT_TOP, t!("Queued · position {n}", n = n + 1), w::font(19.0 * s), f.t.text_dim);
-            let label = t!("Remove");
-            let wdt = paint::pill_width(ui, true, label, s);
-            let (_, hit) = button(bp, ui, f, Id::unique(("bp-q-remove", *id)), pos2(row.right() - 24.0 * s - wdt, row.center().y - 36.0 * s), wdt, Some(icons::TRASH), label, Kind::Secondary, None);
-            if hit.activated {
+            paint::line(&p, pos2(art_r.right() + 24.0 * s, row.center().y - 4.0 * s), Align2::LEFT_BOTTOM, &name, w::font_semibold(24.0 * s), f.t.text, (width - 660.0 * s).max(160.0 * s));
+            p.text(pos2(art_r.right() + 24.0 * s, row.center().y + 4.0 * s), Align2::LEFT_TOP, t!("Queued · position {n}", n = n + 1), w::font(18.0 * s), f.t.text_dim);
+
+            let mut bx = row.right() - 20.0 * s;
+            let rm_label = t!("Remove");
+            let rm_w = paint::pill_width(ui, true, rm_label, s);
+            bx -= rm_w;
+            let (_, rm_hit) = button(bp, ui, f, Id::unique(("bp-q-remove", *id)), pos2(bx, row.center().y - 36.0 * s), rm_w, Some(icons::TRASH), rm_label, Kind::Secondary, None);
+            if rm_hit.activated {
                 f.app.client.send(Command::CancelDownload { app_id: *id });
             }
-            y += 120.0 * s + 14.0 * s;
+            if n + 1 < queue.len() {
+                let dn_w = paint::pill_width(ui, true, "", s).max(84.0 * s);
+                bx -= dn_w + 10.0 * s;
+                let (_, dn_hit) = button(bp, ui, f, Id::unique(("bp-q-down", *id)), pos2(bx, row.center().y - 36.0 * s), dn_w, Some(icons::CARET_DOWN), "", Kind::Secondary, None);
+                if dn_hit.activated {
+                    let mut next = queue.clone();
+                    next.swap(n, n + 1);
+                    f.app.client.send(Command::ReorderDownloads(next));
+                }
+            }
+            if n > 0 {
+                let up_w = paint::pill_width(ui, true, "", s).max(84.0 * s);
+                bx -= up_w + 10.0 * s;
+                let (_, up_hit) = button(bp, ui, f, Id::unique(("bp-q-up", *id)), pos2(bx, row.center().y - 36.0 * s), up_w, Some(icons::CARET_UP), "", Kind::Secondary, None);
+                if up_hit.activated {
+                    let mut next = queue.clone();
+                    next.swap(n - 1, n);
+                    f.app.client.send(Command::ReorderDownloads(next));
+                }
+            }
+            y += 116.0 * s + 14.0 * s;
+        }
+    }
+
+    // Available game updates (matching desktop Downloads).
+    if !updates.is_empty() {
+        y += 18.0 * s;
+        heading(ui, f, &mut y, &t!("Updates available ({n})", n = updates.len()));
+        if updates.len() > 1 {
+            let (_, all_hit) = button(bp, ui, f, Id::unique("bp-dl-update-all"), pos2(left, y), 0.0, Some(icons::DOWNLOAD), t!("Update all"), Kind::Primary, None);
+            if all_hit.activated {
+                for (uid, _, _, lib_path) in &updates {
+                    let lib_path = lib_path.clone();
+                    with_library(f.app, f.actions, |lib, cx| lib.queue_update_game(cx, *uid, lib_path));
+                }
+            }
+            y += 88.0 * s;
+        }
+        for (uid, name, size, lib_path) in &updates {
+            let row = Rect::from_min_size(pos2(left, y), vec2(width, 108.0 * s));
+            p.rect_filled(row, paint::radius(14.0 * s), Color32::from_black_alpha(75));
+            let art_r = Rect::from_min_size(row.min + vec2(14.0 * s, 10.0 * s), vec2(188.0 * s, 88.0 * s));
+            if !w::paint_cover(ui, art_r, &art::header(*uid), paint::radius(10.0 * s)) {
+                paint::skeleton(ui, &f.t, art_r, paint::radius(10.0 * s));
+            }
+            paint::line(&p, pos2(art_r.right() + 24.0 * s, row.center().y - 4.0 * s), Align2::LEFT_BOTTOM, name, w::font_semibold(23.0 * s), f.t.text, (width - 520.0 * s).max(160.0 * s));
+            p.text(pos2(art_r.right() + 24.0 * s, row.center().y + 4.0 * s), Align2::LEFT_TOP, t!("Update required · {size}", size = ui::bytes(*size)), w::font(18.0 * s), f.t.away);
+            let upd_label = t!("Update");
+            let upd_w = paint::pill_width(ui, true, upd_label, s);
+            let (_, hit) = button(bp, ui, f, Id::unique(("bp-upd-go", *uid)), pos2(row.right() - 22.0 * s - upd_w, row.center().y - 36.0 * s), upd_w, Some(icons::DOWNLOAD), upd_label, Kind::Primary, None);
+            if hit.activated {
+                let lib_path = lib_path.clone();
+                with_library(f.app, f.actions, |lib, cx| lib.queue_update_game(cx, *uid, lib_path));
+            }
+            y += 108.0 * s + 12.0 * s;
+        }
+    }
+
+    // Completed / failed transfers this session.
+    if !completed.is_empty() {
+        y += 18.0 * s;
+        heading(ui, f, &mut y, t!("Completed"));
+        for d in completed.iter().take(8) {
+            let name = f.app.state.app_name(d.app_id).unwrap_or_default().to_string();
+            let status = if matches!(d.phase, model::DownloadPhase::Failed) {
+                t!("Failed")
+            } else {
+                t!("Completed")
+            };
+            let icon = if matches!(d.phase, model::DownloadPhase::Failed) {
+                icons::WARNING
+            } else {
+                icons::CHECK
+            };
+            let rect = Rect::from_min_size(pos2(left, y), vec2(width, 62.0 * s));
+            if compact_row(bp, ui, f, Id::unique(("bp-dl-done", d.app_id)), rect, icon, &name, status).activated {
+                open_game(bp, f, d.app_id);
+            }
+            y += 70.0 * s;
         }
     }
     y - top + 30.0 * s
@@ -1680,10 +2182,13 @@ fn friends(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
         let (row, col) = (k / cols, k % cols);
         let r = Rect::from_min_size(pos2(left + col as f32 * (card_w + gap), y + row as f32 * (card_h + gap)), vec2(card_w, card_h));
         let hit = bp.focus.item(ui, Id::unique(("bp-friend", fr.steam_id)), r, clip, Place::Page);
+        if hit.activated {
+            bp.open(Page::Friend(fr.steam_id), f.now);
+        }
         if r.bottom() < clip.top() || r.top() > clip.bottom() {
             continue;
         }
-        let (a, dy) = appear(ui, bp, k);
+        let (a, dy) = appear(ui, bp, k.min(10));
         let r = r.translate(vec2(0.0, dy * s));
         let c = paint::faded(ui, r.expand(30.0 * s), a);
         let shown = paint::grow(r, 1.0 + 0.03 * hit.glow);
@@ -1695,19 +2200,19 @@ fn friends(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32) -> f32 {
             c.painter().circle_filled(av.center(), 42.0 * s, f.t.raised);
         }
         c.painter().circle_stroke(av.center(), 45.0 * s, egui::Stroke::new(3.0 * s, color));
+        let unread_n = f.app.state.unread.get(&fr.steam_id).copied().unwrap_or(0);
         let tx = av.right() + 26.0 * s;
-        let tw = shown.right() - tx - 20.0 * s;
+        let tw = shown.right() - tx - if unread_n > 0 { 68.0 * s } else { 20.0 * s };
         paint::line(c.painter(), pos2(tx, shown.center().y - 4.0 * s), Align2::LEFT_BOTTOM, &fr.display_name(), w::font_semibold(26.0 * s), if rank(fr) == 3 { f.t.text_dim } else { f.t.text }, tw);
         paint::line(c.painter(), pos2(tx, shown.center().y + 4.0 * s), Align2::LEFT_TOP, &crate::shell::status_text(&f.app.state, fr), w::font(19.0 * s), color, tw);
+        if unread_n > 0 {
+            paint::badge(c.painter(), pos2(shown.right() - 18.0 * s, shown.center().y), Align2::RIGHT_CENTER, &unread_n.min(99).to_string(), s, f.t.accent, f.t.on_accent);
+        }
         if hit.focused {
             bp.focus.ring_around(shown, 16.0 * s);
             if let Some(g) = fr.game_app_id {
                 bp.bg_want = Some(g);
             }
-        }
-        // A on a friend: their page (message, join, invite, profile).
-        if hit.activated {
-            bp.open(Page::Friend(fr.steam_id), f.now);
         }
     }
     let rows = list.len().div_ceil(cols);
@@ -1802,7 +2307,7 @@ fn friend_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, top: f32, id: mo
         }
     }
     if next(bp, ui, f, "profile", icons::USER_CIRCLE, t!("View profile"), Kind::Secondary) {
-        bp.open(Page::Embedded("profile".into(), Some(id.to_string())), f.now);
+        bp.open(Page::Profile(id), f.now);
     }
     y + 112.0 * s - top
 }
@@ -1872,10 +2377,8 @@ fn chat_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, _top: f32, target:
     let input_id = chat_input_id();
     let want_keys = bp.chat_keys;
     let k = super::focus::ease(ui.ctx().animate_bool_with_time(Id::unique(("bp-chat-keys", target)), want_keys, 0.25));
-    let key = 74.0 * s;
-    let unit = key + 10.0 * s;
-    let keys_w = 11.0 * unit - 10.0 * s;
-    let keys_h = 5.0 * unit + 40.0 * s;
+    let keys_max_w = (right - left).min(960.0 * s);
+    let keys_h = super::osk::panel_height(s, keys_max_w, bp.osk);
     let panel_top = f.view.bottom() - keys_h * k;
     let mut send = std::mem::take(&mut bp.send_now);
     if k > 0.01 {
@@ -1884,17 +2387,18 @@ fn chat_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, _top: f32, target:
         p.rect_filled(panel, 0.0, f.t.chrome.gamma_multiply(0.96));
         let edge = Rect::from_min_size(panel.min, vec2(panel.width(), 2.0 * s));
         w::gradient(&p, edge, f.t.accent.gamma_multiply(0.0), f.t.accent.gamma_multiply(0.8), true);
-        let mut ky = panel_top + 26.0 * s;
+        let mut ky = panel_top + 22.0 * s;
         let mut keys_ui = paint::faded(ui, panel, k);
         if !want_keys {
             keys_ui.disable();
         }
-        match keyboard(bp, &mut keys_ui, f, f.view.center().x - keys_w / 2.0, &mut ky, t!("Send")) {
-            Some(Key::Char(ch)) => bp.message.push(ch),
-            Some(Key::Del) => {
+        match super::osk::draw(bp, &mut keys_ui, f, f.view.center().x - keys_max_w / 2.0, keys_max_w, &mut ky, t!("Send")) {
+            Some(super::osk::Key::Char(ch)) => bp.message.push(ch),
+            Some(super::osk::Key::Del) => {
                 bp.message.pop();
             }
-            Some(Key::Go) => send = true,
+            Some(super::osk::Key::Clear) => bp.message.clear(),
+            Some(super::osk::Key::Go) => send = true,
             None => {}
         }
     }
@@ -1985,17 +2489,47 @@ fn chat_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, _top: f32, target:
     }
     let pad = 22.0 * s;
     let wrap = (area.width() * 0.68).max(200.0 * s);
-    let body = w::font(22.0 * s);
-    let mut laid = Vec::with_capacity(messages.len());
-    let mut total = pad;
-    for (from, time, text) in &messages {
-        let job = egui::text::LayoutJob::simple(text.clone(), body.clone(), f.t.text, wrap);
-        let g = ui.fonts_mut(|fonts| fonts.layout_job(job));
-        let size = g.size() + vec2(36.0 * s, 24.0 * s);
-        laid.push((total, size, *from == me, g, *time));
-        total += size.y + 30.0 * s;
+    let wrap_tenths = (wrap * 10.0).round() as i32;
+    let font_tenths = (22.0 * s * 10.0).round() as i32;
+    let msg_fingerprint = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        messages.len().hash(&mut h);
+        for (from, time, text) in &messages {
+            from.hash(&mut h);
+            time.hash(&mut h);
+            text.hash(&mut h);
+        }
+        h.finish()
+    };
+    let cache_valid = bp.chat_layout_cache.as_ref().is_some_and(|c| {
+        c.target == target
+            && c.fingerprint == msg_fingerprint
+            && c.wrap_tenths == wrap_tenths
+            && c.font_tenths == font_tenths
+    });
+    if !cache_valid {
+        let body = w::font(22.0 * s);
+        let mut laid = Vec::with_capacity(messages.len());
+        let mut total = pad;
+        for (from, time, text) in &messages {
+            let job = egui::text::LayoutJob::simple(text.clone(), body.clone(), f.t.text, wrap);
+            let g = ui.fonts_mut(|fonts| fonts.layout_job(job));
+            let size = g.size() + vec2(36.0 * s, 24.0 * s);
+            laid.push((total, size, *from == me, g, *time));
+            total += size.y + 30.0 * s;
+        }
+        total += pad - 8.0 * s;
+        bp.chat_layout_cache = Some(super::ChatLayoutCache {
+            target,
+            fingerprint: msg_fingerprint,
+            wrap_tenths,
+            font_tenths,
+            laid,
+            total,
+        });
     }
-    total += pad - 8.0 * s;
+    let total = bp.chat_layout_cache.as_ref().unwrap().total;
     let view_h = area.height();
     let max = (total - view_h).max(0.0);
     let key = format!("chat-{target:?}");
@@ -2029,43 +2563,49 @@ fn chat_page(bp: &mut BigPicture, ui: &mut Ui, f: &mut Frame, _top: f32, target:
     if messages.is_empty() {
         p.text(area.center(), Align2::CENTER_CENTER, t!("No messages yet"), w::font(22.0 * s), f.t.text_faint);
     }
-    for ((at, size, mine, g, time), (_, _, text)) in laid.into_iter().zip(&messages) {
-        let y = area.top() + at - pos;
-        if y > area.bottom() || y + size.y + 30.0 * s < area.top() {
-            continue;
-        }
-        let bx = if mine { area.right() - pad - size.x } else { area.left() + pad };
-        let bubble = Rect::from_min_size(pos2(bx, y), size);
-        let link = text.split_whitespace().find_map(|word| {
-            crate::builtin::hub::route(word.trim_matches(|ch| matches!(ch, '(' | ')' | '<' | '>' | ',' | '.')))
-        });
-        let message_id = Id::unique(("bp-message", target, time, at.to_bits()));
-        let response = if let Some(link) = link {
-            let hit = bp.focus.item(ui, message_id, bubble.intersect(area), area, Place::Page);
-            if hit.focused {
-                bp.focus.ring_around(bubble.intersect(area), 16.0 * s);
+    // Borrow cache temporarily without cloning the entire layout vector.
+    let cache = bp.chat_layout_cache.take();
+    if let Some(cache) = cache {
+        for ((at, size, mine, g, time), (_, _, text)) in cache.laid.iter().zip(&messages) {
+            let (at, size, mine, time) = (*at, *size, *mine, *time);
+            let y = area.top() + at - pos;
+            if y > area.bottom() || y + size.y + 30.0 * s < area.top() {
+                continue;
             }
-            if hit.activated {
-                let (page, arg) = link.to_page();
-                f.actions.push(Action::Navigate { page, arg });
-            }
-            hit.response
-        } else {
-            let visible = bubble.intersect(area);
-            visible.is_positive().then(|| ui.interact(visible, message_id, egui::Sense::click()))
-        };
-        if let Some(response) = response {
-            response.context_menu(|ui| {
-                if ui.button(t!("Copy")).clicked() {
-                    ui.ctx().copy_text(text.clone());
-                    ui.close();
-                }
+            let bx = if mine { area.right() - pad - size.x } else { area.left() + pad };
+            let bubble = Rect::from_min_size(pos2(bx, y), size);
+            let link = text.split_whitespace().find_map(|word| {
+                crate::builtin::hub::route(word.trim_matches(|ch| matches!(ch, '(' | ')' | '<' | '>' | ',' | '.')))
             });
+            let message_id = Id::unique(("bp-message", target, time, at.to_bits()));
+            let response = if let Some(link) = link {
+                let hit = bp.focus.item(ui, message_id, bubble.intersect(area), area, Place::Page);
+                if hit.focused {
+                    bp.focus.ring_around(bubble.intersect(area), 16.0 * s);
+                }
+                if hit.activated {
+                    let (page, arg) = link.to_page();
+                    f.actions.push(Action::Navigate { page, arg });
+                }
+                hit.response
+            } else {
+                let visible = bubble.intersect(area);
+                visible.is_positive().then(|| ui.interact(visible, message_id, egui::Sense::click()))
+            };
+            if let Some(response) = response {
+                response.context_menu(|ui| {
+                    if ui.button(t!("Copy")).clicked() {
+                        ui.ctx().copy_text(text.clone());
+                        ui.close();
+                    }
+                });
+            }
+            clip.rect_filled(bubble, paint::radius(16.0 * s), if mine { f.t.accent.gamma_multiply(0.55) } else { f.t.raised });
+            clip.galley(bubble.min + vec2(18.0 * s, 12.0 * s), g.clone(), f.t.text);
+            let (anchor, align) = if mine { (bubble.right_bottom() + vec2(-4.0 * s, 4.0 * s), Align2::RIGHT_TOP) } else { (bubble.left_bottom() + vec2(4.0 * s, 4.0 * s), Align2::LEFT_TOP) };
+            clip.text(anchor, align, ui::ago(time), w::font(15.0 * s), f.t.text_faint);
         }
-        clip.rect_filled(bubble, paint::radius(16.0 * s), if mine { f.t.accent.gamma_multiply(0.55) } else { f.t.raised });
-        clip.galley(bubble.min + vec2(18.0 * s, 12.0 * s), g, f.t.text);
-        let (anchor, align) = if mine { (bubble.right_bottom() + vec2(-4.0 * s, 4.0 * s), Align2::RIGHT_TOP) } else { (bubble.left_bottom() + vec2(4.0 * s, 4.0 * s), Align2::LEFT_TOP) };
-        clip.text(anchor, align, ui::ago(time), w::font(15.0 * s), f.t.text_faint);
+        bp.chat_layout_cache = Some(cache);
     }
     // Where you are in a long conversation.
     if max > 0.0 {
