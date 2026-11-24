@@ -242,6 +242,20 @@ impl BigPicture {
         self.enter(ctx);
     }
 
+    /// Returns whether the desktop window should be shown and raised.
+    fn handle_pad_press(&mut self, ctx: &egui::Context, press: Press, focused: bool, playing: bool) -> bool {
+        if focused && self.active {
+            self.queued.push(press);
+        } else if press == Press::Guide && (focused || !playing) {
+            if !self.active {
+                self.enter_requested(ctx, false, false);
+            }
+            self.device = Device::Pad;
+            return true;
+        }
+        false
+    }
+
     pub fn navigate(&mut self, ctx: &egui::Context, page: &str, arg: Option<&str>) -> bool {
         if !self.active {
             return false;
@@ -379,32 +393,30 @@ fn id_pair(arg: &str) -> Option<(GroupChatId, ChatRoomId)> {
     Some((group.parse().ok()?, room.parse().ok()?))
 }
 
-/// Read controllers every frame. Outside Big Picture, Guide opens it.
-pub fn poll(app: &mut SteamApp, ctx: &egui::Context, visible: bool) {
+/// Drain controller events even when the root window has no frame to draw.
+pub fn poll(app: &mut SteamApp, ctx: &egui::Context, visible: bool) -> bool {
     input::tune(app.prefs.bigpicture_swap_ab, app.prefs.bigpicture_repeat, app.prefs.bigpicture_stick);
-    let accepts_input = visible && app.state.phase == client::state::Phase::LoggedIn
-        && ctx.input(|i| i.viewport().focused).unwrap_or(true);
-    let mut events = Vec::new();
-    if let Some(rx) = &app.bigpicture.pad {
-        while let Ok(e) = rx.try_recv() {
-            events.push(e);
-        }
-    }
+    let signed_in = app.state.phase == client::state::Phase::LoggedIn;
+    let focused = visible && ctx.input(|i| {
+        let viewport = i.viewport();
+        viewport.focused.unwrap_or(i.raw.focused) && viewport.minimized != Some(true)
+    });
+    // A game launched by Aurora owns Guide while the client is in the background.
+    let playing = app.state.playing.is_some();
     let bp = &mut app.bigpicture;
-    for e in events {
-        match e {
+    let Some(rx) = bp.pad.take() else { return false };
+    let mut show_window = false;
+    for event in rx.try_iter() {
+        match event {
             PadEvent::Connected(n) => bp.pads = n,
-            // Presses only count while our window is in front (not in a game).
-            PadEvent::Press(p) if accepts_input => {
-                if bp.active {
-                    bp.queued.push(p);
-                } else if p == Press::Guide {
-                    bp.enter(ctx);
-                }
+            PadEvent::Press(press) if signed_in => {
+                show_window |= bp.handle_pad_press(ctx, press, focused, playing);
             }
             PadEvent::Press(_) => {}
         }
     }
+    bp.pad = Some(rx);
+    show_window
 }
 
 /// Size everything for the screen: 1.0 on a 1080p TV, bigger on 4K, smaller in a window.
@@ -944,5 +956,37 @@ fn glyph_for(p: Press, pad: bool) -> (&'static str, bool) {
         (Press::QuickAccess, false) => ("F2", false),
         (_, true) => ("LB", false),
         (_, false) => ("Q", false),
+    }
+}
+
+#[cfg(test)]
+mod guide_tests {
+    use super::*;
+
+    #[test]
+    fn guide_opens_fullscreen_big_picture_from_the_desktop() {
+        let ctx = egui::Context::default();
+        let mut bp = BigPicture { windowed: true, ..Default::default() };
+
+        assert!(bp.handle_pad_press(&ctx, Press::Guide, false, false));
+        assert!(bp.active);
+        assert!(!bp.is_windowed());
+        assert_eq!(bp.device, Device::Pad);
+        assert!(bp.queued.is_empty());
+    }
+
+    #[test]
+    fn guide_restores_unfocused_big_picture_without_opening_the_menu() {
+        let ctx = egui::Context::default();
+        let mut bp = BigPicture { active: true, tab: Tab::Library, ..Default::default() };
+
+        assert!(!bp.handle_pad_press(&ctx, Press::A, false, false));
+        assert!(!bp.handle_pad_press(&ctx, Press::Guide, false, true));
+        assert!(bp.handle_pad_press(&ctx, Press::Guide, false, false));
+        assert_eq!(bp.tab.index(), Tab::Library.index());
+        assert!(bp.queued.is_empty());
+
+        assert!(!bp.handle_pad_press(&ctx, Press::Guide, true, true));
+        assert_eq!(bp.queued, [Press::Guide]);
     }
 }

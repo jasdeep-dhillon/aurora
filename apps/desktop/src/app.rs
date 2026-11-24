@@ -1126,6 +1126,14 @@ impl eframe::App for SteamApp {
             }
         }
         self.apply_actions(ctx, actions);
+        let visible = !self.hidden && frame.is_window_attached();
+        if crate::bigpicture::poll(self, ctx, visible) {
+            self.show_window(ctx, frame, None);
+            // Winit's Focus command has no implementation on Wayland.
+            if self.tray.wayland() && !ctx.input(|i| i.raw.focused) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+            }
+        }
         crate::overlay::logic(self, ctx);
     }
 
@@ -1218,7 +1226,6 @@ impl eframe::App for SteamApp {
         }
         self.exit_dialog(&ctx);
         let visible = !self.hidden && frame.is_window_attached();
-        crate::bigpicture::poll(self, &ctx, visible);
         if !visible {
             // Keep the friends window, overlay and notifications alive while hidden.
             if !self.tray.wayland() {

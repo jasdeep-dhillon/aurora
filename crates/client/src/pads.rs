@@ -666,6 +666,8 @@ pub fn stop() {}
 pub use platform::{start, stop};
 #[cfg(windows)]
 pub(crate) use platform::{native_xinput_slots, needs_steam_input_client};
+#[cfg(windows)]
+pub use platform::listen_for_controller_guide;
 
 #[cfg(windows)]
 mod platform {
@@ -696,6 +698,30 @@ mod platform {
 
     static USERS: AtomicUsize = AtomicUsize::new(0);
     static RUNNING: Mutex<bool> = Mutex::new(false);
+    type GuideListener = Box<dyn Fn() -> bool + Send>;
+    static GUIDE_LISTENER: Mutex<Option<GuideListener>> = Mutex::new(None);
+
+    /// Keep the desktop Guide shortcut available even outside Controller Settings.
+    pub fn listen_for_controller_guide(on_press: impl Fn() -> bool + Send + 'static) {
+        *GUIDE_LISTENER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(on_press));
+        ensure_ui_reader();
+    }
+
+    fn reader_needed() -> bool {
+        USERS.load(Ordering::Acquire) != 0 || ui_active()
+            || GUIDE_LISTENER.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    fn update_guide(was_down: &mut bool, buttons: u16) {
+        let down = buttons & shm::GUIDE != 0;
+        if down && !*was_down {
+            let mut listener = GUIDE_LISTENER.lock().unwrap_or_else(|e| e.into_inner());
+            if listener.as_ref().is_some_and(|notify| !notify()) {
+                *listener = None;
+            }
+        }
+        *was_down = down;
+    }
 
     pub fn ensure_ui_reader() {
         let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
@@ -740,6 +766,7 @@ mod platform {
         vendor: u16,
         product: u16,
         has_gyro: bool,
+        guide_down: bool,
         last_shm: State,
         rumble: (u16, u16),
         rumbled: Instant,
@@ -840,9 +867,9 @@ mod platform {
         let mut scanned: Option<Instant> = None;
         let mut real_xinput_count = 0usize;
         loop {
-            if USERS.load(Ordering::Acquire) == 0 && !ui_active() {
+            if !reader_needed() {
                 let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-                if USERS.load(Ordering::Acquire) == 0 && !ui_active() {
+                if !reader_needed() {
                     for o in pads.drain(..) {
                         unsafe { (sdl.close)(o.gp) };
                     }
@@ -895,6 +922,7 @@ mod platform {
                             vendor,
                             product,
                             has_gyro,
+                            guide_down: false,
                             last_shm: State::default(),
                             rumble: (0, 0),
                             rumbled: Instant::now(),
@@ -918,6 +946,7 @@ mod platform {
                     return false;
                 }
                 let (buttons, misc, touchpad, paddles, sticks, triggers, motion) = sdl_dyn::read_raw(sdl, o.gp);
+                update_guide(&mut o.guide_down, buttons);
                 let raw_state = {
                     let mut st = State {
                         packet: 0,
@@ -1024,7 +1053,8 @@ mod platform {
                     note: None,
                 };
             }
-            std::thread::sleep(Duration::from_millis(if game_active { 2 } else { 12 }));
+            let interval = if game_active { 2 } else if pads.is_empty() { 100 } else { 12 };
+            std::thread::sleep(Duration::from_millis(interval));
         }
     }
 
@@ -1056,7 +1086,11 @@ mod platform {
             if m.is_null() {
                 continue;
             }
-            let g = unsafe { GetProcAddress(m, c"XInputGetState".as_ptr()) };
+            // The extended function returns the Guide bit alongside the normal buttons.
+            let mut g = unsafe { GetProcAddress(m, 100usize as *const c_char) };
+            if g.is_null() {
+                g = unsafe { GetProcAddress(m, c"XInputGetState".as_ptr()) };
+            }
             if !g.is_null() {
                 let s = unsafe { GetProcAddress(m, c"XInputSetState".as_ptr()) };
                 let get: GetState = unsafe { std::mem::transmute(g) };
@@ -1065,10 +1099,11 @@ mod platform {
                 break;
             }
         }
+        let mut guide_down = [false; 4];
         loop {
-            if !ui_active() {
+            if !reader_needed() {
                 let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-                if !ui_active() {
+                if !reader_needed() {
                     *running = false;
                     return;
                 }
@@ -1077,15 +1112,16 @@ mod platform {
             let rumble_target = rumble_lock().lock().unwrap_or_else(|e| e.into_inner()).take();
             let mut list = Vec::new();
             if let Some((get, set)) = funcs {
-                for i in 0..4u32 {
+                for (i, guide) in guide_down.iter_mut().enumerate() {
                     let mut xp = XPad::default();
-                    if unsafe { get(i, &mut xp) } == 0 {
+                    if unsafe { get(i as u32, &mut xp) } == 0 {
+                        update_guide(guide, xp.buttons);
                         let id = format!("xinput-{i}");
                         if rumble_target.as_deref() == Some(id.as_str()) && cal.rumble_enabled
                             && let Some(set_fn) = set
                         {
                             let mut v = [0x5000u16, 0x9000u16];
-                            unsafe { set_fn(i, &mut v) };
+                            unsafe { set_fn(i as u32, &mut v) };
                         }
                         let live = build_live_input(
                             xp.buttons,
@@ -1110,22 +1146,27 @@ mod platform {
                             vendor_id: 0x045e,
                             product_id: 0,
                             connection: ConnectionKind::Unknown,
-                            slot: Some(i as usize),
+                            slot: Some(i),
                             battery_percent: None,
                             backend: "XInput",
                             has_rumble: set.is_some(),
                             has_gyro: false,
                             live,
                         });
+                    } else {
+                        *guide = false;
                     }
                 }
             }
-            *snapshot_lock().lock().unwrap_or_else(|e| e.into_inner()) = DetectionSnapshot {
-                backend: "XInput",
-                controllers: list,
-                note: Some("SDL3.dll is missing next to Aurora; only Xbox XInput controllers are visible.".into()),
-            };
-            std::thread::sleep(Duration::from_millis(16));
+            let interval = if list.is_empty() { 100 } else { 16 };
+            if ui_active() {
+                *snapshot_lock().lock().unwrap_or_else(|e| e.into_inner()) = DetectionSnapshot {
+                    backend: "XInput",
+                    controllers: list,
+                    note: Some("SDL3.dll is missing next to Aurora; only Xbox XInput controllers are visible.".into()),
+                };
+            }
+            std::thread::sleep(Duration::from_millis(interval));
         }
     }
 }
