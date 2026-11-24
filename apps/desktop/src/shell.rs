@@ -603,7 +603,11 @@ pub(crate) fn open_notification(state: &client::State, n: &model::Notification, 
 /// The picture for a notification: which game it's about or who sent it,
 /// with the kind of notification as a small badge, like Steam's.
 fn notification_picture(ui: &Ui, t: &Theme, state: &client::State, n: &model::Notification, icon: &str, rect: Rect) {
-    let radius = egui::CornerRadius::same(6);
+    notification_picture_scaled(ui, t, state, n, icon, rect, 1.0);
+}
+
+pub(crate) fn notification_picture_scaled(ui: &Ui, t: &Theme, state: &client::State, n: &model::Notification, icon: &str, rect: Rect, s: f32) {
+    let radius = egui::CornerRadius::same((6.0 * s).round().clamp(4.0, 255.0) as u8);
     let game = match n.kind {
         4 if n.app_id == Some(753) => n.source_app,
         _ => n.app_id,
@@ -624,14 +628,14 @@ fn notification_picture(ui: &Ui, t: &Theme, state: &client::State, n: &model::No
     let p = ui.painter();
     if !drawn {
         p.rect_filled(rect, radius, t.raised);
-        p.text(rect.center(), Align2::CENTER_CENTER, icon, w::font(20.0), if n.read { t.text_dim } else { t.accent });
+        p.text(rect.center(), Align2::CENTER_CENTER, icon, w::font(20.0 * s), if n.read { t.text_dim } else { t.accent });
         return;
     }
     // Kind badge in the corner.
-    let c = rect.right_bottom() - vec2(3.0, 3.0);
-    p.circle_filled(c, 10.0, t.chrome);
-    p.circle_filled(c, 8.5, if n.read { t.raised } else { t.accent });
-    p.text(c, Align2::CENTER_CENTER, icon, w::font(10.5), if n.read { t.text_dim } else { t.on_accent });
+    let c = rect.right_bottom() - vec2(3.0 * s, 3.0 * s);
+    p.circle_filled(c, 10.5 * s, t.chrome);
+    p.circle_filled(c, 8.8 * s, if n.read { t.raised } else { t.accent });
+    p.text(c, Align2::CENTER_CENTER, icon, w::font(10.5 * s), if n.read { t.text_dim } else { t.on_accent });
 }
 
 /// The bell: Steam notifications with an unread badge.

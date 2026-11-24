@@ -9,10 +9,15 @@
 
 mod focus;
 mod input;
+mod manage;
 mod menu;
+mod osk;
 mod paint;
+mod profile;
+pub(crate) mod quick_access;
 mod screens;
 mod settings;
+pub(crate) mod system;
 
 use crate::app::SteamApp;
 use egui::{Align2, Color32, Id, Rect, Ui, pos2, vec2};
@@ -54,28 +59,37 @@ impl Tab {
 
 /// A screen: a tab, or something opened on top of one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum ChatTarget {
+pub(crate) enum ChatTarget {
     Friend(SteamId),
     Group(GroupChatId, ChatRoomId),
 }
 
 #[derive(Clone, PartialEq, Debug)]
-enum Page {
+pub(crate) enum Page {
     Tab(Tab),
     Game(AppId),
+    GameManage(AppId),
     Controller(AppId),
-    QuickAccess,
     Notifications,
     #[cfg(target_os = "linux")]
     Compatibility(AppId),
     StoreApp(AppId),
     Review(AppId, String),
+    News(AppId, usize),
     Search,
     /// Screenshots of a store page, at one of them.
     Shots(AppId, usize),
     Settings,
     /// A friend: message, join, invite, profile.
     Friend(SteamId),
+    /// Native Big Picture profile pages (your own or another user's).
+    Profile(SteamId),
+    ProfileGames(SteamId),
+    ProfileBadges(SteamId),
+    ProfileCards(SteamId, AppId, bool),
+    ProfileReviews(SteamId),
+    ProfileGroups(SteamId),
+    ProfileEdit,
     /// A conversation with a friend.
     Group(GroupChatId),
     Chat(ChatTarget),
@@ -90,6 +104,74 @@ impl Page {
     fn key(&self) -> String {
         format!("{self:?}")
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum LibrarySort {
+    #[default]
+    Title,
+    Recent,
+    Playtime,
+    Size,
+}
+
+impl LibrarySort {
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Title => Self::Recent,
+            Self::Recent => Self::Playtime,
+            Self::Playtime => Self::Size,
+            Self::Size => Self::Title,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Title => t!("A–Z"),
+            Self::Recent => t!("Recently played"),
+            Self::Playtime => t!("Most played"),
+            Self::Size => t!("Size on disk"),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum LibraryFilter {
+    Installed,
+    Favorites,
+    RunsHere,
+    All,
+    Collection(String),
+}
+
+pub(crate) struct LibraryEntry {
+    pub id: AppId,
+    pub name: String,
+    pub installed: bool,
+    pub runs: bool,
+    pub favorite: bool,
+    pub last_played: u64,
+    pub playtime_minutes: u64,
+    pub size_on_disk: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct LibraryCache {
+    pub fingerprint: u64,
+    pub all_games: Vec<LibraryEntry>,
+    pub collections: Vec<(String, std::collections::BTreeSet<AppId>)>,
+    pub n_installed: usize,
+    pub n_favorites: usize,
+    pub n_runs: usize,
+}
+
+pub(crate) struct ChatLayoutCache {
+    pub target: ChatTarget,
+    pub fingerprint: u64,
+    pub wrap_tenths: i32,
+    pub font_tenths: i32,
+    pub laid: Vec<(f32, egui::Vec2, bool, std::sync::Arc<egui::Galley>, u64)>,
+    pub total: f32,
 }
 
 #[derive(Default)]
@@ -113,7 +195,11 @@ pub struct BigPicture {
     page_since: f64,
     slide: f32,
     menu: Option<menu::Menu>,
+    quick_access: Option<quick_access::QuickAccess>,
+    pub(crate) system: system::SystemMonitor,
+    pub(crate) sys_status: system::SystemStatus,
     pad: Option<mpsc::Receiver<PadEvent>>,
+    last_tuned: Option<(bool, u8, u8)>,
     /// Controller presses waiting for the next frame.
     queued: Vec<Press>,
     pads: usize,
@@ -124,21 +210,35 @@ pub struct BigPicture {
     installed_only: Option<bool>,
     /// Library filter: only games that run on this computer.
     this_os_only: bool,
+    pub(crate) library_filter: Option<LibraryFilter>,
+    pub(crate) library_sort: LibrarySort,
+    pub(crate) library_query: String,
+    pub(crate) library_search_open: bool,
+    pub(crate) library_cache_rev: u64,
+    pub(crate) library_cache: Option<LibraryCache>,
     /// The install screen's choices: (game, library folder, desktop shortcut).
     install: Option<(AppId, std::path::PathBuf, bool, &'static str)>,
+    pub(crate) install_plan_cache: Option<(AppId, &'static str, crate::builtin::library::InstallPlan)>,
+    #[cfg(target_os = "linux")]
+    pub(crate) compat_cache: Option<(AppId, Option<(bool, bool)>, Option<String>, Vec<(String, String)>)>,
+    pub(crate) manage: manage::ManageState,
+    pub(crate) profile: profile::ProfileState,
     /// A trailer was playing (stopped when its page closes).
     video_on: bool,
     // Search (on-screen keyboard).
     query: String,
     query_changed: f64,
     submitted: String,
-    cyrillic: bool,
+    pub(crate) osk: osk::OskState,
     /// Chat: the message being typed, Enter pressed on a real keyboard, and
     /// conversations whose history was asked for.
     message: String,
     send_now: bool,
-    /// Background art: games and when each started fading in.
-    bg: Vec<(AppId, f64)>,
+    pub(crate) chat_layout_cache: Option<ChatLayoutCache>,
+    /// Background art: current & outgoing game with crossfade start time.
+    bg_cur: Option<AppId>,
+    bg_prev: Option<AppId>,
+    bg_since: f64,
     /// The game whose art the background should show this frame.
     bg_want: Option<AppId>,
     game_backdrop: Option<String>,
@@ -146,6 +246,8 @@ pub struct BigPicture {
     asked: HashSet<AppId>,
     /// Sliding highlight under the selected tab.
     tab_pill: Option<Rect>,
+    /// How hidden the top bar is when scrolled down (0.0 = shown, 1.0 = tucked away).
+    pub(crate) bar_hide: f32,
     /// When the screenshot viewer last changed picture, and which way.
     shot_since: (f64, f32),
     /// The on-screen key pressed last, and when (it pops).
@@ -211,6 +313,8 @@ impl BigPicture {
                 }
                 "game" => bp.stack.push(Page::Game(id)),
                 "install" => bp.stack.push(Page::Install(id)),
+                "profile" => bp.stack.push(Page::Profile(wide)),
+                "profile-edit" => bp.stack.push(Page::ProfileEdit),
                 _ => {}
             }
         }
@@ -228,9 +332,30 @@ impl BigPicture {
         self.tab = Tab::Home;
         self.stack.clear();
         self.menu = None;
+        self.quick_access = None;
         self.focus.current = None;
         self.chat_keys = false;
         ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+
+    pub fn open_quick_access(&mut self, ctx: &egui::Context, section: quick_access::Section, now: f64) {
+        self.menu = None;
+        self.system.refresh_now(Some(ctx));
+        if let Some(qa) = &mut self.quick_access {
+            qa.section = section;
+        } else {
+            self.quick_access = Some(quick_access::QuickAccess::new(now, section));
+        }
+        ctx.request_repaint();
+    }
+
+    pub fn open_menu(&mut self, now: f64) {
+        self.quick_access = None;
+        self.menu = Some(menu::Menu::new(now));
+    }
+
+    pub fn is_deck_preview(&self) -> bool {
+        self.deck_preview
     }
 
     pub fn enter_requested(&mut self, ctx: &egui::Context, deck_preview: bool, windowed: bool) {
@@ -256,6 +381,10 @@ impl BigPicture {
         false
     }
 
+    pub fn on_event(&mut self, event: &client::Event, client: &client::Client, my_id: SteamId, actions: &mut Vec<Action>) {
+        self.profile.on_event(event, client, my_id, actions);
+    }
+
     pub fn navigate(&mut self, ctx: &egui::Context, page: &str, arg: Option<&str>) -> bool {
         if !self.active {
             return false;
@@ -269,7 +398,14 @@ impl BigPicture {
             ("library", None) => self.switch_tab(Tab::Library, now, true),
             ("store", None) => self.switch_tab(Tab::Store, now, true),
             ("settings", None) => self.open(Page::Settings, now),
-            ("profile" | "community" | "workshop" | "hub" | "inventory" | "workshop_item" | "guides" | "discussions" | "thread" | "achievements" | "user_files", _) => self.open(Page::Embedded(page.into(), arg.map(str::to_owned)), now),
+            ("profile", arg) => {
+                let (dest, edit_sec) = profile::parse_route(0, arg);
+                if let Some(sec) = edit_sec {
+                    self.profile.edit.section = sec;
+                }
+                self.open(dest, now);
+            }
+            ("community" | "workshop" | "hub" | "inventory" | "workshop_item" | "guides" | "discussions" | "thread" | "achievements" | "user_files", _) => self.open(Page::Embedded(page.into(), arg.map(str::to_owned)), now),
             _ => {
                 self.leave(ctx);
                 return false;
@@ -300,6 +436,7 @@ impl BigPicture {
         }
         let was_active = std::mem::replace(&mut self.active, false);
         self.menu = None;
+        self.quick_access = None;
         self.queued.clear();
         self.modal_keys.clear();
         if was_active && !self.windowed {
@@ -326,8 +463,8 @@ impl BigPicture {
     }
 
     fn remember(&mut self) {
-        // Only page items: a tab remembered for a page would switch tabs on return.
-        if let Some(c) = self.focus.current.filter(|c| !TABS.iter().any(|t| tab_id(*t) == *c)) {
+        // Only page items: a top-bar item remembered for a page would jump back to the bar on return.
+        if let Some(c) = self.focus.current.filter(|c| !is_bar_id(*c)) {
             self.memory.insert(self.page().key(), c);
         }
     }
@@ -340,12 +477,24 @@ impl BigPicture {
     }
 
     /// Open a page on top of the current one.
-    fn open(&mut self, page: Page, now: f64) {
+    pub(crate) fn open(&mut self, page: Page, now: f64) {
         self.remember();
         if matches!(page, Page::Chat(_)) {
             self.message.clear();
             self.chat_for = None;
+            self.chat_layout_cache = None;
         }
+        if matches!(page, Page::Install(_)) {
+            self.install_plan_cache = None;
+        }
+        #[cfg(target_os = "linux")]
+        if matches!(page, Page::Compatibility(_)) {
+            self.compat_cache = None;
+        }
+        if matches!(page, Page::GameManage(_)) {
+            self.manage.app_id = None;
+        }
+        self.profile.on_open_page(&page);
         // A fresh visit starts at the top.
         self.memory.remove(&page.key());
         self.scroll.retain(|k, _| !k.starts_with(&page.key()));
@@ -353,7 +502,20 @@ impl BigPicture {
         self.arrive(now, 1.0);
     }
 
-    fn back(&mut self, now: f64) {
+    /// Replace the top stacked page in place (e.g. Normal ↔ Foil card view).
+    pub(crate) fn replace_top(&mut self, page: Page, now: f64) {
+        self.profile.on_open_page(&page);
+        self.memory.remove(&page.key());
+        self.scroll.retain(|k, _| !k.starts_with(&page.key()));
+        if let Some(top) = self.stack.last_mut() {
+            *top = page;
+        } else {
+            self.stack.push(page);
+        }
+        self.arrive(now, 0.0);
+    }
+
+    pub(crate) fn back(&mut self, now: f64) {
         if !self.stack.is_empty() {
             self.remember();
             self.stack.pop();
@@ -361,13 +523,13 @@ impl BigPicture {
         } else if self.tab != Tab::Home {
             self.switch_tab(Tab::Home, now, true);
         } else {
-            self.menu = Some(menu::Menu::new(now));
+            self.open_menu(now);
         }
     }
 
     /// Show another tab. `take_focus`: move focus into it (LB/RB, B), or
     /// leave it on the tab bar (moving along the tabs).
-    fn switch_tab(&mut self, tab: Tab, now: f64, take_focus: bool) {
+    pub(crate) fn switch_tab(&mut self, tab: Tab, now: f64, take_focus: bool) {
         if tab == self.tab && self.stack.is_empty() {
             return;
         }
@@ -380,6 +542,11 @@ impl BigPicture {
         if !take_focus {
             self.focus.current = keep;
         }
+    }
+
+    pub(crate) fn open_settings_at(&mut self, section: usize, now: f64) {
+        self.settings.open_at(section);
+        self.open(Page::Settings, now);
     }
 
     fn scroller(&mut self, key: &str) -> &mut Scroller {
@@ -395,7 +562,11 @@ fn id_pair(arg: &str) -> Option<(GroupChatId, ChatRoomId)> {
 
 /// Drain controller events even when the root window has no frame to draw.
 pub fn poll(app: &mut SteamApp, ctx: &egui::Context, visible: bool) -> bool {
-    input::tune(app.prefs.bigpicture_swap_ab, app.prefs.bigpicture_repeat, app.prefs.bigpicture_stick);
+    let tune_key = (app.prefs.bigpicture_swap_ab, app.prefs.bigpicture_repeat, app.prefs.bigpicture_stick);
+    if app.bigpicture.last_tuned != Some(tune_key) {
+        input::tune(tune_key.0, tune_key.1, tune_key.2);
+        app.bigpicture.last_tuned = Some(tune_key);
+    }
     let signed_in = app.state.phase == client::state::Phase::LoggedIn;
     let focused = visible && ctx.input(|i| {
         let viewport = i.viewport();
@@ -419,9 +590,24 @@ pub fn poll(app: &mut SteamApp, ctx: &egui::Context, visible: bool) -> bool {
     show_window
 }
 
-/// Size everything for the screen: 1.0 on a 1080p TV, bigger on 4K, smaller in a window.
-fn scale(screen: Rect, user: f32) -> f32 {
-    ((screen.width() / 1920.0).min(screen.height() / 1080.0) * user).clamp(0.45, 3.0)
+/// Size everything for the screen: 1.0 on a 1080p TV, bigger on 4K, readable on 1280×800 handhelds.
+fn scale(screen: Rect, user: f32, deck_preview: bool) -> f32 {
+    let base = (screen.width() / 1920.0).min(screen.height() / 1080.0);
+    let handheld_boost = if deck_preview || (screen.width() <= 1366.0 && screen.height() <= 860.0) {
+        1.08
+    } else {
+        1.0
+    };
+    (base * handheld_boost * user).clamp(0.5, 3.0)
+}
+
+/// Horizontal page margin: narrower on handheld/Deck screens to keep cards and settings roomy.
+fn side_pad(screen: Rect, s: f32, deck_preview: bool) -> f32 {
+    if deck_preview || screen.width() <= 1366.0 {
+        48.0 * s
+    } else {
+        80.0 * s
+    }
 }
 
 /// Draw Big Picture over the whole window.
@@ -449,9 +635,13 @@ pub struct Frame<'a> {
     pub view: Rect,
     pub pad: f32,
     pub now: f64,
-    /// X/Y pressed this frame (each page decides what they do).
+    /// X/Y/LT/RT pressed this frame (each page decides what they do).
     pub x: bool,
     pub y: bool,
+    pub lt: bool,
+    pub rt: bool,
+    /// Right-stick vertical scroll delta (positive = down) in logical pixels.
+    pub stick_scroll: f32,
 }
 
 impl BigPicture {
@@ -459,8 +649,9 @@ impl BigPicture {
         let ctx = ui.ctx().clone();
         let t = app.prefs.theme.clone();
         let screen = ui.max_rect();
-        let s = scale(screen, app.prefs.bigpicture_scale);
+        let s = scale(screen, app.prefs.bigpicture_scale, self.deck_preview);
         let now = ctx.input(|i| i.time);
+        self.sys_status = self.system.snapshot(self.quick_access.is_some(), Some(&ctx));
         if !self.fullscreen_sent {
             self.fullscreen_sent = true;
             if self.entered_at == 0.0 {
@@ -483,18 +674,24 @@ impl BigPicture {
         }
         // Fullscreen, and again if something resized the window meanwhile
         // (signing in sets the normal window size).
-        if !self.windowed && ctx.input(|i| i.viewport().fullscreen) != Some(true) && now - self.fullscreen_asked > 0.5 {
-            self.fullscreen_asked = now;
-            if ctx.input(|i| i.viewport().maximized) == Some(true) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+        if !self.windowed && ctx.input(|i| i.viewport().fullscreen) != Some(true) {
+            if now - self.fullscreen_asked > 0.5 {
+                self.fullscreen_asked = now;
+                if ctx.input(|i| i.viewport().maximized) == Some(true) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                }
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Fullscreen(true));
             }
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Fullscreen(true));
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
 
         // ---- input ----
+        let drawer_open = self.menu.is_some() || self.quick_access.is_some();
         let page = self.page();
         let chat = matches!(page, Page::Chat(_));
-        let typing = (page == Page::Search || chat) && self.menu.is_none() && !self.launch_dialog;
+        let lib_typing = page == Page::Tab(Tab::Library) && self.library_search_open;
+        let prof_typing = self.profile.active_text_mut(&page).is_some();
+        let typing = (page == Page::Search || chat || lib_typing || prof_typing) && !drawer_open && !self.launch_dialog;
         let mut submit = false;
         // Backspace only ever deletes (held down too, and on an empty box);
         // outside a text box it does nothing. Back is Esc / B.
@@ -513,21 +710,31 @@ impl BigPicture {
         }) } else { Vec::new() };
         if typing {
             let text: String = ctx.input(|i| i.events.iter().filter_map(|e| if let egui::Event::Text(t) = e { Some(t.clone()) } else { None }).collect());
-            let field = if chat { &mut self.message } else { &mut self.query };
-            if !text.is_empty() {
-                field.push_str(&text);
-                self.query_changed = now;
-                self.device = Device::Keyboard;
-            }
-            for word in &backspaces {
-                input::backspace(field, *word);
-            }
-            if !backspaces.is_empty() {
-                self.query_changed = now;
-                self.device = Device::Keyboard;
+            let field: Option<&mut String> = if chat {
+                Some(&mut self.message)
+            } else if lib_typing {
+                Some(&mut self.library_query)
+            } else if prof_typing {
+                self.profile.active_text_mut(&page)
+            } else {
+                Some(&mut self.query)
+            };
+            if let Some(field) = field {
+                if !text.is_empty() {
+                    field.push_str(&text);
+                    self.query_changed = now;
+                    self.device = Device::Keyboard;
+                }
+                for word in &backspaces {
+                    input::backspace(field, *word);
+                }
+                if !backspaces.is_empty() {
+                    self.query_changed = now;
+                    self.device = Device::Keyboard;
+                }
             }
         }
-        let embedded_typing = matches!(page, Page::Embedded(..)) && ctx.egui_wants_keyboard_input();
+        let embedded_typing = matches!(page, Page::Embedded(..)) && !drawer_open && ctx.egui_wants_keyboard_input();
         let keys = if embedded_typing || self.launch_dialog { Vec::new() } else { input::keyboard(&ctx, typing) };
         if !keys.is_empty() {
             self.device = Device::Keyboard;
@@ -557,12 +764,21 @@ impl BigPicture {
         }
         let mut dir = None;
         let mut press = false;
-        let (mut x, mut y) = (false, false);
+        let (mut x, mut y, mut lt, mut rt) = (false, false, false, false);
+        let mut stick_scroll = 0.0f32;
         if let Some(m) = &mut self.menu {
-            if m.input(&presses, now) == menu::Outcome::LeaveBigPicture {
+            if presses.iter().any(|(p, _)| *p == Press::QuickAccess) {
+                self.open_quick_access(&ctx, quick_access::Section::System, now);
+            } else if m.input(&presses, now) == menu::Outcome::LeaveBigPicture {
                 self.leave(&ctx);
                 ctx.request_repaint();
                 return;
+            }
+        } else if let Some(qa) = &mut self.quick_access {
+            if presses.iter().any(|(p, _)| matches!(p, Press::Start | Press::Guide)) {
+                self.open_menu(now);
+            } else {
+                qa.input(&presses, now);
             }
         } else {
             for (p, from_keys) in presses {
@@ -571,8 +787,16 @@ impl BigPicture {
                     // Typing on a real keyboard: Enter searches what was typed
                     // (and then selects, like everywhere else).
                     Press::A if typing && from_keys && chat && !self.message.trim().is_empty() => self.send_now = true,
+                    Press::A if typing && from_keys && lib_typing => self.library_search_open = false,
+                    Press::A if typing && from_keys && prof_typing => {
+                        self.profile.close_osk(&page);
+                    }
                     Press::A if typing && from_keys && !chat && self.query.trim() != self.submitted => submit = true,
                     Press::A => press = true,
+                    // Library search OSK open: B closes it first.
+                    Press::B if lib_typing => self.library_search_open = false,
+                    // Profile OSK open: B closes it first.
+                    Press::B if self.profile.close_osk(&page) => {}
                     // Chat with the keyboard up: B puts it away first.
                     Press::B if chat && self.chat_keys => {
                         self.chat_keys = false;
@@ -581,19 +805,13 @@ impl BigPicture {
                     Press::B => self.back(now),
                     Press::X => x = true,
                     Press::Y => y = true,
+                    Press::Lt => lt = true,
+                    Press::Rt => rt = true,
+                    Press::Scroll(delta) => stick_scroll += delta as f32 * 110.0 * s,
                     Press::Lb => self.switch_tab(TABS[(self.tab.index() + TABS.len() - 1) % TABS.len()], now, true),
                     Press::Rb => self.switch_tab(TABS[(self.tab.index() + 1) % TABS.len()], now, true),
-                    Press::Start | Press::Guide => {
-                        self.menu = Some(menu::Menu::new(now));
-                    }
-                    Press::QuickAccess if self.deck_preview => {
-                        if self.page() == Page::QuickAccess {
-                            self.back(now);
-                        } else {
-                            self.open(Page::QuickAccess, now);
-                        }
-                    }
-                    Press::QuickAccess => {}
+                    Press::Start | Press::Guide => self.open_menu(now),
+                    Press::QuickAccess => self.open_quick_access(&ctx, quick_access::Section::System, now),
                 }
             }
         }
@@ -604,6 +822,7 @@ impl BigPicture {
         if self.page() != page {
             dir = None;
             press = false;
+            stick_scroll = 0.0;
         }
         // A trailer: A pauses, left/right move 10 seconds.
         if let Page::Video(..) = self.page() {
@@ -627,12 +846,23 @@ impl BigPicture {
                 dir = None;
             }
         }
-        if let (Page::Embedded(..), Some(d @ (Dir::Up | Dir::Down))) = (self.page(), dir) {
-            self.wheel += if d == Dir::Up { 120.0 } else { -120.0 } * s;
-            ctx.request_repaint();
-            dir = None;
+        if matches!(self.page(), Page::Chat(_)) && stick_scroll != 0.0 {
+            self.chat_nudge += stick_scroll / (180.0 * s).max(1.0);
+            stick_scroll = 0.0;
         }
-        if let (Page::Review(..), Some(d @ (Dir::Up | Dir::Down))) = (self.page(), dir) {
+        if let Page::Embedded(..) = self.page() {
+            if let Some(d @ (Dir::Up | Dir::Down)) = dir {
+                self.wheel += if d == Dir::Up { 120.0 } else { -120.0 } * s;
+                ctx.request_repaint();
+                dir = None;
+            }
+            if stick_scroll != 0.0 {
+                self.wheel -= stick_scroll;
+                ctx.request_repaint();
+                stick_scroll = 0.0;
+            }
+        }
+        if let (Page::Review(..) | Page::News(..), Some(d @ (Dir::Up | Dir::Down))) = (self.page(), dir) {
             self.scroller("page").target += if d == Dir::Up { -120.0 } else { 120.0 } * s;
             dir = None;
         }
@@ -646,45 +876,79 @@ impl BigPicture {
             }
             dir = None;
         }
-        let menu_open = self.menu.is_some();
+        let drawer_open = self.menu.is_some() || self.quick_access.is_some();
         let before = self.focus.current;
-        self.focus.begin(ui, if menu_open { None } else { dir }, press && !menu_open);
-        // Up from a page into the tab bar lands on this page's tab (the
-        // nearest one could be another tab, which would switch pages).
-        let is_tab = |id: Id| TABS.iter().any(|t| tab_id(*t) == id);
-        if self.focus.moved && before.is_some_and(|b| !is_tab(b)) && self.focus.current.is_some_and(is_tab) {
-            self.focus.current = Some(tab_id(self.tab));
+        if drawer_open {
+            self.focus.pause_frame();
+        } else {
+            self.focus.begin(ui, dir, press);
+            // Up from a page into the tab bar lands on this page's tab (the
+            // nearest one could be another tab, which would switch pages).
+            // Moving sideways while already in the top bar moves freely to Bell, Quick Access, Avatar, Logo.
+            if self.focus.moved && before.is_some_and(|b| !is_bar_id(b)) && self.focus.current.is_some_and(is_bar_id) {
+                self.focus.current = Some(tab_id(self.tab));
+            }
         }
 
         // ---- draw ----
-        let top_h = 104.0 * s;
-        let hint_h = 78.0 * s;
+        let top_h = 98.0 * s;
+        let hint_h = 74.0 * s;
         let view = Rect::from_min_max(pos2(screen.left(), screen.top() + top_h), pos2(screen.right(), screen.bottom() - hint_h));
         self.preferred = None;
 
-        // Pages slide and fade in.
-        let e = since(ui, self.page_since, 0.35);
-        let dx = (1.0 - e) * 90.0 * s * self.slide;
-        let mut content = paint::faded(ui, screen, e.max(0.0));
-        content.set_clip_rect(Rect::from_min_max(pos2(screen.left(), view.top() - 30.0 * s), pos2(screen.right(), view.bottom())));
-        let page_view = view.translate(vec2(dx, 0.0));
-        let pad = 80.0 * s;
-        let mut f = Frame { app, actions, t: t.clone(), s, view: page_view, pad, now, x, y };
-
-        self.background(ui, &f);
         let key = format!("{}/page", self.page().key());
         let pos = self.scroll.get(&key).map(|sc| sc.pos).unwrap_or(0.0);
+        let scroll_pos = match self.page() {
+            Page::Settings => self.scroll.get(&format!("{}/rows", self.page().key())).map(|sc| sc.pos).unwrap_or(0.0),
+            Page::ProfileEdit => self.profile.edit.body_scroll.pos,
+            _ => pos,
+        };
+        let focus_in_bar = self.focus.current.is_some_and(is_bar_id);
+        let pointer_at_top = !drawer_open
+            && ui.input(|i| i.pointer.latest_pos().is_some_and(|p| p.y <= screen.top() + 32.0 * s));
+        let target_hide = if focus_in_bar || pointer_at_top {
+            0.0
+        } else {
+            ((scroll_pos - 12.0 * s) / (top_h * 0.85)).clamp(0.0, 1.0)
+        };
+        let dt = ui.input(|i| i.stable_dt.min(0.1));
+        let k = 1.0 - (-dt * 14.0).exp();
+        self.bar_hide += (target_hide - self.bar_hide) * k;
+        if (target_hide - self.bar_hide).abs() < 0.005 {
+            self.bar_hide = target_hide;
+        } else {
+            ui.ctx().request_repaint();
+        }
+
+        // Pages slide and fade in.
+        let e = since(ui, self.page_since, 0.32);
+        let dx = (1.0 - e) * 80.0 * s * self.slide;
+        let mut content = paint::faded(ui, screen, e.max(0.0));
+        if drawer_open {
+            content.disable();
+        }
+        let clip_top = screen.top() + (top_h - 28.0 * s).max(0.0) * (1.0 - self.bar_hide);
+        content.set_clip_rect(Rect::from_min_max(pos2(screen.left(), clip_top), pos2(screen.right(), view.bottom())));
+        let page_view = view.translate(vec2(dx, 0.0));
+        let pad = side_pad(screen, s, self.deck_preview);
+        let mut f = Frame { app, actions, t: t.clone(), s, view: page_view, pad, now, x, y, lt, rt, stick_scroll };
+
+        self.background(ui, &f);
         let height = screens::draw(self, &mut content, &mut f, pos);
-        // Scroll the page: follow the focus, or the mouse wheel.
-        {
+        // Scroll the page: follow the focus, right-stick, or mouse wheel (only while no drawer is open).
+        if !drawer_open {
+            let page_has_own_scroll = matches!(self.page(), Page::Settings | Page::ProfileEdit);
             let wheel = ui.input(|i| i.smooth_scroll_delta.y);
             let moved = self.focus.moved;
             let focused = self.focus.focused();
             let sc = self.scroll.entry(key).or_default();
-            if wheel != 0.0 && ui.rect_contains_pointer(view) {
+            if wheel != 0.0 && ui.rect_contains_pointer(view) && !page_has_own_scroll {
                 sc.target -= wheel;
             }
-            if let (true, Some((r, Place::Page))) = (moved, focused) {
+            if f.stick_scroll != 0.0 && !page_has_own_scroll {
+                sc.target += f.stick_scroll;
+            }
+            if !page_has_own_scroll && let (true, Some((r, Place::Page))) = (moved, focused) {
                 let top = r.top() - (view.top() - sc.pos);
                 sc.reveal(top, top + r.height(), view.height(), view.height() * 0.2);
                 // Near the start: show the very top (the page title, the hero).
@@ -696,41 +960,106 @@ impl BigPicture {
             sc.step(ui);
         }
 
-        self.top_bar(ui, &mut f, screen, top_h);
-        let first: Vec<Id> = self.preferred.into_iter().collect();
-        self.focus.end(&first, tab_id(self.tab));
-        if !menu_open {
+        if self.bar_hide < 0.99 {
+            let mut bar_ui = paint::faded(ui, screen, (1.0 - self.bar_hide).clamp(0.0, 1.0));
+            if drawer_open {
+                bar_ui.disable();
+            }
+            self.top_bar(&mut bar_ui, &mut f, screen, top_h, -top_h * self.bar_hide);
+        }
+        if !drawer_open {
+            let first: Vec<Id> = self.preferred.into_iter().collect();
+            let assigned = self.focus.end(&first, tab_id(self.tab));
+            if assigned
+                && let Some((r, Place::Page)) = self.focus.focused()
+            {
+                let key = format!("{}/page", self.page().key());
+                let sc = self.scroll.entry(key).or_default();
+                let top = r.top() - (view.top() - sc.pos);
+                sc.reveal(top, top + r.height(), view.height(), view.height() * 0.2);
+                sc.clamp(height, view.height());
+                ui.ctx().request_repaint();
+            }
             self.focus.paint_ring(ui, &t, s, 12.0 * s, content.clip_rect());
         }
-        self.hint_bar(ui, &mut f, screen, hint_h);
+        {
+            let mut hint_ui = ui.new_child(egui::UiBuilder::new().max_rect(screen));
+            if drawer_open {
+                hint_ui.disable();
+            }
+            self.hint_bar(&mut hint_ui, &mut f, screen, hint_h);
+        }
         if self.menu.is_some() {
             menu::show(self, ui, &mut f, screen);
+        }
+        if self.quick_access.is_some() {
+            quick_access::show(self, ui, &mut f, screen);
         }
         if !self.active {
             return;
         }
         self.intro(ui, &t, screen, s, now);
-        // Gentle constant motion in the background.
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+
+        // Event-driven repaint scheduling (no unconditional 33ms idle loop):
+        // - Search debounce timer
+        if self.page() == Page::Search {
+            let q = self.query.trim();
+            if q != self.submitted && (q.chars().count() >= 2 || q.is_empty()) {
+                let wait = (0.6 - (now - self.query_changed)).max(0.05);
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
+            }
+        }
+        // - Caret blink only on typing pages (calm 500ms cadence instead of 30fps)
+        if typing {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        // - Active downloads / file ops refresh at 500ms
+        let active_transfer = f.app.downloading()
+            || !f.app.state.moving.is_empty()
+            || !f.app.state.backing_up.is_empty();
+        if active_transfer {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        // - Top-bar clock rollover at the next minute boundary
+        ctx.request_repaint_after(std::time::Duration::from_secs(self.sys_status.secs_until_next_minute.clamp(1, 60)));
     }
 
-    /// The focused game's art, slowly drifting, cross-faded when it changes;
-    /// soft colored light behind everything.
+    /// The focused game's art, cross-faded cleanly with two slots (no per-frame idle spin);
+    /// soft static theme glow behind everything.
     fn background(&mut self, ui: &mut Ui, f: &Frame) {
-        let (t, s, now) = (&f.t, f.s, f.now);
+        let (t, _s, now) = (&f.t, f.s, f.now);
         let screen = ui.max_rect();
         let p = ui.painter().clone();
         p.rect_filled(screen, 0.0, t.bg);
-        // Two slow lights in the theme's accent colors.
-        let time = now as f32;
-        let a = screen.center() + vec2((time * 0.07).sin() * screen.width() * 0.35, (time * 0.05).cos() * screen.height() * 0.3);
-        let b = screen.center() + vec2((time * 0.06 + 2.0).cos() * screen.width() * 0.38, (time * 0.08 + 1.0).sin() * screen.height() * 0.32);
+        // Two calm theme glows in fixed balanced positions (zero idle animation cost).
+        let a = screen.center() + vec2(-screen.width() * 0.24, -screen.height() * 0.22);
+        let b = screen.center() + vec2(screen.width() * 0.28, screen.height() * 0.24);
         paint::glow(&p, a, screen.width() * 0.45, t.accent.gamma_multiply(0.10));
         paint::glow(&p, b, screen.width() * 0.4, t.accent_2.gamma_multiply(0.09));
 
-        if let Page::Game(id) = self.page() {
-            let e = since(ui, self.page_since, 1.8);
-            let rect = paint::grow(screen, 1.0 + (1.0 - e) * 0.08);
+        let profile_id = match self.page() {
+            Page::Profile(id)
+            | Page::ProfileGames(id)
+            | Page::ProfileBadges(id)
+            | Page::ProfileCards(id, _, _)
+            | Page::ProfileReviews(id)
+            | Page::ProfileGroups(id) => Some(if id == 0 { f.app.state.steam_id } else { id }),
+            Page::ProfileEdit => Some(f.app.state.steam_id),
+            _ => None,
+        };
+        if let Some(pid) = profile_id {
+            if let Some(bg_url) = f.app.state.profiles.get(&pid).and_then(|i| i.background.as_deref()) {
+                if w::paint_cover(ui, screen, bg_url, egui::CornerRadius::ZERO) {
+                    p.rect_filled(screen, 0.0, t.bg.gamma_multiply(0.58));
+                    w::gradient(&p, screen, t.bg.gamma_multiply(0.25), t.bg.gamma_multiply(0.88), false);
+                    return;
+                }
+            }
+        }
+
+        if let Page::Game(id) | Page::GameManage(id) = self.page() {
+            let e = since(ui, self.page_since, 0.7);
+            let rect = paint::grow(screen, 1.0 + (1.0 - e) * 0.04);
             let artwork = paint::faded(ui, screen, since(ui, self.page_since, 0.35));
             let uri = w::paint_blurred_cover_first(&artwork, screen, rect, &[&model::art::hero(id), &model::art::header(id)]);
             if self.game_backdrop != uri {
@@ -747,45 +1076,82 @@ impl BigPicture {
             ui.ctx().forget_image(&uri);
         }
 
-        // Pages say which game is focused while drawing: that shows next frame.
-        if let Some(want) = self.bg_want.take().or(self.bg.last().map(|b| b.0)) {
-            if self.bg.last().map(|b| b.0) != Some(want) {
-                self.bg.push((want, now));
-            }
+        // Pages say which game is focused while drawing: crossfade cleanly with 2 slots.
+        if let Some(want) = self.bg_want.take()
+            && self.bg_cur != Some(want)
+        {
+            self.bg_prev = self.bg_cur;
+            self.bg_cur = Some(want);
+            self.bg_since = now;
         }
-        // Drop pictures fully covered by a newer one.
-        if let Some(i) = self.bg.iter().rposition(|(_, at)| now - at > 0.8) {
-            self.bg.drain(..i);
+        let fade = since(ui, self.bg_since, 0.55);
+        if fade >= 1.0 {
+            self.bg_prev = None;
         }
-        let drift = vec2((time * 0.04).sin() * 24.0 * s, (time * 0.03).cos() * 14.0 * s);
-        let big = paint::grow(screen, 1.1).translate(drift);
-        for (id, at) in self.bg.clone() {
-            let e = focus::ease(((now - at) / 0.8) as f32);
-            let c = paint::faded(ui, screen, e * 0.42);
-            w::paint_cover_first(&c, big, &[&model::art::hero(id), &model::art::header(id)], egui::CornerRadius::ZERO);
+        let big = paint::grow(screen, 1.06);
+        if let Some(prev) = self.bg_prev {
+            let c = paint::faded(ui, screen, (1.0 - fade) * 0.38);
+            w::paint_cover_first(&c, big, &[&model::art::hero(prev), &model::art::header(prev)], egui::CornerRadius::ZERO);
+        }
+        if let Some(cur) = self.bg_cur {
+            let c = paint::faded(ui, screen, fade * 0.38);
+            w::paint_cover_first(&c, big, &[&model::art::hero(cur), &model::art::header(cur)], egui::CornerRadius::ZERO);
         }
         // Darken toward the bottom and left so text stays readable.
         w::gradient(&p, screen, t.bg.gamma_multiply(0.55), t.bg.gamma_multiply(0.97), false);
         w::fade_right(ui, screen, t.bg.gamma_multiply(0.75), 0.6);
     }
 
-    fn top_bar(&mut self, ui: &mut Ui, f: &mut Frame, screen: Rect, h: f32) {
+    fn top_bar(&mut self, ui: &mut Ui, f: &mut Frame, screen: Rect, h: f32, y_off: f32) {
         let (t, s) = (f.t.clone(), f.s);
-        let bar = Rect::from_min_size(screen.min, vec2(screen.width(), h));
+        let bar = Rect::from_min_size(pos2(screen.left(), screen.top() + y_off), vec2(screen.width(), h));
         let p = ui.painter().clone();
         w::gradient(&p, bar, t.bg.gamma_multiply(0.96), t.bg.gamma_multiply(0.0), false);
-        let pad = 80.0 * s;
-        // Logo and name.
-        let mut logo = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(pos2(bar.left() + pad + 20.0 * s, bar.center().y), vec2(40.0 * s, 40.0 * s))));
+        let pad = side_pad(screen, s, self.deck_preview);
+        // Logo on the left (controller-focusable).
+        let logo_rect = Rect::from_center_size(pos2(bar.left() + pad + 20.0 * s, bar.center().y), vec2(44.0 * s, 44.0 * s));
+        let logo_hit = self.focus.item(ui, top_logo_id(), logo_rect, screen, Place::Bar);
+        if logo_hit.glow > 0.0 {
+            p.circle_filled(logo_rect.center(), 24.0 * s, Color32::from_white_alpha((26.0 * logo_hit.glow) as u8));
+        }
+        let mut logo = ui.new_child(egui::UiBuilder::new().max_rect(logo_rect.shrink(2.0 * s)));
         w::logo(&mut logo, &t, 40.0 * s);
+        if logo_hit.focused {
+            self.focus.ring_around(logo_rect.expand(2.0 * s), 24.0 * s);
+        }
+        if logo_hit.activated {
+            self.open_menu(f.now);
+        }
+
+        // Running-game pill beside the logo when a game is active (controller-focusable).
+        let mut left_edge = logo_rect.right() + 18.0 * s;
+        if let Some(playing_id) = f.app.state.playing {
+            let name = f.app.state.app_name(playing_id).unwrap_or("Game");
+            let pill_label = format!("{}  {}", icons::PLAY, name);
+            let font = w::font_semibold(17.0 * s);
+            let pw = (paint::text_width(&p, &pill_label, font.clone()) + 28.0 * s).min(240.0 * s);
+            let pr = Rect::from_min_size(pos2(left_edge, bar.center().y - 20.0 * s), vec2(pw, 40.0 * s));
+            let hit = self.focus.item(ui, top_playing_id(), pr, screen, Place::Bar);
+            p.rect_filled(pr, paint::radius(20.0 * s), w::mix(t.play.gamma_multiply(0.28), t.play.gamma_multiply(0.48), hit.glow));
+            p.rect_stroke(pr, paint::radius(20.0 * s), egui::Stroke::new(1.5 * s, t.play.gamma_multiply(0.7)), egui::StrokeKind::Inside);
+            paint::line(&p, pr.center(), Align2::CENTER_CENTER, &pill_label, font, t.text, pw - 20.0 * s);
+            if hit.focused {
+                self.focus.ring_around(pr, 20.0 * s);
+            }
+            if hit.activated {
+                self.open(Page::Game(playing_id), f.now);
+            }
+            left_edge = pr.right() + 14.0 * s;
+        }
+        let _ = left_edge;
 
         // Tabs in the middle.
-        let font = w::font_bold(25.0 * s);
-        let gap = 14.0 * s;
-        let widths: Vec<f32> = TABS.iter().map(|tab| paint::text_width(&p, &tab_label(f, *tab), font.clone()) + 44.0 * s).collect();
+        let font = w::font_bold(24.0 * s);
+        let gap = 10.0 * s;
+        let widths: Vec<f32> = TABS.iter().map(|tab| paint::text_width(&p, &tab_label(f, *tab), font.clone()) + 38.0 * s).collect();
         let total: f32 = widths.iter().sum::<f32>() + gap * (TABS.len() - 1) as f32;
         let mut x = bar.center().x - total / 2.0;
-        let tab_h = 54.0 * s;
+        let tab_h = 52.0 * s;
         let mut tabs = Vec::with_capacity(TABS.len());
         for (i, tab) in TABS.iter().enumerate() {
             let r = Rect::from_min_size(pos2(x, bar.center().y - tab_h / 2.0), vec2(widths[i], tab_h));
@@ -801,9 +1167,14 @@ impl BigPicture {
                 self.switch_tab(*tab, f.now, false);
             }
             if hit.activated {
-                // A on a tab goes into its page.
-                self.focus.current = self.memory.get(&Page::Tab(*tab).key()).copied().or(Some(Id::NULL));
-                self.focus.moved = true;
+                if !self.stack.is_empty() || !selected {
+                    // Clicking the current tab from a subpage returns to its root.
+                    self.switch_tab(*tab, f.now, true);
+                } else {
+                    // A on the current tab goes into its page.
+                    self.focus.current = self.memory.get(&Page::Tab(*tab).key()).copied().or(Some(Id::NULL));
+                    self.focus.moved = true;
+                }
             }
             tabs.push((r, hit.glow));
         }
@@ -830,21 +1201,94 @@ impl BigPicture {
             p.text(r.center(), Align2::CENTER_CENTER, tab_label(f, *tab), font.clone(), color);
         }
 
-        // Right: controller and account.
-        let right = bar.right() - pad;
+        // Right cluster: Avatar (Profile) · Quick Access (⋯) · Clock · Battery · Notifications (Bell) · Controller.
+        // All interactive buttons are registered with `Focus` so the controller can navigate across them!
+        let mut rx = bar.right() - pad;
         let me = f.app.state.me().cloned();
-        let name = f.app.state.persona_name.clone();
-        let av = Rect::from_center_size(pos2(right - 24.0 * s, bar.center().y), vec2(48.0 * s, 48.0 * s));
+        let av = Rect::from_center_size(pos2(rx - 23.0 * s, bar.center().y), vec2(46.0 * s, 46.0 * s));
+        let av_hit = self.focus.item(ui, top_avatar_id(), av, screen, Place::Bar);
         let url = model::art::avatar_full(me.as_ref().and_then(|m| m.avatar_hash.as_deref()));
-        if !w::paint_cover(ui, av, &url, paint::radius(24.0 * s)) {
-            p.circle_filled(av.center(), 24.0 * s, t.raised);
+        if !w::paint_cover(ui, av, &url, paint::radius(23.0 * s)) {
+            p.circle_filled(av.center(), 23.0 * s, t.raised);
         }
         if let Some(m) = &me {
-            p.circle_stroke(av.center(), 25.5 * s, egui::Stroke::new(2.5 * s, crate::shell::status_color(&t, m)));
+            p.circle_stroke(av.center(), 24.5 * s, egui::Stroke::new(2.5 * s, crate::shell::status_color(&t, m)));
         }
-        let name_rect = paint::line(&p, pos2(av.left() - 14.0 * s, bar.center().y), Align2::RIGHT_CENTER, &name, w::font_semibold(21.0 * s), t.text, 260.0 * s);
+        if av_hit.focused {
+            self.focus.ring_around(av.expand(2.0 * s), 25.0 * s);
+        }
+        if av_hit.activated && f.app.state.steam_id != 0 {
+            self.open(Page::Profile(f.app.state.steam_id), f.now);
+        }
+        rx = av.left() - 16.0 * s;
+
+        // Quick Access button (`⋯`, controller-focusable).
+        let qa_r = Rect::from_center_size(pos2(rx - 22.0 * s, bar.center().y), vec2(44.0 * s, 44.0 * s));
+        let qa_hit = self.focus.item(ui, top_qa_id(), qa_r, screen, Place::Bar);
+        p.circle_filled(qa_r.center(), 22.0 * s, w::mix(Color32::from_white_alpha(18), Color32::from_white_alpha(44), qa_hit.glow));
+        p.text(qa_r.center(), Align2::CENTER_CENTER, icons::DOTS, w::font(22.0 * s), t.text);
+        if qa_hit.focused {
+            self.focus.ring_around(qa_r, 22.0 * s);
+        }
+        if qa_hit.activated {
+            self.open_quick_access(&ui.ctx().clone(), quick_access::Section::System, f.now);
+        }
+        rx = qa_r.left() - 16.0 * s;
+
+        // Wall clock (`HH:MM`).
+        if !self.sys_status.clock.is_empty() {
+            let clk_r = p.text(pos2(rx, bar.center().y), Align2::RIGHT_CENTER, &self.sys_status.clock, w::font_semibold(20.0 * s), t.text);
+            rx = clk_r.left() - 16.0 * s;
+        }
+
+        // Battery telemetry (when a system battery is present, e.g. Steam Deck / laptop).
+        if let Some(pct) = self.sys_status.battery_percent {
+            let color = if self.sys_status.battery_charging {
+                t.play
+            } else if pct <= 15 {
+                t.danger
+            } else if pct <= 30 {
+                t.away
+            } else {
+                t.text_dim
+            };
+            let label = if self.sys_status.battery_charging {
+                format!("{} {pct}%", icons::LIGHTNING)
+            } else {
+                format!("{pct}%")
+            };
+            let br = p.text(pos2(rx, bar.center().y), Align2::RIGHT_CENTER, label, w::font_semibold(18.0 * s), color);
+            rx = br.left() - 16.0 * s;
+        }
+
+        // Notifications bell (always shown & controller-focusable; opens Quick Access on Notifications).
+        let unread = f.app.state.notifications.as_ref().map_or(0usize, |d| d.unread as usize) + f.app.state.total_unread();
+        let bell_r = Rect::from_center_size(pos2(rx - 22.0 * s, bar.center().y), vec2(44.0 * s, 44.0 * s));
+        let bell_hit = self.focus.item(ui, top_bell_id(), bell_r, screen, Place::Bar);
+        let bell_idle = if unread > 0 { t.accent.gamma_multiply(0.24) } else { Color32::from_white_alpha(14) };
+        let bell_active = if unread > 0 { t.accent.gamma_multiply(0.44) } else { Color32::from_white_alpha(38) };
+        p.circle_filled(bell_r.center(), 22.0 * s, w::mix(bell_idle, bell_active, bell_hit.glow));
+        p.text(bell_r.center(), Align2::CENTER_CENTER, icons::BELL, w::font(21.0 * s), if unread > 0 || bell_hit.focused { t.text } else { t.text_dim });
+        if unread > 0 {
+            paint::badge(&p, bell_r.right_top() + vec2(3.0 * s, -2.0 * s), Align2::CENTER_CENTER, &unread.min(99).to_string(), s * 0.72, t.accent, t.on_accent);
+        }
+        if bell_hit.focused {
+            self.focus.ring_around(bell_r, 22.0 * s);
+        }
+        if bell_hit.activated {
+            self.open_quick_access(&ui.ctx().clone(), quick_access::Section::Notifications, f.now);
+        }
+        rx = bell_r.left() - 16.0 * s;
+
+        // Offline indicator pill.
+        if !f.app.state.online() && !f.app.demo {
+            let off_r = paint::badge(&p, pos2(rx, bar.center().y), Align2::RIGHT_CENTER, t!("Offline"), s * 0.9, t.away.gamma_multiply(0.28), t.away);
+            rx = off_r.left() - 14.0 * s;
+        }
+
+        // Connected controllers indicator.
         if self.pads > 0 {
-            p.text(pos2(name_rect.left() - 20.0 * s, bar.center().y), Align2::RIGHT_CENTER, icons::CONTROLLER, w::font(28.0 * s), t.text_dim);
+            p.text(pos2(rx, bar.center().y), Align2::RIGHT_CENTER, icons::CONTROLLER, w::font(24.0 * s), t.text_dim);
         }
     }
 
@@ -853,29 +1297,34 @@ impl BigPicture {
         let bar = Rect::from_min_max(pos2(screen.left(), screen.bottom() - h), screen.max);
         let p = ui.painter().clone();
         // Content fades out just above the bar.
-        let fade = Rect::from_min_max(pos2(bar.left(), bar.top() - 40.0 * s), pos2(bar.right(), bar.top()));
+        let fade = Rect::from_min_max(pos2(bar.left(), bar.top() - 36.0 * s), pos2(bar.right(), bar.top()));
         w::gradient(&p, fade, t.bg.gamma_multiply(0.0), t.bg.gamma_multiply(0.85), false);
         w::gradient(&p, bar, t.bg.gamma_multiply(0.85), t.bg.gamma_multiply(0.97), false);
-        p.hline(bar.x_range().shrink(80.0 * s), bar.top() + 6.0 * s, egui::Stroke::new(1.0, Color32::from_white_alpha(18)));
-        let pad = 80.0 * s;
+        let pad = side_pad(screen, s, self.deck_preview);
+        p.hline(bar.x_range().shrink(pad), bar.top() + 6.0 * s, egui::Stroke::new(1.0, Color32::from_white_alpha(18)));
         let pad_mode = self.device == Device::Pad;
         // Left: where you are.
         let left = match self.page() {
             Page::Tab(_) => format!("{}  {}", if pad_mode { "LB / RB" } else { "Q / E" }, t!("Switch tabs")),
+            Page::Settings | Page::ProfileEdit => format!("{}  {}", if pad_mode { "◀ / ▶" } else { "← / →" }, t!("Adjust value")),
             _ => String::new(),
         };
         if !left.is_empty() {
             p.text(pos2(bar.left() + pad, bar.center().y), Align2::LEFT_CENTER, left, w::font_medium(18.0 * s), t.text_faint);
         }
-        let menu_open = self.menu.is_some();
-        let mut hints: Vec<(Press, String)> = vec![(Press::A, t!("Select").into()), (Press::B, if menu_open || matches!(self.page(), Page::Chat(_)) && self.chat_keys { t!("Close") } else { t!("Back") }.into())];
-        if !menu_open {
+        let drawer_open = self.menu.is_some() || self.quick_access.is_some();
+        let osk_open = (matches!(self.page(), Page::Chat(_)) && self.chat_keys)
+            || (self.page() == Page::Tab(Tab::Library) && self.library_search_open)
+            || self.profile.active_text_mut(&self.page()).is_some();
+        let mut hints: Vec<(Press, String)> = vec![(Press::A, t!("Select").into()), (Press::B, if drawer_open || osk_open { t!("Close") } else { t!("Back") }.into())];
+        if !drawer_open {
             if let Some(x) = screens::x_hint(self) {
                 hints.push((Press::X, x));
             }
-            if self.deck_preview {
-                hints.push((Press::QuickAccess, t!("Quick Access").into()));
+            if let Some(y) = screens::y_hint(self) {
+                hints.push((Press::Y, y));
             }
+            hints.push((Press::QuickAccess, t!("Quick Access").into()));
             hints.push((Press::Start, t!("Menu").into()));
         }
         let mut x = bar.right() - pad;
@@ -887,6 +1336,7 @@ impl BigPicture {
             let (glyph, round) = match (press, pad_mode, self.page()) {
                 // Typing: X is a letter, Backspace deletes.
                 (Press::X, false, Page::Search | Page::Chat(_)) => ("Backspace", false),
+                (Press::X, false, _) if osk_open => ("Backspace", false),
                 _ => glyph_for(*press, pad_mode),
             };
             let fl = flash.filter(|(fp, _)| fp == press).map(|(_, at)| 1.0 - ((f.now - at) / 0.3) as f32).unwrap_or(0.0);
@@ -899,7 +1349,7 @@ impl BigPicture {
             if resp.clicked() {
                 self.queued.push(*press);
             }
-            x -= 30.0 * s;
+            x -= 28.0 * s;
         }
         if flash.is_some() {
             ui.ctx().request_repaint();
@@ -928,8 +1378,37 @@ pub(crate) fn tab_id(tab: Tab) -> Id {
     Id::unique(("bp-tab", tab.index()))
 }
 
+fn top_logo_id() -> Id {
+    Id::unique("bp-top-logo")
+}
+
+fn top_playing_id() -> Id {
+    Id::unique("bp-top-playing")
+}
+
+fn top_bell_id() -> Id {
+    Id::unique("bp-top-bell")
+}
+
+fn top_qa_id() -> Id {
+    Id::unique("bp-top-qa")
+}
+
+fn top_avatar_id() -> Id {
+    Id::unique("bp-top-avatar")
+}
+
+fn is_bar_id(id: Id) -> bool {
+    TABS.iter().any(|t| tab_id(*t) == id)
+        || id == top_logo_id()
+        || id == top_playing_id()
+        || id == top_bell_id()
+        || id == top_qa_id()
+        || id == top_avatar_id()
+}
+
 /// Tab names, with a count where it helps (downloads, friends online).
-fn tab_label(f: &Frame, tab: Tab) -> String {
+pub(crate) fn tab_label(f: &Frame, tab: Tab) -> String {
     match tab {
         Tab::Downloads => {
             let n = f.app.state.downloads.values().filter(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)).count() + f.app.state.download_queue.len();
@@ -940,17 +1419,21 @@ fn tab_label(f: &Frame, tab: Tab) -> String {
 }
 
 /// The glyph for a press: controller buttons, or keys.
-fn glyph_for(p: Press, pad: bool) -> (&'static str, bool) {
+pub(crate) fn glyph_for(p: Press, pad: bool) -> (&'static str, bool) {
     match (p, pad) {
         (Press::A, true) => ("A", true),
         (Press::B, true) => ("B", true),
         (Press::X, true) => ("X", true),
         (Press::Y, true) => ("Y", true),
+        (Press::Lt, true) => ("LT", false),
+        (Press::Rt, true) => ("RT", false),
         (Press::Start, true) => (icons::LIST, true),
         (Press::A, false) => ("Enter", false),
         (Press::B, false) => ("Esc", false),
         (Press::X, false) => ("X", false),
         (Press::Y, false) => ("Y", false),
+        (Press::Lt, false) => ("[", false),
+        (Press::Rt, false) => ("]", false),
         (Press::Start, false) => ("M", false),
         (Press::QuickAccess, true) => (icons::DOTS, true),
         (Press::QuickAccess, false) => ("F2", false),

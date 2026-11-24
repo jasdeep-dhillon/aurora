@@ -680,6 +680,9 @@ impl Profile {
             }
             return;
         }
+        if self.edit.pending == 0 {
+            return;
+        }
         self.edit.pending = self.edit.pending.saturating_sub(1);
         match result {
             Ok(()) => {
@@ -833,7 +836,7 @@ fn pick(ui: &mut Ui, t: &Theme, id: &str, label: &str, list: &Option<Vec<(String
 }
 
 /// A community badge's id from its link (`.../badges/2`); game badges have none.
-fn community_badge_id(url: &str) -> Option<u32> {
+pub(crate) fn community_badge_id(url: &str) -> Option<u32> {
     let rest = url.split("/badges/").nth(1)?;
     rest.trim_end_matches('/').split(['/', '?']).next()?.parse().ok()
 }

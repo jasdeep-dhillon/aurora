@@ -194,7 +194,7 @@ pub fn pill_width(ui: &Ui, icon: bool, label: &str, s: f32) -> f32 {
     text_width(ui.painter(), label, w::font_bold(24.0 * s)) + if icon { 30.0 * s } else { 0.0 } + 72.0 * s
 }
 
-/// Thin progress bar with a moving shine.
+/// Thin progress bar with a subtle moving shine when `animate` is true.
 pub fn bar(ui: &Ui, t: &Theme, rect: Rect, value: f32, animate: bool) {
     let p = ui.painter();
     let r = rect.height() / 2.0;
@@ -206,9 +206,49 @@ pub fn bar(ui: &Ui, t: &Theme, rect: Rect, value: f32, animate: bool) {
         if animate {
             let time = ui.input(|i| i.time) as f32;
             sheen(&c, Rect::from_min_size(done.min, vec2(done.width().max(rect.height() * 4.0), rect.height())), (time * 0.6).fract());
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
+}
+
+/// Static, battery-friendly loading placeholder for Big Picture (never spins an idle 30fps loop).
+pub fn skeleton(ui: &Ui, t: &Theme, rect: Rect, r: CornerRadius) {
+    ui.painter().rect_filled(rect, r, t.surface);
+    let inner = rect.shrink(1.0);
+    if inner.is_positive() {
+        w::gradient(
+            &ui.painter().with_clip_rect(inner),
+            inner,
+            t.surface_hover.gamma_multiply(0.55),
+            t.surface.gamma_multiply(0.85),
+            true,
+        );
+    }
+}
+
+/// A compact status badge/pill (for unread counts, running game, Deck telemetry).
+pub fn badge(p: &Painter, pos: Pos2, align: Align2, text: &str, s: f32, bg: Color32, fg: Color32) -> Rect {
+    let font = w::font_bold(15.0 * s);
+    let tw = text_width(p, text, font.clone());
+    let h = 28.0 * s;
+    let wdt = (tw + 18.0 * s).max(h);
+    let rect = align.anchor_size(pos, vec2(wdt, h));
+    p.rect_filled(rect, radius(h / 2.0), bg);
+    p.text(rect.center(), Align2::CENTER_CENTER, text, font, fg);
+    rect
+}
+
+/// A clean horizontal level bar with thumb (for volume, brightness, calibration).
+pub fn level_bar(p: &Painter, t: &Theme, rect: Rect, fraction: f32, active: bool) {
+    let f = fraction.clamp(0.0, 1.0);
+    let r = rect.height() / 2.0;
+    p.rect_filled(rect, radius(r), Color32::from_white_alpha(28));
+    let filled = Rect::from_min_size(rect.min, vec2((rect.width() * f).max(rect.height()), rect.height()));
+    if f > 0.005 {
+        p.rect_filled(filled, radius(r), if active { t.accent } else { t.text_dim });
+    }
+    let knob_x = rect.left() + r + (rect.width() - rect.height()).max(0.0) * f;
+    p.circle_filled(pos2(knob_x, rect.center().y), rect.height() * 0.72, Color32::WHITE);
 }
 
 /// A button glyph for the hints: a round "A", a pill "LB", or a key cap.

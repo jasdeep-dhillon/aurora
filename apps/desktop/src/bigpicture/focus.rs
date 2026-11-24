@@ -39,7 +39,7 @@ pub struct Focus {
     /// The focus moved by D-pad/keys this frame (scroll it into view).
     pub moved: bool,
     pub last_dir: Option<Dir>,
-    ring_target: Option<(Id, Rect, f32)>,
+    ring_target: Option<(Id, Rect, f32, Option<Rect>)>,
     /// No ring this frame (a full-page viewer: a box around the whole page
     /// only gets in the way).
     no_ring: bool,
@@ -92,6 +92,18 @@ impl Focus {
         }
     }
 
+    /// Freeze focus state while an overlay drawer owns input: clears transient
+    /// input and the current frame's item buffer without discarding `current` or `last`.
+    pub fn pause_frame(&mut self) {
+        self.items.clear();
+        self.press = false;
+        self.moved = false;
+        self.last_dir = None;
+        self.pointer_moved = false;
+        self.ring_target = None;
+        self.no_ring = false;
+    }
+
     fn step(&mut self, dir: Dir, now: f64) {
         self.by_pointer = false;
         let Some(from) = self.current.and_then(|c| self.last.iter().find(|i| i.id == c)).copied() else {
@@ -127,13 +139,13 @@ impl Focus {
             }
         }
         let focused = self.current == Some(id);
-        if focused && self.press {
+        if focused && self.press && visible.is_positive() {
             activated = true;
             self.press = false;
         }
         let glow = ui.ctx().animate_bool_with_time(id.with("bp-focus"), focused, 0.18);
         if focused {
-            self.ring_target = Some((id, rect, 0.0));
+            self.ring_target = Some((id, rect, 0.0, None));
         }
         Hit { focused, activated, glow, response }
     }
@@ -145,7 +157,12 @@ impl Focus {
     }
 
     pub fn ring_around(&mut self, rect: Rect, radius: f32) {
-        self.ring_target = self.current.map(|id| (id, rect, radius));
+        self.ring_target = self.current.map(|id| (id, rect, radius, None));
+    }
+
+    /// Ring around a shape clipped to a specific scroll/drawer container.
+    pub fn ring_around_clipped(&mut self, rect: Rect, radius: f32, clip: Rect) {
+        self.ring_target = self.current.map(|id| (id, rect, radius, Some(clip)));
     }
 
     pub fn exists(&self, id: Id) -> bool {
@@ -154,19 +171,22 @@ impl Focus {
 
     /// End a frame: if the focused thing is gone, focus the first of
     /// `first` that exists, else the first page item, else `last`, else
-    /// anything. So something is always focused.
-    pub fn end(&mut self, first: &[Id], last: Id) {
+    /// anything. Returns true if focus was newly assigned (so callers can reveal it).
+    pub fn end(&mut self, first: &[Id], last: Id) -> bool {
         if self.current.is_some_and(|c| self.exists(c)) {
-            return;
+            return false;
         }
-        self.current = first
+        let next = first
             .iter()
             .copied()
             .find(|f| self.exists(*f))
             .or_else(|| self.items.iter().find(|i| i.place == Place::Page).map(|i| i.id))
             .or_else(|| Some(last).filter(|l| self.exists(*l)))
             .or_else(|| self.items.first().map(|i| i.id));
+        let changed = next != self.current;
+        self.current = next;
         self.ring_target = None;
+        changed && self.current.is_some()
     }
 
     /// The focused item's rect and place this frame.
@@ -176,14 +196,23 @@ impl Focus {
     }
 
     /// Paint the ring around the current visual bounds, clipped to its region.
+    /// Static while idle to save CPU/battery; animates briefly on edge bump or focus change.
     pub fn paint_ring(&mut self, ui: &Ui, t: &Theme, s: f32, radius: f32, page_clip: Rect) {
         if self.no_ring {
             return;
         }
         let Some((bounds, place)) = self.focused() else { return };
-        let (_, rect, r_override) = self.ring_target.filter(|(id, _, _)| Some(*id) == self.current).unwrap_or((Id::NULL, bounds, 0.0));
+        let (_, rect, r_override, clip_override) = self
+            .ring_target
+            .filter(|(id, _, _, _)| Some(*id) == self.current)
+            .unwrap_or((Id::NULL, bounds, 0.0, None));
         let now = ui.input(|i| i.time);
-        let mut pulse = ((now * 2.6).sin() as f32) * 0.5 + 0.5;
+        let mut pulse = 0.25f32;
+        if now - self.changed_at < 0.22 {
+            let e = ((now - self.changed_at) / 0.22) as f32;
+            pulse = pulse.max(0.25 + 0.55 * (e * std::f32::consts::PI).sin());
+            ui.ctx().request_repaint();
+        }
         if let Some(at) = self.bump {
             let elapsed = ((now - at) / 0.25) as f32;
             if elapsed >= 1.0 {
@@ -194,9 +223,10 @@ impl Focus {
             }
         }
         let radius = if r_override > 0.0 { r_override } else { radius };
-        let p = match place {
-            Place::Page => ui.painter().with_clip_rect(page_clip),
-            Place::Bar => ui.painter().clone(),
+        let p = match (clip_override, place) {
+            (Some(c), _) => ui.painter().with_clip_rect(c),
+            (None, Place::Page) => ui.painter().with_clip_rect(page_clip),
+            (None, Place::Bar) => ui.painter().clone(),
         };
         // Soft outer glow, wider and fainter outward.
         for i in 1..=5 {
@@ -206,7 +236,6 @@ impl Focus {
         }
         let ring_color = ui::widgets::mix(t.accent, Color32::WHITE, 0.25 + 0.2 * pulse);
         p.rect_stroke(rect.expand(2.0 * s), CornerRadius::same((radius + 2.0 * s).min(255.0) as u8), Stroke::new(3.5 * s, ring_color), StrokeKind::Outside);
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
     }
 }
 
@@ -336,5 +365,69 @@ mod tests {
             }
             assert_eq!(rectangles.last().unwrap().1, bounds.expand(2.0));
         }
+    }
+
+    #[test]
+    fn ring_around_clipped_respects_custom_container_clip() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(400.0, 300.0));
+        let drawer = Rect::from_min_max(egui::pos2(200.0, 20.0), egui::pos2(390.0, 220.0));
+        let id = Id::unique("drawer-row");
+        let mut focus = Focus { current: Some(id), ..Default::default() };
+        let bounds = Rect::from_min_size(egui::pos2(210.0, 40.0), egui::vec2(160.0, 50.0));
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+            focus.begin(ui, None, false);
+            focus.item(ui, id, bounds, drawer, Place::Bar);
+            focus.ring_around_clipped(bounds, 10.0, drawer);
+            focus.paint_ring(ui, &Theme::default(), 1.0, 10.0, screen);
+        });
+        output.textures_delta.clear();
+        let clips: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect) if rect.stroke.width > 0.0 => Some(shape.clip_rect),
+            _ => None,
+        }).collect();
+        assert_eq!(clips.len(), 6);
+        assert!(clips.iter().all(|c| *c == drawer));
+    }
+
+    #[test]
+    fn offscreen_page_item_does_not_consume_press() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(300.0, 200.0));
+        let clip = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(300.0, 100.0));
+        let id = Id::unique("offscreen-item");
+        let mut focus = Focus { current: Some(id), ..Default::default() };
+        let offscreen = Rect::from_min_size(egui::pos2(10.0, 150.0), egui::vec2(100.0, 40.0));
+        let mut activated = true;
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+            focus.begin(ui, None, true);
+            activated = focus.item(ui, id, offscreen, clip, Place::Page).activated;
+        });
+        output.textures_delta.clear();
+        assert!(!activated);
+    }
+
+    #[test]
+    fn pause_frame_clears_transient_input_and_preserves_focus() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(300.0, 200.0));
+        let id = Id::unique("keep-focus");
+        let mut focus = Focus { current: Some(id), ..Default::default() };
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+            focus.begin(ui, None, false);
+            focus.item(ui, id, screen, screen, Place::Page);
+        });
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+            focus.begin(ui, Some(Dir::Right), true);
+            focus.item(ui, id, screen, screen, Place::Page);
+            assert_eq!(focus.last_dir, Some(Dir::Right));
+            focus.pause_frame();
+        });
+        output.textures_delta.clear();
+        assert_eq!(focus.current, Some(id));
+        assert_eq!(focus.last_dir, None);
+        assert!(!focus.moved);
+        assert!(focus.items.is_empty());
     }
 }

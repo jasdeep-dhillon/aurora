@@ -606,6 +606,7 @@ impl SteamApp {
                 actions: &mut *actions,
             };
             self.registry.broadcast(&e, env);
+            self.bigpicture.on_event(&e, &self.client, self.state.steam_id, actions);
         }
     }
 

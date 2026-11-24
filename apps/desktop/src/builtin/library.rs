@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use ui::{Theme, icons, widgets as w};
 
 /// Per-game options the user can change.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct GameSettings {
     /// Extra launch arguments.
@@ -47,6 +47,26 @@ struct GameSettings {
     notes: String,
     /// Steam Cloud turned off for this game (on by default, like Steam).
     cloud_off: bool,
+}
+
+impl Default for GameSettings {
+    fn default() -> Self {
+        Self {
+            args: String::new(),
+            disabled_dlc: BTreeSet::new(),
+            enabled_dlc: BTreeSet::new(),
+            branch: String::new(),
+            beta_code: String::new(),
+            auto_update: 0,
+            background: 0,
+            controller: 0,
+            overlay_on: true,
+            private: false,
+            language: String::new(),
+            notes: String::new(),
+            cloud_off: false,
+        }
+    }
 }
 
 fn yes() -> bool {
@@ -573,6 +593,10 @@ impl Extension for Library {
         .ok()
     }
 
+    fn tick(&mut self, ctx: &mut Ctx) {
+        self.finish_uninstalls(ctx);
+    }
+
     fn as_any(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
     }
@@ -590,6 +614,7 @@ impl Extension for Library {
         self.through_steam = saved.through_steam;
         client::launch_through_steam(self.through_steam);
         self.sync_controller_overrides();
+        self.sync_overlay_overrides();
         self.shortcut_after_install = saved.pending_shortcuts;
     }
 }
@@ -2348,10 +2373,6 @@ impl Library {
     }
 
     /// Hidden from the library by the user.
-    pub(crate) fn is_hidden(&self, id: AppId) -> bool {
-        self.hidden.contains(&id)
-    }
-
     pub(crate) fn launch_dialog_pending(&self) -> bool {
         self.cloud_hold.is_some() || matches!(self.dialog, Some(Dialog::DrmNotice { .. }))
     }
@@ -3735,6 +3756,7 @@ mod themed_library_tests {
 }
 
 /// What installing a game needs (for Big Picture's install screen).
+#[derive(Clone)]
 pub(crate) struct InstallPlan {
     /// Library folders with their free space.
     pub libraries: Vec<(std::path::PathBuf, u64)>,
@@ -3761,4 +3783,201 @@ impl Library {
         }
         self.queue_install_as(ctx, id, Some(library), platform.into());
     }
+
+    /// Per-game settings & state snapshot for Big Picture's Manage page.
+    pub(crate) fn game_manage_snapshot(&self, id: AppId) -> GameManageSnapshot {
+        let s = self.games.get(&id);
+        let verify_report = self.reports.get(&id).map(|r| (r.ok, r.files, r.healthy()));
+        GameManageSnapshot {
+            favorite: self.favorites.contains(&id),
+            hidden: self.hidden.contains(&id),
+            cloud_off: s.is_some_and(|g| g.cloud_off),
+            overlay_on: s.map_or(true, |g| g.overlay_on),
+            auto_update: s.map_or(0, |g| g.auto_update),
+            background: s.map_or(0, |g| g.background),
+            branch: s.map(|g| g.branch.clone()).unwrap_or_default(),
+            disabled_dlc: s.map(|g| g.disabled_dlc.clone()).unwrap_or_default(),
+            enabled_dlc: s.map(|g| g.enabled_dlc.clone()).unwrap_or_default(),
+            uninstalling: self.uninstalling.contains_key(&id),
+            verify_report,
+        }
+    }
+
+    pub(crate) fn is_favorite(&self, id: AppId) -> bool {
+        self.favorites.contains(&id)
+    }
+
+    pub(crate) fn toggle_favorite(&mut self, ctx: &mut Ctx, id: AppId) -> bool {
+        let added = if self.favorites.remove(&id) {
+            false
+        } else {
+            self.favorites.insert(id);
+            true
+        };
+        self.sync_collections(ctx);
+        added
+    }
+
+    pub(crate) fn toggle_hidden(&mut self, ctx: &mut Ctx, id: AppId) -> bool {
+        let added = if self.hidden.remove(&id) {
+            false
+        } else {
+            self.hidden.insert(id);
+            true
+        };
+        self.sync_collections(ctx);
+        added
+    }
+
+    pub(crate) fn favorites_set(&self) -> BTreeSet<AppId> {
+        self.favorites.clone()
+    }
+
+    pub(crate) fn hidden_set(&self) -> BTreeSet<AppId> {
+        self.hidden.clone()
+    }
+
+    pub(crate) fn collections_summary(&self) -> Vec<(String, BTreeSet<AppId>)> {
+        if self.hide_collections {
+            return Vec::new();
+        }
+        self.collections
+            .iter()
+            .filter(|c| !c.games.is_empty())
+            .map(|c| (c.name.clone(), c.games.clone()))
+            .collect()
+    }
+
+    pub(crate) fn set_game_cloud(&mut self, ctx: &Ctx, id: AppId, enabled: bool) {
+        self.games.entry(id).or_default().cloud_off = !enabled;
+        self.send_cloud_settings(ctx);
+    }
+
+    fn sync_overlay_overrides(&self) {
+        let disabled: BTreeSet<AppId> = self
+            .games
+            .iter()
+            .filter(|(_, s)| !s.overlay_on)
+            .map(|(id, _)| *id)
+            .collect();
+        client::set_overlay_disabled_apps(disabled);
+    }
+
+    pub(crate) fn set_game_overlay(&mut self, id: AppId, enabled: bool) {
+        self.games.entry(id).or_default().overlay_on = enabled;
+        client::set_app_overlay(id, enabled);
+    }
+
+    pub(crate) fn set_game_auto_update(&mut self, id: AppId, mode: u8) {
+        self.games.entry(id).or_default().auto_update = mode.min(2);
+    }
+
+    pub(crate) fn set_game_background_downloads(&mut self, id: AppId, mode: u8) {
+        self.games.entry(id).or_default().background = mode.min(2);
+    }
+
+    pub(crate) fn set_game_branch(&mut self, id: AppId, branch: String) {
+        self.games.entry(id).or_default().branch = branch;
+    }
+
+    pub(crate) fn toggle_game_dlc(&mut self, id: AppId, dlc_id: AppId, enable: bool) {
+        let s = self.games.entry(id).or_default();
+        if enable {
+            s.disabled_dlc.remove(&dlc_id);
+            s.enabled_dlc.insert(dlc_id);
+        } else {
+            s.disabled_dlc.insert(dlc_id);
+            s.enabled_dlc.remove(&dlc_id);
+        }
+    }
+
+    pub(crate) fn apply_game_changes(&mut self, ctx: &mut Ctx, id: AppId, library: std::path::PathBuf) {
+        let running = ctx.state.downloads.get(&id).is_some_and(|d| {
+            !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed) && !d.verifying()
+        });
+        if running {
+            ctx.send(Command::CancelDownload { app_id: id });
+        }
+        self.queue_install(ctx, id, Some(library));
+    }
+
+    pub(crate) fn verify_game_quiet(&mut self, ctx: &mut Ctx, g: &InstalledGame) {
+        ctx.send(Command::VerifyGame {
+            game: g.clone(),
+            steam_root: ctx.local.steam_root.clone(),
+        });
+        ctx.toast(t!("Verifying files…"));
+    }
+
+    pub(crate) fn is_app_busy(&self, ctx: &Ctx, id: AppId) -> bool {
+        ctx.state.playing == Some(id)
+            || self.uninstalling.contains_key(&id)
+            || ctx.state.moving.contains_key(&id)
+            || ctx.state.backing_up.contains_key(&id)
+            || ctx.state.download_queue.contains(&id)
+            || ctx.state.cloud_syncing.contains(&id)
+            || ctx.state.downloads.get(&id).is_some_and(|d| {
+                !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed)
+            })
+    }
+
+    pub(crate) fn start_uninstall_bg(&mut self, ctx: &mut Ctx, egui_ctx: egui::Context, g: InstalledGame, name: String) -> bool {
+        let id = g.app_id;
+        if self.is_app_busy(ctx, id) {
+            return false;
+        }
+        let job = Uninstalling {
+            name: name.clone(),
+            progress: Arc::new(Progress::default()),
+            result: Arc::new(Mutex::new(None)),
+        };
+        let (progress, result) = (job.progress.clone(), job.result.clone());
+        std::thread::spawn(move || {
+            let r = local::manage::uninstall_with(&g, &progress);
+            *result.lock().unwrap() = Some(r);
+            egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
+        });
+        self.uninstalling.insert(id, job);
+        ctx.toast(t!("Uninstalling…"));
+        true
+    }
+
+    pub(crate) fn queue_update_game(&mut self, ctx: &mut Ctx, id: AppId, library: std::path::PathBuf) {
+        self.queue_install(ctx, id, Some(library));
+    }
+
+    pub(crate) fn games_needing_update(&mut self, ctx: &Ctx) -> Vec<(AppId, String, u64, std::path::PathBuf)> {
+        let busy = |id: AppId| {
+            ctx.state
+                .downloads
+                .get(&id)
+                .is_some_and(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed))
+                || ctx.state.download_queue.contains(&id)
+        };
+        let games: Vec<InstalledGame> = ctx.local.games.clone();
+        let mut out = Vec::new();
+        for g in games {
+            if !busy(g.app_id) && self.needs_update(ctx, &g) {
+                let name = ctx.state.app_name(g.app_id).map(String::from).unwrap_or(g.name);
+                out.push((g.app_id, name, g.size_on_disk, g.library));
+            }
+        }
+        out.sort_by(|a, b| model::cmp_ignore_case(&a.1, &b.1));
+        out
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct GameManageSnapshot {
+    pub favorite: bool,
+    pub hidden: bool,
+    pub cloud_off: bool,
+    pub overlay_on: bool,
+    pub auto_update: u8,
+    pub background: u8,
+    pub branch: String,
+    pub disabled_dlc: BTreeSet<AppId>,
+    pub enabled_dlc: BTreeSet<AppId>,
+    pub uninstalling: bool,
+    pub verify_report: Option<(usize, usize, bool)>,
 }

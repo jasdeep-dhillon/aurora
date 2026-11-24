@@ -13,9 +13,9 @@ use ui::{Theme, icons, widgets as w};
 #[path = "profile_pages.rs"]
 mod pages;
 #[path = "profile_edit.rs"]
-mod edit;
+pub(crate) mod edit;
 #[path = "profile_themes.rs"]
-mod themes;
+pub(crate) mod themes;
 
 /// What the profile page shows: the profile, or one of its lists.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
@@ -879,7 +879,7 @@ fn level_badge(ui: &mut Ui, t: &Theme, level: u32) {
 }
 
 /// The game and foil flag of a badge crafted from a card collection.
-fn card_set_of(url: &str) -> Option<(model::AppId, bool)> {
+pub(crate) fn card_set_of(url: &str) -> Option<(model::AppId, bool)> {
     let rest = url.split("/gamecards/").nth(1)?;
     let app = rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()?;
     Some((app, rest.contains("border=1")))
