@@ -217,6 +217,7 @@ async fn accept(name: String, tokens: Tokens, tx: mpsc::UnboundedSender<Call>) {
             tracing::warn!("steamclient pipe: too many concurrent connections");
             continue;
         };
+        let (tokens, tx) = (tokens.clone(), tx.clone());
         tokio::spawn(async move {
             let _permit = permit;
             serve_one(server, tokens, tx).await;
