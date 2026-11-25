@@ -2718,6 +2718,43 @@ mod trade_url_tests {
     }
 }
 
+/// Entry in Aurora's Game Servers browser (master server, Favorites, History, LAN, Friends).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameServerEntry {
+    pub addr: String,
+    pub ip: u32,
+    pub game_port: u16,
+    pub query_port: u16,
+    pub steam_id: u64,
+    pub app_id: u32,
+    pub name: String,
+    pub map: String,
+    pub game_dir: String,
+    pub description: String,
+    pub players: u32,
+    pub max_players: u32,
+    pub bots: u32,
+    pub password: bool,
+    pub secure: bool,
+    pub ping_ms: u32,
+    pub tags: String,
+}
+
+/// Player recently played with (`View -> Players` / `/friends/coplay`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentPlayer {
+    pub steam_id: SteamId,
+    pub name: String,
+    #[serde(default)]
+    pub avatar: String,
+    #[serde(default)]
+    pub app_id: Option<AppId>,
+    #[serde(default)]
+    pub game_name: String,
+    #[serde(default)]
+    pub played_at: String,
+}
+
 /// Compare names as lowercase text, with no allocation for ASCII names.
 pub fn cmp_ignore_case(a: &str, b: &str) -> std::cmp::Ordering {
     if a.is_ascii() && b.is_ascii() {

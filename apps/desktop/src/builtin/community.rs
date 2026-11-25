@@ -22,6 +22,7 @@ pub struct Community {
     search: String,
     add: String,
     remove_confirm: Option<SteamId>,
+    players_loaded: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -29,6 +30,7 @@ enum FriendsTab {
     #[default]
     Friends,
     Groups,
+    Players,
     Add,
     Invites,
     Blocked,
@@ -55,6 +57,12 @@ impl Extension for Community {
             if arg == "invites" {
                 self.selected = None;
                 self.tab = FriendsTab::Invites;
+                return;
+            }
+            if arg == "players" {
+                self.selected = None;
+                self.tab = FriendsTab::Players;
+                self.players_loaded = false;
                 return;
             }
             if let Some(rest) = arg.strip_prefix("group:") {
@@ -459,9 +467,22 @@ impl Community {
                     ui.set_width(220.0);
                     ui.label(w::caption_text(&t, &format!("{}  {}", icons::USERS, w::sentence_case(t!("FRIENDS")))));
                     ui.add_space(4.0);
+                    let players_n = {
+                        let mut seen = HashSet::new();
+                        for (id, _, _) in &state.session_coplay {
+                            seen.insert(*id);
+                        }
+                        if let Some(Ok(list)) = &state.recent_players {
+                            for p in list {
+                                seen.insert(p.steam_id);
+                            }
+                        }
+                        seen.len()
+                    };
                     let items = [
                         (FriendsTab::Friends, icons::USER, t!("Your friends"), friends_n),
                         (FriendsTab::Groups, icons::USERS_THREE, t!("Group chats"), state.chat_groups.len()),
+                        (FriendsTab::Players, icons::CLOCK, t!("Players"), players_n),
                         (FriendsTab::Add, icons::USER_PLUS, t!("Add a friend"), 0),
                         (FriendsTab::Invites, icons::BELL, t!("Invites"), invites_n),
                         (FriendsTab::Blocked, icons::LOCK_SIMPLE, t!("Blocked"), blocked_n),
@@ -501,6 +522,7 @@ impl Community {
                     egui::ScrollArea::vertical().id_salt("friends-page").auto_shrink([false, false]).show(ui, |ui| match self.tab {
                         FriendsTab::Friends => self.friends_grid(ui, t, ctx, friends_n),
                         FriendsTab::Groups => self.groups_grid(ui, t, ctx),
+                        FriendsTab::Players => self.recent_players_view(ui, t, ctx),
                         FriendsTab::Add => self.add_friend(ui, t, ctx),
                         FriendsTab::Invites => self.invites(ui, t, ctx),
                         FriendsTab::Blocked => self.blocked(ui, t, ctx),
@@ -790,6 +812,108 @@ impl Community {
                 }
             });
             ui.add_space(4.0);
+        }
+    }
+
+    fn recent_players_view(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
+        if !self.players_loaded && ctx.state.online() {
+            self.players_loaded = true;
+            ctx.send(Command::LoadRecentPlayers);
+        }
+        ui.horizontal(|ui| {
+            ui.label(w::text_bold(t!("Players"), 20.0, t.text));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if w::button(ui, t, Some(icons::REFRESH), t!("Refresh"), w::Kind::Secondary, w::Size::Sm).clicked() && ctx.state.online() {
+                    ctx.send(Command::LoadRecentPlayers);
+                }
+            });
+        });
+        ui.label(w::text(t!("People you've recently played multiplayer games with."), 13.0, t.text_dim));
+        ui.add_space(10.0);
+
+        let mut rows: Vec<model::RecentPlayer> = Vec::new();
+        let mut seen = HashSet::new();
+        for (steam_id, app_id, ts) in &ctx.state.session_coplay {
+            if !seen.insert(*steam_id) {
+                continue;
+            }
+            let p = ctx.state.persona(*steam_id);
+            let game_name = ctx.state.app_name(*app_id).map(String::from).unwrap_or_else(|| format!("App {app_id}"));
+            rows.push(model::RecentPlayer {
+                steam_id: *steam_id,
+                name: if p.name.is_empty() { steam_id.to_string() } else { p.name },
+                avatar: art::avatar(p.avatar_hash.as_deref()),
+                app_id: Some(*app_id),
+                game_name,
+                played_at: if *ts > 0 { ui::date(*ts) } else { t!("Current session").to_string() },
+            });
+        }
+        if let Some(Ok(list)) = &ctx.state.recent_players {
+            for r in list {
+                if seen.insert(r.steam_id) {
+                    rows.push(r.clone());
+                }
+            }
+        }
+
+        if let Some(Err(e)) = &ctx.state.recent_players
+            && rows.is_empty()
+        {
+            ui.label(w::text(i18n::tr_dyn(e), 13.5, t.danger));
+            return;
+        }
+        if rows.is_empty() {
+            let msg = if ctx.state.recent_players.is_none() && ctx.state.online() {
+                t!("Loading recent players…")
+            } else {
+                t!("No recent co-op or multiplayer players recorded yet.")
+            };
+            ui.label(w::text(msg, 13.5, t.text_faint));
+            return;
+        }
+
+        for r in &rows {
+            let is_friend = ctx.state.friends.get(&r.steam_id).is_some_and(|rel| *rel == model::Relationship::Friend);
+            let p = ctx.state.persona(r.steam_id);
+            let avatar = p.avatar_hash.as_deref().map(|h| art::avatar(Some(h))).unwrap_or_else(|| r.avatar.clone());
+            let display = if !p.name.is_empty() { &p.name } else if !r.name.is_empty() { &r.name } else { &r.steam_id.to_string() };
+            egui::Frame::new()
+                .fill(t.raised)
+                .corner_radius(t.corner_small())
+                .inner_margin(Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        w::avatar(ui, t, &avatar, 36.0, None);
+                        ui.add_space(6.0);
+                        ui.vertical(|ui| {
+                            ui.label(w::text_semibold(display, 13.5, t.text));
+                            let mut sub = Vec::new();
+                            if !r.game_name.is_empty() {
+                                sub.push(r.game_name.clone());
+                            }
+                            if !r.played_at.is_empty() {
+                                sub.push(r.played_at.clone());
+                            }
+                            if !sub.is_empty() {
+                                ui.label(w::text(sub.join(" · "), 12.0, t.text_dim));
+                            }
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if w::button(ui, t, Some(icons::USER_CIRCLE), t!("Profile"), w::Kind::Ghost, w::Size::Sm).clicked() {
+                                ctx.navigate("profile", Some(r.steam_id.to_string()));
+                            }
+                            if is_friend {
+                                if w::button(ui, t, Some(icons::CHAT), t!("Message"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                                    ctx.act(Action::OpenChat(r.steam_id));
+                                }
+                            } else if w::button(ui, t, Some(icons::USER_PLUS), t!("Add friend"), w::Kind::Secondary, w::Size::Sm).clicked() {
+                                ctx.send(Command::AddFriend { steam_id: r.steam_id });
+                            }
+                        });
+                    });
+                });
+            ui.add_space(6.0);
         }
     }
 }
