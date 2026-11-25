@@ -377,6 +377,7 @@
 "Show the account picker at startup instead of signing in automatically." = "Mostrar el selector de cuentas al iniciar en lugar de iniciar sesión automáticamente."
 "Show What's new" = "Mostrar Novedades"
 "Show recent news from the games you play on the library home." = "Mostrar las noticias recientes de tus juegos en el inicio de la biblioteca."
+"What's new hidden. You can turn it back on in Settings → Library." = "Novedades oculto. Puedes volver a activarlo en Parámetros → Biblioteca."
 "REVIEWS" = "RESEÑAS"
 "({percent}% of {count})" = "({percent} % de {count})"
 "Features" = "Características"

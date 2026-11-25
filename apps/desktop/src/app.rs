@@ -1609,6 +1609,19 @@ mod tests {
         assert_eq!(restored.controller, prefs.controller);
         assert_eq!(restored.controller_bindings, prefs.controller_bindings);
     }
+
+    #[test]
+    fn prefs_show_whats_new_defaults_true_and_roundtrips() {
+        let legacy: Prefs = serde_json::from_str("{}").unwrap();
+        assert!(legacy.show_whats_new);
+        assert!(Prefs::default().show_whats_new);
+
+        let mut prefs = Prefs::default();
+        prefs.show_whats_new = false;
+        let json = serde_json::to_string(&prefs).unwrap();
+        let restored: Prefs = serde_json::from_str(&json).unwrap();
+        assert!(!restored.show_whats_new);
+    }
 }
 
 #[cfg(test)]
