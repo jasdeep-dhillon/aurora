@@ -12,7 +12,7 @@
     <p>Aurora is an unofficial native Steam desktop client written in Rust with Store, Library, Downloads, Big Picture mode, Friends and Chat, and game launching with Steam host, Proton, Steamworks, and Vulkan overlay support.</p>
   </description>
   <launchable type="desktop-id">io.github.mollie2999.Aurora.desktop</launchable>
-  <url type="homepage">https://mollie2999.github.io/Aurora/</url>
+  <url type="homepage">https://auroraclient.eu/</url>
   <url type="bugtracker">https://github.com/mollie2999/Aurora/issues</url>
   <content_rating type="oars-1.1" />
 </component>

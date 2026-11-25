@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://mollie2999.github.io/Aurora/"><b>Website</b></a> ·
+  <a href="https://auroraclient.eu/"><b>Website</b></a> ·
   <a href="#screenshots"><b>Screenshots</b></a> ·
   <a href="#faq"><b>FAQ</b></a> ·
   <a href="#benchmarks"><b>Benchmarks</b></a> ·
