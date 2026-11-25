@@ -1537,6 +1537,18 @@ async fn online(
                         }
                     });
                 }
+                Some(Command::SetPreferredLender { family_id, app_id, lender, language }) => {
+                    let (conn, sink, me) = (st.conn.clone(), sink.clone(), st.me);
+                    tokio::spawn(async move {
+                        match crate::account::set_preferred_lender(&conn, family_id, app_id, lender).await {
+                            Ok(()) => {
+                                sink(Event::FamilyAction(Ok(model::FamilyActionDone::PreferredCopySet)));
+                                reload_family(&conn, &sink, me, &language).await;
+                            }
+                            Err(e) => sink(Event::FamilyAction(Err(e))),
+                        }
+                    });
+                }
                 Some(Command::LoadPurchases { language, cursor }) => st.with_web(sink, move |web, sink| async move {
                     let more = cursor.is_some();
                     let result = match web {

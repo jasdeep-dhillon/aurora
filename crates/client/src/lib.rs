@@ -277,6 +277,8 @@ pub enum Command {
     RemoveFromFamily { family_id: u64, steam_id: SteamId, language: String },
     /// Delete a Steam Family (adult role required).
     DeleteFamily { family_id: u64, language: String },
+    /// Play `lender`'s copy of a family-shared game.
+    SetPreferredLender { family_id: u64, app_id: AppId, lender: SteamId, language: String },
     CancelListing { listing_id: u64 },
     CancelBuyOrder { order_id: u64 },
     /// Fetch the games on someone's profile with their playtime.
@@ -471,6 +473,9 @@ impl std::fmt::Debug for Command {
                 f.debug_struct("RemoveFromFamily").field("family_id", family_id).field("steam_id", steam_id).field("language", language).finish()
             }
             Command::DeleteFamily { family_id, language } => f.debug_struct("DeleteFamily").field("family_id", family_id).field("language", language).finish(),
+            Command::SetPreferredLender { family_id, app_id, lender, language } => {
+                f.debug_struct("SetPreferredLender").field("family_id", family_id).field("app_id", app_id).field("lender", lender).field("language", language).finish()
+            }
             Command::CancelListing { listing_id } => f.debug_struct("CancelListing").field("listing_id", listing_id).finish(),
             Command::CancelBuyOrder { order_id } => f.debug_struct("CancelBuyOrder").field("order_id", order_id).finish(),
             Command::LoadPlayerGames { steam_id, language } => f.debug_struct("LoadPlayerGames").field("steam_id", steam_id).field("language", language).finish(),
