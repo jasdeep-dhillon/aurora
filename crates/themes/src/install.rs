@@ -273,7 +273,7 @@ fn read_zip_string(archive: &mut zip::ZipArchive<File>, idx: usize) -> Result<St
     String::from_utf8(buf).map_err(|e| Error::Io(io::Error::new(io::ErrorKind::InvalidData, e)))
 }
 
-fn commit_tmp_dir(tmp_dir: &Path, final_dir: &Path) -> Result<(), Error> {
+pub(crate) fn commit_tmp_dir(tmp_dir: &Path, final_dir: &Path) -> Result<(), Error> {
     if final_dir.exists() {
         fs::remove_dir_all(final_dir)?;
     }

@@ -39,8 +39,8 @@ GPU with [egui](https://github.com/emilk/egui) in **one process**—idling at
   Fedora, AppImage (SteamOS/Bazzite), and Windows.
 - **Big Picture & Steam Deck UI:** controller-first fullscreen interface with
   Quick Access menu (`aurora --bigpicture` or `aurora --steam-deck`).
-- **Custom themes & Rhai plugins:** declarative theme support (including Native
-  Adwaita and Steam Replica examples) and sandboxed Rhai plugins.
+- **Custom themes & Rhai plugins:** declarative theme support (with Native
+  Adwaita and Aurora Desktop themes bundled out of the box) and sandboxed Rhai plugins.
 - **Try without signing in:** run `aurora --demo` to explore the interface with
   sample data before ever entering your Steam account.
 
