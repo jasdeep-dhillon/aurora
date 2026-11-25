@@ -1027,6 +1027,7 @@ mod group_tests {
             server_msg: None,
             reactions: Vec::new(),
             mentioned_me: false,
+            media: Vec::new(),
         };
         s.apply(&Event::GroupMessage(msg.clone()));
         // Duplicate delivery is ignored.

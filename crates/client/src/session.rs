@@ -2142,7 +2142,7 @@ impl Online {
                         1 => {
                             // The markup keeps invites (game, lobby, group); the plain text loses them.
                             let parsed = model::chat::parse_message(n.message());
-                            let text = if parsed.text.is_empty() && parsed.invite.is_none() && parsed.group_invite.is_none() {
+                            let text = if parsed.text.is_empty() && parsed.invite.is_none() && parsed.group_invite.is_none() && parsed.media.is_empty() {
                                 n.message_no_bbcode().to_string()
                             } else {
                                 parsed.text
@@ -2154,6 +2154,7 @@ impl Online {
                                 time: n.rtime32_server_timestamp() as u64,
                                 invite: parsed.invite,
                                 group_invite: parsed.group_invite,
+                                media: parsed.media,
                             }))
                         }
                         2 => sink(Event::Typing { from: n.steamid_friend() }),
@@ -2216,6 +2217,7 @@ impl Online {
                         time: r.server_timestamp() as u64,
                         invite: parsed.invite,
                         group_invite: parsed.group_invite,
+                        media: parsed.media,
                     }))
                 }
                 Err(e) => sink(Event::Error(format!("Message not sent: {e}"))),
@@ -2989,6 +2991,7 @@ impl Online {
                                 time: m.timestamp() as u64,
                                 invite: parsed.invite,
                                 group_invite: parsed.group_invite,
+                                media: parsed.media,
                             }
                         })
                         .collect();

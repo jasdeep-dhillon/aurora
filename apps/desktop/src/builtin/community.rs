@@ -268,7 +268,7 @@ pub fn chat_body(ui: &mut Ui, t: &Theme, state: &State, client: &impl Sender, fr
             }
             let mut last: Option<(SteamId, u64)> = None;
             // Nothing to show (e.g. markup we don't draw): skip it.
-            for m in msgs.iter().filter(|m| !m.text.is_empty() || m.invite.is_some() || m.group_invite.is_some()) {
+            for m in msgs.iter().filter(|m| !m.text.is_empty() || !m.media.is_empty() || m.invite.is_some() || m.group_invite.is_some()) {
                 let new_group = last.is_none_or(|(from, time)| from != m.from || m.time.saturating_sub(time) > 300);
                 if new_group {
                     ui.add_space(10.0);
@@ -336,10 +336,16 @@ pub fn chat_body(ui: &mut Ui, t: &Theme, state: &State, client: &impl Sender, fr
     join
 }
 
-/// One message: its text, plus any game invite or group chat invite card.
+/// One message: its text, media previews, plus any game invite or group chat invite card.
 fn message(ui: &mut Ui, t: &Theme, state: &State, client: &impl Sender, m: &model::ChatMessage, join: &mut Option<Action>) {
     if !m.text.is_empty() && !(m.invite.is_some() && m.text.contains("steam://run/")) {
-        ui.add(egui::Label::new(w::text(&m.text, 14.0, t.text)).wrap());
+        let resp = super::chat_render::render_message_text(ui, t, &m.text, &m.media, t.text);
+        resp.context_menu(|ui| super::chat_render::context_menu_items(ui, t, &m.text, &m.media));
+    }
+    super::chat_render::render_media(ui, t, &m.text, &m.media);
+    if m.text.is_empty() && !m.media.is_empty() {
+        let (_, filler) = ui.allocate_exact_size(vec2(1.0, 1.0), Sense::click());
+        filler.context_menu(|ui| super::chat_render::context_menu_items(ui, t, &m.text, &m.media));
     }
     if let Some(inv) = &m.invite {
         game_invite_card(ui, t, state, inv, m.from == state.steam_id, join);
@@ -419,7 +425,7 @@ fn friend_list(ui: &mut Ui, t: &Theme, state: &State, filter: &str, selected: Op
                 let status = if state.is_typing(p.steam_id) {
                     "typing…".to_string()
                 } else if let Some(m) = state.chats.get(&p.steam_id).and_then(|c| c.last()) {
-                    m.text.clone()
+                    super::chat_render::toast_preview(&m.text, &m.media)
                 } else {
                     crate::shell::status_text(state, p)
                 };
@@ -817,7 +823,7 @@ mod tests {
         let t = Theme::default();
         let mut state = State::default();
         let friend: SteamId = 76561197960287930;
-        state.chats.insert(friend, (0..30).map(|i| model::ChatMessage { friend, from: friend, text: format!("message {i}"), time: 1_700_000_000 + i * 600, invite: (i % 7 == 0).then(|| model::GameInvite { app_id: 477160, connect: "+connect_lobby 1".into() }), group_invite: None }).collect());
+        state.chats.insert(friend, (0..30).map(|i| model::ChatMessage { friend, from: friend, text: format!("message {i}"), time: 1_700_000_000 + i * 600, invite: (i % 7 == 0).then(|| model::GameInvite { app_id: 477160, connect: "+connect_lobby 1".into() }), group_invite: None, media: Vec::new() }).collect());
         let mut input = String::new();
         let mut heights = Vec::new();
         for frame in 0..40 {

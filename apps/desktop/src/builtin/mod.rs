@@ -5,6 +5,7 @@
 
 pub mod community;
 pub mod community_home;
+pub mod chat_render;
 pub mod group_chat;
 pub(crate) mod downloads;
 pub mod hub;
