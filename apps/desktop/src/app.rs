@@ -267,6 +267,18 @@ impl SteamApp {
         let mut prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
         let cfg_dir = client::store::config_dir();
         let mut theme_manager = themes::ThemeManager::new(cfg_dir.join("themes"), cfg_dir.join("theme-data"));
+        match theme_manager.sync_bundled_themes() {
+            Ok(report) => {
+                if !report.installed.is_empty() || !report.updated.is_empty() {
+                    tracing::info!(
+                        installed = ?report.installed,
+                        updated = ?report.updated,
+                        "synced bundled themes"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!("sync bundled themes: {e}"),
+        }
         theme_manager.scan();
         let mut last_error = None;
         if let Some(id) = prefs.active_theme_id.as_deref() {
