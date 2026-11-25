@@ -33,6 +33,7 @@ package() {
   install -Dm755 aurora "$pkgdir/opt/aurora/aurora"
   install -Dm755 steamhost "$pkgdir/opt/aurora/steamhost"
   install -Dm755 libVkLayer_aurora_overlay.so "$pkgdir/opt/aurora/libVkLayer_aurora_overlay.so"
+  install -Dm755 libaurora_htmlsurface.so "$pkgdir/opt/aurora/libaurora_htmlsurface.so"
   local dll
   for dll in steamclient64.dll steamclient32.dll; do
     if [ -f "$dll" ]; then install -Dm644 "$dll" "$pkgdir/opt/aurora/$dll"; fi
