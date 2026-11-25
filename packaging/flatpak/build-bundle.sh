@@ -23,6 +23,8 @@ build="$work/build"
 flatpak build-init --arch=x86_64 "$build" "$id" "$platform" "$platform" "$branch"
 install -Dm755 "$src/aurora" "$build/files/bin/aurora"
 install -Dm755 "$src/steamhost" "$build/files/bin/steamhost"
+install -Dm755 "$src/libVkLayer_aurora_overlay.so" "$build/files/bin/libVkLayer_aurora_overlay.so"
+install -Dm755 "$src/libaurora_htmlsurface.so" "$build/files/bin/libaurora_htmlsurface.so"
 install -Dm644 "$src/LICENSE" "$build/files/share/licenses/$id/LICENSE"
 install -Dm644 "$src/icon-256.png" \
     "$build/files/share/icons/hicolor/256x256/apps/$id.png"

@@ -98,6 +98,12 @@ if [[ ! -s "$out_abs" ]]; then
     echo "AppImage was not created: $out_abs" >&2
     exit 1
 fi
+# Under APPIMAGE_EXTRACT_AND_RUN=1, appimagetool 1.9.1 invokes zsyncmake from its
+# ephemeral extract directory, so the .zsync file is discarded on exit. Generate
+# it beside the AppImage whenever appimagetool did not leave one there.
+if [[ ! -s "$out_abs.zsync" ]]; then
+    zsyncmake -u "$out_name" -o "$out_abs.zsync" "$out_abs"
+fi
 if [[ ! -s "$out_abs.zsync" ]]; then
     echo "AppImage zsync metadata was not created: $out_abs.zsync" >&2
     exit 1
