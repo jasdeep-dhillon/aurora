@@ -39,6 +39,9 @@ pub struct Prefs {
     pub fps_counter: crate::builtin::settings::FpsCorner,
     #[serde(default)]
     pub fps_high_contrast: bool,
+    /// Show the "What's new" news shelf on the library home.
+    #[serde(default = "yes")]
+    pub show_whats_new: bool,
     /// Account to sign in automatically at startup (cleared on log out).
     pub auto_login: Option<String>,
     /// Interface language code; `None` follows the system.
@@ -130,6 +133,7 @@ impl Default for Prefs {
             overlay_enabled: true,
             fps_counter: crate::builtin::settings::FpsCorner::Off,
             fps_high_contrast: false,
+            show_whats_new: true,
             auto_login: None,
             language: None,
             language_asked: false,
@@ -349,6 +353,7 @@ impl SteamApp {
             overlay_enabled: prefs.overlay_enabled,
             fps_counter: prefs.fps_counter,
             fps_high_contrast: prefs.fps_high_contrast,
+            show_whats_new: prefs.show_whats_new,
         }));
         client::set_proton_override(prefs.proton_override.clone());
         client::set_app_protons(prefs.proton_per_app.clone());
@@ -1217,6 +1222,7 @@ impl eframe::App for SteamApp {
             self.prefs.overlay_enabled = f.overlay_enabled;
             self.prefs.fps_counter = f.fps_counter;
             self.prefs.fps_high_contrast = f.fps_high_contrast;
+            self.prefs.show_whats_new = f.show_whats_new;
             #[cfg(not(windows))]
             {
                 self.prefs.precompile_shaders = client::shaders::precompile();
@@ -1620,6 +1626,19 @@ mod tests {
         let restored: Prefs = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.controller, prefs.controller);
         assert_eq!(restored.controller_bindings, prefs.controller_bindings);
+    }
+
+    #[test]
+    fn prefs_show_whats_new_defaults_true_and_roundtrips() {
+        let legacy: Prefs = serde_json::from_str("{}").unwrap();
+        assert!(legacy.show_whats_new);
+        assert!(Prefs::default().show_whats_new);
+
+        let mut prefs = Prefs::default();
+        prefs.show_whats_new = false;
+        let json = serde_json::to_string(&prefs).unwrap();
+        let restored: Prefs = serde_json::from_str(&json).unwrap();
+        assert!(!restored.show_whats_new);
     }
 }
 

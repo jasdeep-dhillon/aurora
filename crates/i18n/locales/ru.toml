@@ -404,6 +404,9 @@
 "CURRENTLY IN GAME" = "СЕЙЧАС В ИГРЕ"
 "Ask which account to use" = "Спрашивать, какой аккаунт использовать"
 "Show the account picker at startup instead of signing in automatically." = "При запуске показывать выбор аккаунта вместо автоматического входа."
+"Show What's new" = "Показывать «Что нового»"
+"Show recent news from the games you play on the library home." = "Показывать свежие новости ваших игр на главной странице библиотеки."
+"What's new hidden. You can turn it back on in Settings → Library." = "Раздел «Что нового» скрыт. Его можно вернуть в «Настройки → Библиотека»."
 
 # --- Store additions ---
 "REVIEWS" = "ОБЗОРЫ"

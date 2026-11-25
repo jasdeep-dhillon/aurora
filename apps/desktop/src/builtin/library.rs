@@ -549,6 +549,11 @@ impl Extension for Library {
         let mut show = !self.hide_collections;
         super::settings::switch(ui, &t, t!("Show collections"), t!("Collection filters and the new collection button in the library sidebar, and the Add to collection menu on games."), &mut show);
         self.hide_collections = !show;
+        if let Some(flags) = &self.flags {
+            let mut f = *flags.lock().unwrap();
+            super::settings::switch(ui, &t, t!("Show What's new"), t!("Show recent news from the games you play on the library home."), &mut f.show_whats_new);
+            *flags.lock().unwrap() = f;
+        }
         // Non-Steam games added in the official client.
         egui::Frame::new().fill(t.surface).corner_radius(t.corner_small()).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -865,13 +870,21 @@ impl Library {
 
     /// "What's new": the latest update posts from games you play, newest first.
     fn whats_new(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, recent: &[(AppId, &str, u64)]) {
+        if !self.whats_new_enabled() {
+            return;
+        }
         let ids: Vec<_> = recent.iter().map(|g| g.0).collect();
         let (posts, loading) = self.whats_new_posts(&ids);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         if posts.is_empty() && !loading {
             return;
         }
-        w::section(ui, t, t!("What's new"), None);
+        if w::section(ui, t, t!("What's new"), Some(t!("Hide"))) {
+            self.set_whats_new_enabled(false);
+            ctx.toast(t!("What's new hidden. You can turn it back on in Settings → Library."));
+            ui.ctx().request_repaint();
+            return;
+        }
         // Steam's event images are 16:9 (800x450): a 16:9 slot shows them whole.
         let card = vec2(300.0, 300.0 * 9.0 / 16.0 + 80.0);
         egui::ScrollArea::horizontal().id_salt("whats-new").show(ui, |ui| {
@@ -1095,6 +1108,17 @@ impl Library {
 
     pub fn new(rt: tokio::runtime::Handle, egui: egui::Context, flags: super::settings::SharedFlags, layout: SharedLibraryLayout) -> Self {
         Self { rt: Some(rt), egui: Some(egui), tile: 160.0, flags: Some(flags), layout: Some(layout), ..Default::default() }
+    }
+
+    /// Settings > Library > "Show What's new" (on unless turned off).
+    fn whats_new_enabled(&self) -> bool {
+        self.flags.as_ref().is_none_or(|f| f.lock().unwrap().show_whats_new)
+    }
+
+    fn set_whats_new_enabled(&self, enabled: bool) {
+        if let Some(flags) = &self.flags {
+            flags.lock().unwrap().show_whats_new = enabled;
+        }
     }
 
     /// Like Steam: queue games that need an update, unless auto-updates are
@@ -2949,13 +2973,32 @@ impl PlayedGroup {
 }
 
 // The header arrows page the actual scroll area rather than dropping excess cards.
-fn themed_shelf_header(ui: &mut Ui, t: &Theme, title: &str, line: bool) -> f32 {
+fn themed_shelf_header(ui: &mut Ui, t: &Theme, title: &str, line: bool, on_hide: Option<&mut bool>) -> f32 {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
     let g = ui.painter().layout_no_wrap(i18n::tr_dyn(title), w::font(16.0), t.text);
     let end = r.left() + g.size().x;
     ui.painter().galley(r.left_center() - vec2(0.0, g.size().y * 0.5), g, t.text);
+    let mut right_edge = r.right() - 80.0;
+    if let Some(hide) = on_hide {
+        let hide_label = t!("Hide");
+        let hg = ui.painter().layout_no_wrap(hide_label.to_string(), w::font(12.5), t.text_faint);
+        let hw = hg.size().x;
+        let hide_rect = Rect::from_min_size(pos2(r.right() - 78.0 - hw, r.top()), vec2(hw, 24.0));
+        let resp = ui.interact(hide_rect, ui.scope_id().with((title, "hide")), Sense::click());
+        let fg = if resp.hovered() { t.text } else { t.text_faint };
+        let hg = ui.painter().layout_no_wrap(hide_label.to_string(), w::font(12.5), fg);
+        let text_pos = pos2(hide_rect.left(), hide_rect.center().y - hg.size().y * 0.5);
+        ui.painter().galley(text_pos, hg, fg);
+        if resp.hovered() {
+            ui.painter().hline(hide_rect.x_range(), hide_rect.bottom() - 3.0, Stroke::new(1.0, fg));
+        }
+        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            *hide = true;
+        }
+        right_edge = hide_rect.left() - 16.0;
+    }
     if line {
-        ui.painter().hline((end + 20.0)..=(r.right() - 80.0).max(end + 20.0), r.center().y,
+        ui.painter().hline((end + 20.0)..=right_edge.max(end + 20.0), r.center().y,
             Stroke::new(6.0, t.surface_hover));
     }
     let mut delta = 0.0;
@@ -2987,6 +3030,10 @@ fn themed_shelf_scroll(ui: &Ui, salt: &str, delta: f32) -> egui::ScrollArea {
 impl crate::theme_renderer::LibraryHost for Library {
     fn is_detail_open(&self) -> bool {
         self.custom_selected.is_some() || self.selected.is_some()
+    }
+
+    fn whats_new_enabled(&self) -> bool {
+        Library::whats_new_enabled(self)
     }
 
     fn render_detail(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
@@ -3338,6 +3385,9 @@ impl crate::theme_renderer::LibraryHost for Library {
         gap: f32,
         _style: &themes::NodeStyle,
     ) {
+        if !self.whats_new_enabled() {
+            return;
+        }
         let account_recent = themed_recent_games(ctx);
 
         let mut posts: Vec<(AppId, usize, store::events::GameEvent)> = Vec::new();
@@ -3354,7 +3404,14 @@ impl crate::theme_renderer::LibraryHost for Library {
         if posts.is_empty() && !loading {
             return;
         }
-        let scroll_delta = title.map(|hdr| themed_shelf_header(ui, t, hdr, false)).unwrap_or(0.0);
+        let mut hide = false;
+        let scroll_delta = title.map(|hdr| themed_shelf_header(ui, t, hdr, false, Some(&mut hide))).unwrap_or(0.0);
+        if hide {
+            self.set_whats_new_enabled(false);
+            ctx.toast(t!("What's new hidden. You can turn it back on in Settings → Library."));
+            ui.ctx().request_repaint();
+            return;
+        }
         ui.add_space(4.0);
         let radius = CornerRadius::same(card_radius);
         let top_off = if date_above { 18.0 } else { 0.0 };
@@ -3434,7 +3491,7 @@ impl crate::theme_renderer::LibraryHost for Library {
         if account_recent.is_empty() {
             return;
         }
-        let scroll_delta = title.map(|hdr| themed_shelf_header(ui, t, hdr, true)).unwrap_or(0.0);
+        let scroll_delta = title.map(|hdr| themed_shelf_header(ui, t, hdr, true, None)).unwrap_or(0.0);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let age = now.saturating_sub(account_recent[0].2) / 86_400;
         let when = match age {
@@ -3764,6 +3821,23 @@ mod themed_library_tests {
         assert_eq!(args.user, "-novid");
         assert_eq!(args.controller, 2);
         assert_eq!(lib.launch_args_for(440).controller, 0);
+    }
+
+    #[test]
+    fn whats_new_enabled_respects_shared_flags() {
+        let mut lib = Library::default();
+        assert!(lib.whats_new_enabled());
+
+        let flags = std::sync::Arc::new(std::sync::Mutex::new(super::super::settings::AppFlags {
+            show_whats_new: true,
+            ..Default::default()
+        }));
+        lib.flags = Some(flags.clone());
+        assert!(lib.whats_new_enabled());
+
+        lib.set_whats_new_enabled(false);
+        assert!(!lib.whats_new_enabled());
+        assert!(!flags.lock().unwrap().show_whats_new);
     }
 }
 

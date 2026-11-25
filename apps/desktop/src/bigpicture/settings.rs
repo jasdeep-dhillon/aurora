@@ -636,6 +636,13 @@ fn rows(bp: &mut BigPicture, f: &mut Frame) -> Vec<Row> {
                     flags.cloud,
                     flag(|x| &mut x.cloud),
                 ),
+                toggle(
+                    "lib-whats-new",
+                    t!("Show What's new"),
+                    t!("Show recent news from the games you play on the library home."),
+                    flags.show_whats_new,
+                    flag(|x| &mut x.show_whats_new),
+                ),
             ]
         }
         NOTIFICATIONS => vec![

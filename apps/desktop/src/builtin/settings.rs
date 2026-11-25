@@ -98,6 +98,8 @@ pub struct AppFlags {
     pub fps_counter: FpsCorner,
     /// High-contrast green color for the in-game FPS counter.
     pub fps_high_contrast: bool,
+    /// Show the "What's new" news shelf on the library home.
+    pub show_whats_new: bool,
 }
 
 pub type SharedFlags = std::sync::Arc<std::sync::Mutex<AppFlags>>;
