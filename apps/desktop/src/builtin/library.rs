@@ -865,6 +865,9 @@ impl Library {
 
     /// "What's new": the latest update posts from games you play, newest first.
     fn whats_new(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx, recent: &[(AppId, &str, u64)]) {
+        if !self.whats_new_enabled() {
+            return;
+        }
         let ids: Vec<_> = recent.iter().map(|g| g.0).collect();
         let (posts, loading) = self.whats_new_posts(&ids);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -1095,6 +1098,11 @@ impl Library {
 
     pub fn new(rt: tokio::runtime::Handle, egui: egui::Context, flags: super::settings::SharedFlags, layout: SharedLibraryLayout) -> Self {
         Self { rt: Some(rt), egui: Some(egui), tile: 160.0, flags: Some(flags), layout: Some(layout), ..Default::default() }
+    }
+
+    /// Settings > Interface > "Show What's new" (on unless turned off).
+    fn whats_new_enabled(&self) -> bool {
+        self.flags.as_ref().is_none_or(|f| f.lock().unwrap().show_whats_new)
     }
 
     /// Like Steam: queue games that need an update, unless auto-updates are
@@ -3329,6 +3337,9 @@ impl crate::theme_renderer::LibraryHost for Library {
         gap: f32,
         _style: &themes::NodeStyle,
     ) {
+        if !self.whats_new_enabled() {
+            return;
+        }
         let account_recent = themed_recent_games(ctx);
 
         let mut posts: Vec<(AppId, usize, store::events::GameEvent)> = Vec::new();

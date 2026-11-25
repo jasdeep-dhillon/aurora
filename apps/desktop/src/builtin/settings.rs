@@ -98,6 +98,8 @@ pub struct AppFlags {
     pub fps_counter: FpsCorner,
     /// High-contrast green color for the in-game FPS counter.
     pub fps_high_contrast: bool,
+    /// Show the "What's new" news shelf on the library home.
+    pub show_whats_new: bool,
 }
 
 pub type SharedFlags = std::sync::Arc<std::sync::Mutex<AppFlags>>;
@@ -999,6 +1001,7 @@ fn interface(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, flags: &SharedFlags, handler
         };
         row(ui, t!("Close to tray"), t!("Keep Aurora running in the system tray when you close the window."), &mut f.close_to_tray);
         row(ui, t!("Ask which account to use"), t!("Show the account picker at startup instead of signing in automatically."), &mut f.ask_account);
+        row(ui, t!("Show What's new"), t!("Show recent news from the games you play on the library home."), &mut f.show_whats_new);
     });
     *flags.lock().unwrap() = f;
     ui.add_space(12.0);

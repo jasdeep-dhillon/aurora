@@ -375,6 +375,8 @@
 "CURRENTLY IN GAME" = "EN JEU ACTUELLEMENT"
 "Ask which account to use" = "Demander quel compte utiliser"
 "Show the account picker at startup instead of signing in automatically." = "Afficher le choix du compte au démarrage au lieu de se connecter automatiquement."
+"Show What's new" = "Afficher les Nouveautés"
+"Show recent news from the games you play on the library home." = "Afficher les dernières actualités de vos jeux sur l'accueil de la bibliothèque."
 "REVIEWS" = "ÉVALUATIONS"
 "({percent}% of {count})" = "({percent} % sur {count})"
 "Features" = "Fonctionnalités"
