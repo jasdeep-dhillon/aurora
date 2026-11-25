@@ -363,7 +363,6 @@ impl AccountPages {
             Ok(FamilyActionDone::Invited { needs_2fa: false }) => (false, t!("Invitation sent.").to_string()),
             Ok(FamilyActionDone::InviteCancelled) => (false, t!("Invitation cancelled.").to_string()),
             Ok(FamilyActionDone::InviteResent) => (false, t!("Invitation resent.").to_string()),
-            Ok(FamilyActionDone::PreferredCopySet) => (false, t!("Preferred copy updated.").to_string()),
             Ok(FamilyActionDone::Joined { needs_2fa: true }) => (false, t!("Join request sent. Confirm it in your Steam Mobile App if prompted.").to_string()),
             Ok(FamilyActionDone::Joined { needs_2fa: false }) => (false, t!("You joined the Steam Family.").to_string()),
             Ok(FamilyActionDone::Removed) => (false, t!("Member removed from the family.").to_string()),

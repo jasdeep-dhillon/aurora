@@ -198,6 +198,10 @@ impl State {
                 *self = State { last_error: Some(msg.clone()), ..Default::default() };
             }
             Event::LoggedIn { steam_id, account } => {
+                if self.steam_id != *steam_id {
+                    self.family = None;
+                    self.family_action = None;
+                }
                 self.phase = Phase::LoggedIn;
                 self.steam_id = *steam_id;
                 self.account = account.clone();
@@ -347,7 +351,22 @@ impl State {
                 _ => self.purchases = Some(result.clone()),
             },
             Event::LicenseList(r) => self.licenses = Some(r.clone()),
-            Event::Family(r) => self.family = Some(r.clone()),
+            Event::Family { steam_id, result } => {
+                if self.phase == Phase::LoggedIn && self.steam_id == *steam_id {
+                    self.family = Some(result.clone());
+                }
+            }
+            Event::PreferredCopyChanged { steam_id, family_id, app_id, lender, result, .. } => {
+                if self.phase == Phase::LoggedIn
+                    && self.steam_id == *steam_id
+                    && result.is_ok()
+                    && let Some(Ok(status)) = self.family.as_mut()
+                    && let Some(family) = status.family.as_mut()
+                    && family.id == *family_id
+                {
+                    family.set_preferred_copy(*app_id, *lender);
+                }
+            }
             Event::FamilyAction(r) => {
                 let seq = self.family_action.as_ref().map_or(1, |(s, _)| s.saturating_add(1));
                 self.family_action = Some((seq, r.clone()));
@@ -973,6 +992,54 @@ fn merge_group(dst: &mut ChatGroup, prev: &ChatGroup, summary_only: bool) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+    use model::{Family, FamilyStatus, SharedApp};
+
+    fn snapshot(steam_id: SteamId) -> Event {
+        let family = Family {
+            id: 5,
+            shared: vec![SharedApp { app_id: 10, name: "Game".into(), owners: vec![20, 30], excluded: false }],
+            shared_available: true,
+            ..Default::default()
+        };
+        Event::Family { steam_id, result: Ok(FamilyStatus { family: Some(family), ..Default::default() }) }
+    }
+
+    #[test]
+    fn account_switch_discards_late_family_snapshots() {
+        let mut state = State::default();
+        state.apply(&Event::LoggedIn { steam_id: 20, account: "first".into() });
+        state.apply(&snapshot(20));
+        assert!(state.family.is_some());
+
+        state.apply(&Event::LoggedIn { steam_id: 30, account: "second".into() });
+        state.apply(&snapshot(20));
+        assert!(state.family.is_none());
+        state.apply(&snapshot(30));
+        assert!(state.family.is_some());
+    }
+
+    #[test]
+    fn preferred_copy_changes_only_when_steam_accepts_for_this_family() {
+        let mut state = State::default();
+        state.apply(&Event::LoggedIn { steam_id: 20, account: "me".into() });
+        state.apply(&snapshot(20));
+        let reply = |steam_id, family_id, result| Event::PreferredCopyChanged {
+            request_id: 1, steam_id, family_id, app_id: 10, lender: 30, result,
+        };
+        let preferred = |state: &State| state.family.as_ref().unwrap().as_ref().unwrap().family.as_ref().unwrap().preferred_copy(10);
+
+        for event in [reply(20, 5, Err("rejected".into())), reply(30, 5, Ok(())), reply(20, 6, Ok(()))] {
+            state.apply(&event);
+            assert_eq!(preferred(&state), None);
+        }
+        state.apply(&reply(20, 5, Ok(())));
+        assert_eq!(preferred(&state), Some(30));
     }
 }
 

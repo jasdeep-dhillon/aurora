@@ -1175,40 +1175,51 @@ pub struct Family {
     pub slot_cooldown: u32,
     /// Games shared in the family, with who owns them.
     pub shared: Vec<SharedApp>,
+    /// Whether Steam returned its shared library successfully.
+    #[serde(default)]
+    pub shared_available: bool,
     /// DLC owned in the family, with the game each belongs to.
     #[serde(default)]
     pub shared_dlc: Vec<SharedDlc>,
+    /// Whether the DLC list includes all entries returned by Steam.
+    #[serde(default)]
+    pub shared_dlc_complete: bool,
     /// Your preferred copy per game: (app, lender).
     #[serde(default)]
     pub preferred: Vec<(AppId, SteamId)>,
 }
 
 impl Family {
-    pub fn shared_app(&self, app_id: AppId) -> Option<&SharedApp> {
-        self.shared.iter().find(|a| a.app_id == app_id)
+    fn shareable_app(&self, app_id: AppId) -> Option<&SharedApp> {
+        self.shared.iter().find(|a| a.app_id == app_id && !a.excluded)
     }
 
-    /// Whose copy you play, like Steam: your preferred copy while its owner
-    /// still has the game (it can be someone else's even when you own one),
-    /// otherwise your own, otherwise the first family owner.
-    pub fn active_copy(&self, app_id: AppId, me: SteamId) -> Option<SteamId> {
-        let app = self.shared_app(app_id)?;
+    /// The copy Steam has saved as preferred, if it is still shareable.
+    pub fn preferred_copy(&self, app_id: AppId) -> Option<SteamId> {
+        let app = self.shareable_app(app_id)?;
         self.preferred
             .iter()
-            .find(|(a, l)| *a == app_id && app.owners.contains(l))
-            .map(|(_, l)| *l)
-            .or_else(|| app.owners.contains(&me).then_some(me))
-            .or_else(|| app.owners.first().copied())
+            .find(|(a, owner)| *a == app_id && app.owners.contains(owner))
+            .map(|(_, owner)| *owner)
     }
 
-    /// The family member lending you the game. `None` when you play your own copy.
-    pub fn lender(&self, app_id: AppId, me: SteamId) -> Option<SteamId> {
-        self.active_copy(app_id, me).filter(|l| *l != me)
+    /// The saved preference, or the sole owner when there is no choice.
+    pub fn active_copy(&self, app_id: AppId) -> Option<SteamId> {
+        self.preferred_copy(app_id).or_else(|| {
+            let [owner] = self.shareable_app(app_id)?.owners.as_slice() else { return None };
+            Some(*owner)
+        })
     }
 
-    /// Every copy of the game in the family, yours first (Steam's dialog order).
+    /// Record an accepted change without reloading unrelated family metadata.
+    pub fn set_preferred_copy(&mut self, app_id: AppId, owner: SteamId) {
+        self.preferred.retain(|(id, _)| *id != app_id);
+        self.preferred.push((app_id, owner));
+    }
+
+    /// Every selectable copy of the game in the family, yours first.
     pub fn copies(&self, app_id: AppId, me: SteamId) -> Vec<SteamId> {
-        let Some(app) = self.shared_app(app_id) else { return Vec::new() };
+        let Some(app) = self.shareable_app(app_id) else { return Vec::new() };
         let mut v = app.owners.clone();
         v.sort_by_key(|o| *o != me);
         v
@@ -1297,7 +1308,6 @@ pub enum FamilyActionDone {
     Removed,
     Left,
     Deleted,
-    PreferredCopySet,
 }
 
 /// Whether you're in a family, and which.
@@ -1687,23 +1697,37 @@ mod family_tests {
     }
 
     #[test]
-    fn lender_prefers_your_choice_then_first_owner() {
+    fn saved_copy_must_still_be_owned_and_shareable() {
         let mut f = family();
-        assert_eq!(f.lender(10, 9), Some(1));
-        f.preferred = vec![(10, 3)];
-        assert_eq!(f.lender(10, 9), Some(3));
-        // A preference for someone who no longer owns it is ignored.
-        f.preferred = vec![(10, 7)];
-        assert_eq!(f.lender(10, 9), Some(1));
-        // You play your own copy unless you picked someone else's.
-        f.preferred.clear();
-        assert_eq!(f.lender(10, 2), None);
-        assert_eq!(f.active_copy(10, 2), Some(2));
-        f.preferred = vec![(10, 3)];
-        assert_eq!(f.lender(10, 2), Some(3));
+        f.preferred = vec![(10, 7), (10, 3)];
+        assert_eq!(f.preferred_copy(10), Some(3));
+        assert_eq!(f.active_copy(10), Some(3));
+
+        f.set_preferred_copy(10, 2);
+        assert_eq!(f.preferred, [(10, 2)]);
+        assert_eq!(f.preferred_copy(10), Some(2));
+
+        f.shared[0].owners = vec![3];
+        assert_eq!(f.preferred_copy(10), None);
+        assert_eq!(f.active_copy(10), Some(3));
+        assert_eq!(f.active_copy(99), None);
+    }
+
+    #[test]
+    fn several_owners_do_not_imply_an_active_or_preferred_copy() {
+        let f = family();
+        assert_eq!(f.active_copy(10), None);
+        assert_eq!(f.preferred_copy(10), None);
+    }
+
+    #[test]
+    fn excluded_games_offer_no_shared_copies() {
+        let mut f = family();
+        f.shared[0].excluded = true;
         f.preferred = vec![(10, 2)];
-        assert_eq!(f.lender(10, 2), None);
-        assert_eq!(f.lender(99, 9), None);
+        assert_eq!(f.preferred_copy(10), None);
+        assert_eq!(f.active_copy(10), None);
+        assert!(f.copies(10, 2).is_empty());
     }
 
     #[test]

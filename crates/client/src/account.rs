@@ -88,19 +88,25 @@ pub async fn family(conn: &Connection, me: SteamId, language: &str) -> Result<Fa
                 steamid: Some(me),
             },
         )
-        .await
-        .map(|s| s.apps)
-        .unwrap_or_else(|e| {
+        .await;
+    let (shared, shared_available) = match shared {
+        Ok(response) => (response.apps, true),
+        Err(e) => {
             tracing::warn!("family library: {e}");
-            Vec::new()
-        });
+            (Vec::new(), false)
+        }
+    };
     let (dlc, games): (Vec<_>, Vec<_>) = shared.into_iter().partition(|a| a.app_type() == APP_TYPE_DLC);
     let mut shared: Vec<SharedApp> = games
         .into_iter()
         .map(|a| SharedApp { app_id: a.appid(), name: a.name().to_string(), owners: a.owner_steamids.clone(), excluded: a.exclude_reason() != 0 })
         .collect();
     shared.sort_by_key(|a| a.name.to_lowercase());
-    let shared_dlc = shared_dlc(conn, &dlc).await;
+    let (shared_dlc, shared_dlc_complete) = if shared_available {
+        shared_dlc(conn, dlc, me).await
+    } else {
+        (Vec::new(), false)
+    };
     let preferred = preferred_lenders(conn, id).await;
     status.family = Some(Family {
         id,
@@ -115,7 +121,9 @@ pub async fn family(conn: &Connection, me: SteamId, language: &str) -> Result<Fa
         country: g.country().to_string(),
         slot_cooldown: g.slot_cooldown_remaining_seconds(),
         shared,
+        shared_available,
         shared_dlc,
+        shared_dlc_complete,
         preferred,
     });
     Ok(status)
@@ -125,22 +133,42 @@ pub async fn family(conn: &Connection, me: SteamId, language: &str) -> Result<Fa
 const APP_TYPE_DLC: i32 = 32;
 
 /// Attach each family DLC to its game through PICS public info.
-async fn shared_dlc(conn: &Connection, dlc: &[CFamilyGroupsGetSharedLibraryAppsResponseSharedApp]) -> Vec<SharedDlc> {
+async fn shared_dlc(
+    conn: &Connection,
+    mut dlc: Vec<CFamilyGroupsGetSharedLibraryAppsResponseSharedApp>,
+    me: SteamId,
+) -> (Vec<SharedDlc>, bool) {
+    // An excluded DLC can be used with your own copy, but cannot be borrowed.
+    for entry in &mut dlc {
+        if entry.exclude_reason() != 0 {
+            entry.owner_steamids.retain(|owner| *owner == me);
+        }
+    }
+    dlc.retain(|entry| !entry.owner_steamids.is_empty());
     if dlc.is_empty() {
-        return Vec::new();
+        return (Vec::new(), true);
     }
     let ids: Vec<u32> = dlc.iter().map(|d| d.appid()).collect();
-    let parents = crate::pics::dlc_parents(conn, &ids).await.unwrap_or_else(|e| {
-        tracing::warn!("family dlc parents: {e}");
-        Vec::new()
-    });
-    dlc.iter()
+    let parents = match crate::pics::dlc_parents(conn, &ids).await {
+        Ok(parents) => parents,
+        Err(e) => {
+            tracing::warn!("family dlc parents: {e}");
+            return (Vec::new(), false);
+        }
+    };
+    let parents: std::collections::HashMap<_, _> =
+        parents.into_iter().map(|(id, parent, name)| (id, (parent, name))).collect();
+    let expected = dlc.len();
+    let entries: Vec<_> = dlc
+        .into_iter()
         .filter_map(|d| {
-            let (_, parent, pics_name) = parents.iter().find(|(id, _, _)| *id == d.appid())?;
+            let (parent, pics_name) = parents.get(&d.appid())?;
             let name = if d.name().is_empty() { pics_name.clone() } else { d.name().to_string() };
-            Some(SharedDlc { app_id: d.appid(), parent: *parent, name, owners: d.owner_steamids.clone() })
+            Some(SharedDlc { app_id: d.appid(), parent: *parent, name, owners: d.owner_steamids })
         })
-        .collect()
+        .collect();
+    let complete = entries.len() == expected;
+    (entries, complete)
 }
 
 /// Your preferred copy per game, as `(app, lender)`.

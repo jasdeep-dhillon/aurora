@@ -2640,10 +2640,12 @@
 "{n} files in the cloud" = "{n} файлов в облаке"
 "Saving…" = "Сохранение…"
 # Steam Family: shared copy and preferred copy
+"Steam Family details are unavailable." = "Сведения о семье Steam недоступны."
+"Some DLC details are unavailable." = "Сведения о некоторых дополнениях недоступны."
 "Shared from your Steam Family member" = "Предоставлено участником вашей семьи Steam"
 "Change preferred copy" = "Сменить предпочтительную копию"
 "Change Preferred Copy" = "Смена предпочтительной копии"
-"Your Steam Family has copies of this game that include different DLC. Please select your preferred copy." = "В вашей семье Steam есть копии этой игры с разными DLC. Выберите предпочтительную копию."
+"Select your preferred copy of this game." = "Выберите предпочитаемую копию этой игры."
 "PREFERRED COPY" = "ПРЕДПОЧТИТЕЛЬНАЯ КОПИЯ"
 "Base game only" = "Только основная игра"
 "+ {n} DLC in common to all copies in the Steam Family" = "+ {n} DLC, общих для всех копий в семье Steam"
