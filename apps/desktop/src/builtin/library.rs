@@ -3183,7 +3183,7 @@ impl Library {
                 });
                 ui.add_space(16.0);
                 if rows.is_empty() {
-                    w::empty(ui, t, icons::EYE_SLASH, t!("No hidden games"), t!("Right-click any game in your library and choose \"Hide this game\" to hide it here."));
+                    w::empty(ui, t, icons::EYE_SLASH, t!("No hidden games"), t!("Right-click any game in your library and choose “Hide this game” to hide it here."));
                     return;
                 }
                 for (id, name, icon_url, installed) in rows {
