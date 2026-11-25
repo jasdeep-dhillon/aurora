@@ -2601,3 +2601,4 @@
 "IP:Port (e.g. 198.51.100.10:27015)" = "IP:puerto (p. ej., 198.51.100.10:27015)"
 "App ID (optional)" = "ID de la aplicación (opcional)"
 "Enter a valid IPv4 address and port (a.b.c.d:port)." = "Introduce una dirección IPv4 y un puerto válidos (a.b.c.d:puerto)."
+"Sort by recent activity" = "Ordenar por actividad reciente"
