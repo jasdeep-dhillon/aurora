@@ -4055,6 +4055,11 @@ impl crate::theme_renderer::LibraryHost for Library {
         let fs = style.font_size.unwrap_or(12.5);
         let row_h = row_height.clamp(20.0, 48.0);
         let ic_sz = icon_size.clamp(14.0, (row_h - 4.0).max(14.0));
+        // Optional row styling; unset fields keep the default tinted look.
+        let row_radius = CornerRadius::same(style.radius.unwrap_or(2));
+        let sel_bg = style.active_bg.map(|c| c.resolve(t)).unwrap_or(t.accent.gamma_multiply(0.22));
+        let sel_fg = style.active_color.map(|c| c.resolve(t));
+        let hover_bg = style.hover_bg.map(|c| c.resolve(t));
 
         egui::ScrollArea::vertical().id_salt("lib-side-themed").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -4121,9 +4126,10 @@ impl crate::theme_renderer::LibraryHost for Library {
                         let sel = self.selected == Some(e.app_id);
                         let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.08);
                         if sel {
-                            ui.painter().rect_filled(rect, CornerRadius::same(2), t.accent.gamma_multiply(0.22));
+                            ui.painter().rect_filled(rect, row_radius, sel_bg);
                         } else if hover > 0.0 {
-                            ui.painter().rect_filled(rect, CornerRadius::same(2), t.surface_hover.gamma_multiply(hover * 0.75));
+                            let fill = hover_bg.map(|c| c.gamma_multiply(hover)).unwrap_or(t.surface_hover.gamma_multiply(hover * 0.75));
+                            ui.painter().rect_filled(rect, row_radius, fill);
                         }
                         let icon = Rect::from_min_size(pos2(rect.left() + 18.0, rect.center().y - ic_sz * 0.5), vec2(ic_sz, ic_sz));
                         let url = e.owned.and_then(|o| o.icon.as_deref()).map(|h| art::icon(e.app_id, h));
@@ -4134,7 +4140,9 @@ impl crate::theme_renderer::LibraryHost for Library {
                         }
                         let setup = setup_state(ctx, e.app_id, e.installed.is_some());
                         let busy = matches!(setup, Setup::Downloading(_) | Setup::Queued);
-                        let color = if busy {
+                        let color = if let Some(fg) = sel_fg.filter(|_| sel) {
+                            fg
+                        } else if busy {
                             t.accent
                         } else if sel || e.installed.is_some() {
                             t.text
