@@ -510,7 +510,8 @@ impl SteamApp {
                     || (self.friends_window.open && self.friends_window.chat == Some(crate::builtin::group_chat::ChatTarget::Friend(m.friend)));
                 if m.from != self.state.steam_id && !open && self.prefs.toast_messages {
                     let name = self.state.persona(m.from).name;
-                    self.toast(now, name, m.text.clone());
+                    let body = crate::builtin::chat_render::toast_preview(&m.text, &m.media);
+                    self.toast(now, name, body);
                 }
             }
             if let Event::GroupMessage(m) = &e {
@@ -529,7 +530,8 @@ impl SteamApp {
                         if should {
                             let group_name = self.state.group_display_name(g);
                             let sender = self.state.persona(m.from).display_name();
-                            self.toast(now, group_name, format!("{sender}: {}", m.text));
+                            let preview = crate::builtin::chat_render::toast_preview(&m.text, &m.media);
+                            self.toast(now, group_name, format!("{sender}: {preview}"));
                         }
                     }
                 }
@@ -1500,6 +1502,7 @@ impl eframe::App for SteamApp {
         self.registry.tick(env);
         self.apply_actions(&ctx, actions);
         crate::shell::toasts(self, &ctx);
+        crate::builtin::chat_render::show_lightbox(&ctx, &self.prefs.theme);
         if !big_picture || self.bigpicture.is_windowed() {
             if signed_in {
                 crate::chrome::resize_handles(&ctx);
