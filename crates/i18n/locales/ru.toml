@@ -479,6 +479,7 @@
 
 # --- Launch popup ---
 "Launching {name}" = "Запуск {name}"
+"Launching…" = "Запуск…"
 "Preparing to launch…" = "Подготовка к запуску…"
 
 # --- Downloads ---

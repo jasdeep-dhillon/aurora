@@ -192,6 +192,8 @@ pub struct SteamApp {
     events: mpsc::Receiver<Event>,
     pub state: State,
     pub local: LocalState,
+    local_tx: mpsc::Sender<LocalState>,
+    local_rx: mpsc::Receiver<LocalState>,
     pub registry: Registry,
     pub prefs: Prefs,
     pub saved: Vec<SavedAccount>,
@@ -383,12 +385,15 @@ impl SteamApp {
         if prefs.bigpicture_start && !bigpicture.active {
             bigpicture.enter(&cc.egui_ctx);
         }
+        let (local_tx, local_rx) = mpsc::channel();
         let mut app = Self {
             _rt: rt,
             client,
             events,
             state: State::default(),
             local,
+            local_tx,
+            local_rx,
             registry,
             prefs,
             saved,
@@ -464,7 +469,22 @@ impl SteamApp {
         self.toasts.push(Toast { title: title.into(), body: body.into(), until: now + 5.0 });
     }
 
+    fn reload_local_async(&self, ctx: &egui::Context) {
+        let root = self.local.steam_root.clone();
+        let tx = self.local_tx.clone();
+        let ctx = ctx.clone();
+        self._rt.spawn_blocking(move || {
+            if let Ok(l) = local::load(Some(root)) {
+                let _ = tx.send(l);
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
+        });
+    }
+
     pub(crate) fn drain_events(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        while let Ok(l) = self.local_rx.try_recv() {
+            self.local = l;
+        }
         let now = ctx.input(|i| i.time);
         while let Ok(e) = self.events.try_recv() {
             // Toast-worthy things are decided before state changes.
@@ -565,9 +585,7 @@ impl SteamApp {
                 }
                 Event::GameStopped { .. } => {
                     self.overlay.game_stopped();
-                    if let Ok(l) = local::load(Some(self.local.steam_root.clone())) {
-                        self.local = l;
-                    }
+                    self.reload_local_async(ctx);
                 }
                 Event::ControllerLayoutRoute { app_id, enabled } => {
                     self.overlay.set_controller_route(*app_id, *enabled);
