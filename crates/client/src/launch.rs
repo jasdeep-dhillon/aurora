@@ -117,10 +117,21 @@ fn mode_store(key: (AppId, PathBuf), m: LaunchMode) {
     MODE_CACHE.lock().unwrap().get_or_insert_with(Default::default).insert(key, (Instant::now(), m));
 }
 
-/// Work the mode out on a background thread (once at a time per game).
+/// Work the mode out on a background thread (once at a time per game,
+/// capped at a small number of concurrent refresh threads).
 fn mode_refresh(app: &OwnedApp, install_dir: &Path) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const MAX_MODE_WORKERS: usize = 4;
+    static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
     let key = (app.app_id, install_dir.to_path_buf());
+    let prev = ACTIVE_WORKERS.fetch_add(1, Ordering::AcqRel);
+    if prev >= MAX_MODE_WORKERS {
+        ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
+        return;
+    }
     if !MODE_PENDING.lock().unwrap().get_or_insert_with(Default::default).insert(key.clone()) {
+        ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
         return;
     }
     let (owned, k) = (app.clone(), key.clone());
@@ -128,9 +139,11 @@ fn mode_refresh(app: &OwnedApp, install_dir: &Path) {
         let m = mode(&owned, &k.1);
         mode_store(k.clone(), m);
         MODE_PENDING.lock().unwrap().get_or_insert_with(Default::default).remove(&k);
+        ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
     });
     if spawned.is_err() {
         MODE_PENDING.lock().unwrap().get_or_insert_with(Default::default).remove(&key);
+        ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -235,9 +248,28 @@ fn scan_markers(dir: &Path, depth: u32) -> Option<&'static str> {
 
 // ---------------------------------------------------------- spawning
 
+fn safe_install_rel(install_dir: &Path, rel: &str) -> Option<PathBuf> {
+    if rel.is_empty() || rel.contains('\0') || rel.contains(':') || rel.starts_with('/') || rel.starts_with('\\') {
+        return None;
+    }
+    let mut out = install_dir.to_path_buf();
+    let mut pushed = false;
+    for seg in rel.split(['/', '\\']) {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            return None;
+        }
+        out.push(seg);
+        pushed = true;
+    }
+    pushed.then_some(out)
+}
+
 fn executable(app: &OwnedApp, install_dir: &Path) -> Option<PathBuf> {
     let opt = app.launch.iter().find(|o| o.runs_on_this_os() && !o.executable.is_empty())?;
-    Some(install_dir.join(normalize(&opt.executable)))
+    safe_install_rel(install_dir, &opt.executable)
 }
 
 /// What [`LaunchMode::OfficialSteam`] names for DRM-wrapped games.
@@ -541,11 +573,13 @@ fn command(app: &OwnedApp, install_dir: &Path, opts: &UserOptions, connect: &[St
         .find(|o| o.runs_on_this_os() && !o.executable.is_empty())
         .ok_or_else(|| format!("{} has no launch option for this OS", app.name))?;
 
-    let exe = install_dir.join(normalize(&opt.executable));
+    let exe = safe_install_rel(install_dir, &opt.executable)
+        .ok_or_else(|| format!("{} has an unsafe launch executable path", app.name))?;
     let cwd = if opt.working_dir.is_empty() {
         exe.parent().unwrap_or(install_dir).to_path_buf()
     } else {
-        install_dir.join(normalize(&opt.working_dir))
+        safe_install_rel(install_dir, &opt.working_dir)
+            .ok_or_else(|| format!("{} has an unsafe working directory path", app.name))?
     };
     tracing::info!("launching {} ({})", app.name, exe.display());
 
@@ -787,7 +821,13 @@ pub(crate) fn wait_in_dir_cancellable(
                     break;
                 }
             }
-            std::thread::sleep(Duration::from_millis(100));
+            let stopped = stop.is_some_and(|s| s.load(std::sync::atomic::Ordering::Acquire));
+            let poll_delay = if !stopped && empty_since.is_none() && descendant_since.is_some_and(|s| s.elapsed() >= Duration::from_secs(2)) {
+                Duration::from_secs(1)
+            } else {
+                Duration::from_millis(100)
+            };
+            std::thread::sleep(poll_delay);
         }
     }
     #[cfg(not(windows))]
@@ -836,7 +876,13 @@ fn wait_all_inner(child: &mut Child, started: Instant, stop: Option<&std::sync::
                     break;
                 }
             }
-            std::thread::sleep(Duration::from_millis(100));
+            let stopped = stop.is_some_and(|s| s.load(std::sync::atomic::Ordering::Acquire));
+            let poll_delay = if !stopped && empty_since.is_none() && descendant_since.is_some_and(|s| s.elapsed() >= Duration::from_secs(2)) {
+                Duration::from_secs(1)
+            } else {
+                Duration::from_millis(100)
+            };
+            std::thread::sleep(poll_delay);
         }
     }
     #[cfg(windows)]
@@ -1889,8 +1935,11 @@ fn auto_login(steam_id: u64, offline: bool) -> Option<String> {
         changes.auto_login_user = Some((before_user, account.clone()));
     }
     // Remember first, change second: a crash in between can only leave
-    // nothing to undo.
-    save_pending(&merge_changes(load_pending(), changes));
+    // nothing to undo. Refuse to mutate Steam's files if journaling fails.
+    if let Err(e) = save_pending(&merge_changes(load_pending(), changes)) {
+        tracing::warn!("could not save Steam sign-in restore journal; skipping auto-login override: {e}");
+        return None;
+    }
     win::set_string("Software\\Valve\\Steam", "AutoLoginUser", &account).ok()?;
     if new_users != users {
         let _ = std::fs::write(&users_path, new_users);
@@ -2055,18 +2104,18 @@ fn load_pending() -> Option<LoginChanges> {
     serde_json::from_str(&std::fs::read_to_string(pending_path()).ok()?).ok()
 }
 
-fn save_pending(c: &LoginChanges) {
+fn save_pending(c: &LoginChanges) -> std::io::Result<()> {
     let path = pending_path();
     if c.is_empty() {
-        let _ = std::fs::remove_file(path);
-        return;
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        };
     }
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(c) {
-        let _ = std::fs::write(path, json);
-    }
+    let json = serde_json::to_string_pretty(c)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    crate::store::write_private(&path, json.as_bytes())
 }
 
 static PENDING_LOCK: Mutex<()> = Mutex::new(());
@@ -2075,30 +2124,40 @@ static PENDING_LOCK: Mutex<()> = Mutex::new(());
 fn restore_login_user() {
     let _l = PENDING_LOCK.lock().unwrap();
     let Some(mut c) = load_pending() else { return };
-    if let Some((before, ours)) = c.auto_login_user.take() {
-        if win::reg_string("Software\\Valve\\Steam", "AutoLoginUser").as_deref() == Some(ours.as_str()) {
-            let _ = match before {
-                Some(v) => win::set_string("Software\\Valve\\Steam", "AutoLoginUser", &v),
-                None => win::delete_value("Software\\Valve\\Steam", "AutoLoginUser"),
-            };
+    if let Some((before, ours)) = c.auto_login_user.clone() {
+        let ok = if win::reg_string("Software\\Valve\\Steam", "AutoLoginUser").as_deref() == Some(ours.as_str()) {
+            match before {
+                Some(v) => win::set_string("Software\\Valve\\Steam", "AutoLoginUser", &v).is_ok(),
+                None => win::delete_value("Software\\Valve\\Steam", "AutoLoginUser").is_ok(),
+            }
+        } else {
+            true
+        };
+        if ok {
+            c.auto_login_user = None;
+            let _ = save_pending(&c);
         }
-        save_pending(&c);
     }
 }
 
 /// Put everything back if Steam is closed. True when nothing is left to do.
 fn restore_login_files() -> bool {
     let _l = PENDING_LOCK.lock().unwrap();
-    let Some(c) = load_pending() else { return true };
+    let Some(mut c) = load_pending() else { return true };
     if steam_running() {
         return false;
     }
-    if let Some((before, ours)) = &c.auto_login_user {
-        if win::reg_string("Software\\Valve\\Steam", "AutoLoginUser").as_deref() == Some(ours.as_str()) {
-            let _ = match before {
-                Some(v) => win::set_string("Software\\Valve\\Steam", "AutoLoginUser", v),
-                None => win::delete_value("Software\\Valve\\Steam", "AutoLoginUser"),
-            };
+    if let Some((before, ours)) = c.auto_login_user.clone() {
+        let ok = if win::reg_string("Software\\Valve\\Steam", "AutoLoginUser").as_deref() == Some(ours.as_str()) {
+            match before {
+                Some(v) => win::set_string("Software\\Valve\\Steam", "AutoLoginUser", &v).is_ok(),
+                None => win::delete_value("Software\\Valve\\Steam", "AutoLoginUser").is_ok(),
+            }
+        } else {
+            true
+        };
+        if ok {
+            c.auto_login_user = None;
         }
     }
     let read = |f: &str| steam_config(f).and_then(|p| Some((std::fs::read_to_string(&p).ok()?, p)));
@@ -2106,18 +2165,26 @@ fn restore_login_files() -> bool {
     let (u_text, c_text) = (users.as_ref().map(|u| u.0.as_str()).unwrap_or(""), config.as_ref().map(|c| c.0.as_str()).unwrap_or(""));
     let (new_users, new_config) = undo_auto_login(u_text, c_text, &c);
     if let Some((old, p)) = &users {
-        if *old != new_users {
-            let _ = std::fs::write(p, &new_users);
+        if *old == new_users || std::fs::write(p, &new_users).is_ok() {
+            c.auto_login.clear();
+            c.offline.clear();
         }
     }
     if let Some((old, p)) = &config {
-        if *old != new_config {
-            let _ = std::fs::write(p, &new_config);
+        if *old == new_config || std::fs::write(p, &new_config).is_ok() {
+            c.chooser = None;
         }
     }
-    tracing::info!("put Steam's sign-in settings back as they were");
-    save_pending(&LoginChanges::default());
-    true
+    if save_pending(&c).is_err() {
+        return false;
+    }
+    if c.is_empty() {
+        tracing::info!("put Steam's sign-in settings back as they were");
+        true
+    } else {
+        tracing::warn!("some Steam sign-in settings could not be restored yet; keeping restore journal");
+        false
+    }
 }
 
 /// Restore the sign-in settings as soon as Steam is closed: now, or from a
