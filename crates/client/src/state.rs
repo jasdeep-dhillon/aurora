@@ -88,6 +88,14 @@ pub struct State {
     pub achievements: HashMap<AppId, (u32, u32)>,
     /// Game server details asked for with "View server info".
     pub servers: HashMap<String, Result<crate::a2s::ServerInfo, String>>,
+    /// Cached A2S_PLAYER lists keyed by `"ip:port"`.
+    pub server_players: HashMap<String, Result<Vec<crate::a2s::ServerPlayer>, String>>,
+    /// Cached A2S_RULES key/value lists keyed by `"ip:port"`.
+    pub server_rules: HashMap<String, Result<Vec<(String, String)>, String>>,
+    /// Steam Community "Recently Played With" coplay list.
+    pub recent_players: Option<Result<Vec<model::RecentPlayer>, String>>,
+    /// Players seen in-session via `ISteamFriends::SetPlayedWith`.
+    pub session_coplay: Vec<(SteamId, AppId, u64)>,
     /// A game's achievement list, once loaded.
     pub achievement_list: crate::read_cache::ReadCache<AppId, Result<Vec<model::Achievement>, String>, 64>,
     pub downloads: HashMap<AppId, model::DownloadStatus>,
@@ -771,6 +779,21 @@ impl State {
             | Event::ControllerLayoutDownloaded { .. }
             | Event::ControllerLayoutRoute { .. }
             | Event::ControllerLayoutApplied { .. } => {}
+            Event::GameServerList { .. } | Event::LanServerList { .. } => {}
+            Event::ServerPlayers { addr, result } => {
+                self.server_players.insert(addr.clone(), result.clone());
+            }
+            Event::ServerRules { addr, result } => {
+                self.server_rules.insert(addr.clone(), result.clone());
+            }
+            Event::RecentPlayers(r) => {
+                self.recent_players = Some(r.clone());
+            }
+            Event::CoplayRecorded { steam_id, app_id, time } => {
+                self.session_coplay.retain(|(id, _, _)| *id != *steam_id);
+                self.session_coplay.insert(0, (*steam_id, *app_id, *time));
+                self.session_coplay.truncate(200);
+            }
         }
     }
 

@@ -107,6 +107,9 @@ pub struct Prefs {
     /// Watch active theme files on disk and hot-reload on change.
     #[serde(default)]
     pub hot_reload_themes: bool,
+    /// Compact single-column library Small Mode (`View -> Small Mode`).
+    #[serde(default)]
+    pub small_mode: bool,
     /// Start in Big Picture after signing in.
     pub bigpicture_start: bool,
     /// Big Picture interface scale relative to its screen size.
@@ -160,6 +163,7 @@ impl Default for Prefs {
             win_maximized: false,
             active_theme_id: None,
             hot_reload_themes: false,
+            small_mode: false,
             bigpicture_start: false,
             bigpicture_scale: 1.0,
             bigpicture_library: 0,
@@ -682,6 +686,9 @@ impl SteamApp {
         for a in actions {
             match a {
                 Action::Navigate { page, arg } => {
+                    if self.prefs.small_mode && !self.bigpicture.active {
+                        self.prefs.small_mode = false;
+                    }
                     if !self.bigpicture.navigate(ctx, &page, arg.as_deref()) {
                         self.navigate(page, arg);
                     }
@@ -725,6 +732,8 @@ impl SteamApp {
                     self.client.send(Command::JoinChatGroup { group_id, chat_id, invite_code: code });
                 }
                 Action::ToggleOverlay => self.overlay.toggle(),
+                Action::ToggleSmallMode => self.prefs.small_mode = !self.prefs.small_mode,
+                Action::EnterBigPicture => self.bigpicture.enter(ctx),
                 Action::JoinGame { app_id, connect } => {
                     let now = ctx.input(|i| i.time);
                     if let Err(msg) = client::safe_connect_args(&connect) {
@@ -1032,6 +1041,13 @@ impl SteamApp {
                 Some(Link::Uninstall(id)) => actions.push(nav("library", Some(format!("uninstall:{id}")))),
                 Some(Link::Validate(id)) => actions.push(nav("library", Some(format!("verify:{id}")))),
                 Some(Link::Store(id)) => actions.push(nav("store", Some(format!("app:{id}")))),
+                Some(Link::Connect { addr, password }) => {
+                    let target = match password {
+                        Some(pw) => format!("connect:{addr}|{pw}"),
+                        None => format!("connect:{addr}"),
+                    };
+                    actions.push(nav("servers", Some(target)));
+                }
                 Some(Link::Page(p)) => actions.push(nav(p, None)),
                 Some(Link::Show) | None => {}
             }
@@ -1310,7 +1326,7 @@ impl eframe::App for SteamApp {
 
         let signed_in = self.state.phase == Phase::LoggedIn;
         let mode = if signed_in {
-            WindowMode::Main
+            if self.prefs.small_mode { WindowMode::Small } else { WindowMode::Main }
         } else if crate::login::wants_splash(self) {
             WindowMode::Splash
         } else {
@@ -1329,6 +1345,7 @@ impl eframe::App for SteamApp {
             self.window_mode = Some(mode);
             let (size, min, resizable) = match mode {
                 WindowMode::Main => ([1440.0, 900.0], [1060.0, 680.0], true),
+                WindowMode::Small => ([380.0, 620.0], [280.0, 420.0], true),
                 // Small, compact sign-in and splash windows, like Steam's.
                 WindowMode::SignIn => ([560.0, 400.0], [560.0, 400.0], false),
                 WindowMode::Splash => ([380.0, 250.0], [380.0, 250.0], false),
@@ -1420,54 +1437,58 @@ impl eframe::App for SteamApp {
             }
             crate::tray::show(self, &ctx);
         } else if signed_in {
-            let snapshot = self.resolved_snapshot.take();
-            let bg_tex = self.bg_tex.as_ref().map(|(_, _, h)| h.clone());
-            let logo_tex = self.logo_tex.as_ref().map(|(_, _, h)| h.clone());
-            let now = ctx.input(|i| i.time);
-            let (has_bg_script, has_chrome_script) = {
-                let st = self.themes.lock().unwrap();
-                match st.manager.resolved.as_ref().and_then(|r| r.script.as_ref()) {
-                    Some(s) => (s.has_background(), s.has_chrome()),
-                    None => (false, false),
-                }
-            };
-            let bg_script = has_bg_script.then(|| (self.themes.clone(), self.prefs.theme.clone()));
-            let mut bg_hook = move |painter: &egui::Painter, rect: egui::Rect| {
-                let cmds = {
-                    let Some((themes, theme)) = &bg_script else { return };
-                    let mut st = themes.lock().unwrap();
-                    if let Some(script) = st.manager.resolved.as_mut().and_then(|r| r.script.as_mut()) {
-                        script.paint_background(rect.width(), rect.height(), now, theme)
-                    } else {
-                        Vec::new()
+            if self.prefs.small_mode {
+                crate::shell::show_small_mode(self, ui, &mut actions);
+            } else {
+                let snapshot = self.resolved_snapshot.take();
+                let bg_tex = self.bg_tex.as_ref().map(|(_, _, h)| h.clone());
+                let logo_tex = self.logo_tex.as_ref().map(|(_, _, h)| h.clone());
+                let now = ctx.input(|i| i.time);
+                let (has_bg_script, has_chrome_script) = {
+                    let st = self.themes.lock().unwrap();
+                    match st.manager.resolved.as_ref().and_then(|r| r.script.as_ref()) {
+                        Some(s) => (s.has_background(), s.has_chrome()),
+                        None => (false, false),
                     }
                 };
-                themes::paint_draw_cmds(painter, rect, &cmds);
-            };
-            let chrome_script = has_chrome_script.then(|| (self.themes.clone(), self.prefs.theme.clone()));
-            let mut chrome_hook = move |painter: &egui::Painter, rect: egui::Rect| {
-                let cmds = {
-                    let Some((themes, theme)) = &chrome_script else { return };
-                    let mut st = themes.lock().unwrap();
-                    if let Some(script) = st.manager.resolved.as_mut().and_then(|r| r.script.as_mut()) {
-                        script.paint_chrome(rect.width(), rect.height(), now, theme)
-                    } else {
-                        Vec::new()
-                    }
+                let bg_script = has_bg_script.then(|| (self.themes.clone(), self.prefs.theme.clone()));
+                let mut bg_hook = move |painter: &egui::Painter, rect: egui::Rect| {
+                    let cmds = {
+                        let Some((themes, theme)) = &bg_script else { return };
+                        let mut st = themes.lock().unwrap();
+                        if let Some(script) = st.manager.resolved.as_mut().and_then(|r| r.script.as_mut()) {
+                            script.paint_background(rect.width(), rect.height(), now, theme)
+                        } else {
+                            Vec::new()
+                        }
+                    };
+                    themes::paint_draw_cmds(painter, rect, &cmds);
                 };
-                themes::paint_draw_cmds(painter, rect, &cmds);
-            };
-            crate::shell::show_with_theme(
-                self,
-                ui,
-                &mut actions,
-                snapshot.as_ref(),
-                bg_tex.as_ref(),
-                logo_tex.as_ref(),
-                has_bg_script.then_some(&mut bg_hook as &mut dyn FnMut(&egui::Painter, egui::Rect)),
-                has_chrome_script.then_some(&mut chrome_hook as &mut dyn FnMut(&egui::Painter, egui::Rect)),
-            );
-            self.resolved_snapshot = snapshot;
+                let chrome_script = has_chrome_script.then(|| (self.themes.clone(), self.prefs.theme.clone()));
+                let mut chrome_hook = move |painter: &egui::Painter, rect: egui::Rect| {
+                    let cmds = {
+                        let Some((themes, theme)) = &chrome_script else { return };
+                        let mut st = themes.lock().unwrap();
+                        if let Some(script) = st.manager.resolved.as_mut().and_then(|r| r.script.as_mut()) {
+                            script.paint_chrome(rect.width(), rect.height(), now, theme)
+                        } else {
+                            Vec::new()
+                        }
+                    };
+                    themes::paint_draw_cmds(painter, rect, &cmds);
+                };
+                crate::shell::show_with_theme(
+                    self,
+                    ui,
+                    &mut actions,
+                    snapshot.as_ref(),
+                    bg_tex.as_ref(),
+                    logo_tex.as_ref(),
+                    has_bg_script.then_some(&mut bg_hook as &mut dyn FnMut(&egui::Painter, egui::Rect)),
+                    has_chrome_script.then_some(&mut chrome_hook as &mut dyn FnMut(&egui::Painter, egui::Rect)),
+                );
+                self.resolved_snapshot = snapshot;
+            }
             crate::shell::activate_dialog(self, &ctx);
             crate::shell::friend_dialogs(self, &ctx);
             crate::friends_window::show(self, &ctx, &mut actions);
@@ -1537,6 +1558,7 @@ enum WindowMode {
     Splash,
     SignIn,
     Main,
+    Small,
 }
 
 fn snapshot_resolved(res: &themes::ResolvedTheme) -> themes::ResolvedTheme {
@@ -1651,6 +1673,19 @@ mod tests {
         let json = serde_json::to_string(&prefs).unwrap();
         let restored: Prefs = serde_json::from_str(&json).unwrap();
         assert!(!restored.show_whats_new);
+    }
+
+    #[test]
+    fn prefs_small_mode_defaults_false_and_roundtrips() {
+        let legacy: Prefs = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.small_mode);
+        assert!(!Prefs::default().small_mode);
+
+        let mut prefs = Prefs::default();
+        prefs.small_mode = true;
+        let json = serde_json::to_string(&prefs).unwrap();
+        let restored: Prefs = serde_json::from_str(&json).unwrap();
+        assert!(restored.small_mode);
     }
 }
 
