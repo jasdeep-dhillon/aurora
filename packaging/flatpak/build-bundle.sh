@@ -42,6 +42,6 @@ if [ "$(printf '%s\n' "1.15.6" "$flatpak_version" | sort -V | head -n 1)" = 1.15
 fi
 flatpak build-finish --command=aurora \
     --share=network --share=ipc "${devices[@]}" \
-    --socket=wayland --socket=x11 --socket=pulseaudio "$build"
+    --socket=wayland --socket=fallback-x11 --socket=pulseaudio "$build"
 flatpak build-export --arch=x86_64 "$work/repo" "$build"
 flatpak build-bundle --arch=x86_64 --runtime-repo="$runtime_repo" "$work/repo" "$2" "$id"
