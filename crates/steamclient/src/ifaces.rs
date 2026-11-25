@@ -661,12 +661,16 @@ extern "C" fn fr_rich_presence_key(_t: This, id: u64, i: i32) -> *const c_char {
 
 /// Rich presence goes up in the background, newest state last.
 fn send_rich_presence() {
-    static SENDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    std::thread::spawn(|| {
-        let _one_at_a_time = SENDING.lock();
-        let pairs = lock().rich.clone();
-        let _ = crate::ipc::request(Request::RichPresence { pairs });
+    static WORKER: std::sync::OnceLock<std::sync::mpsc::SyncSender<()>> = std::sync::OnceLock::new();
+    let worker = WORKER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || while rx.recv().is_ok() {
+            let pairs = lock().rich.clone();
+            let _ = crate::ipc::request(Request::RichPresence { pairs });
+        });
+        tx
     });
+    let _ = worker.try_send(());
 }
 
 // -------------------------------------------------------- ISteamUserStats

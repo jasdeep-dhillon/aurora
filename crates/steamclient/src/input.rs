@@ -576,7 +576,7 @@ const ALL: u64 = u64::MAX;
 /// The pad, the active set's name, active layers, and calibration context for a controller.
 fn context(s: &mut Input, handle: u64) -> Option<(Pad, bool, PadCalibration, String, Vec<String>)> {
     poll(s);
-    let mut entry = s.pads.get(handle.checked_sub(1)? as usize).copied().flatten()?;
+    let mut entry = s.pads.get(handle.checked_sub(1).filter(|i| *i < 4)? as usize).copied().flatten()?;
     let c = cal(s);
     if !entry.calibrated && c.nintendo_layout {
         entry.pad.buttons = pads_shm::swap_nintendo_buttons(entry.pad.buttons);
@@ -804,7 +804,7 @@ extern "C" fn origin_name(_t: This, o: i32) -> *const c_char {
 }
 
 extern "C" fn vibrate(_t: This, handle: u64, left: u16, right: u16) {
-    let slots: Vec<usize> = if handle == ALL { (0..4).collect() } else { vec![handle.saturating_sub(1) as usize] };
+    let slots: Vec<usize> = if handle == ALL { (0..4).collect() } else { handle.checked_sub(1).filter(|i| *i < 4).map(|i| i as usize).into_iter().collect() };
     for i in slots {
         crate::pads::rumble(i, left, right);
     }
@@ -839,7 +839,8 @@ extern "C" fn input_type(_t: This, handle: u64) -> i32 {
     }
     let mut s = st();
     poll(&mut s);
-    if s.pads.get(handle.saturating_sub(1) as usize).copied().flatten().is_some() { 3 } else { 0 }
+    let Some(i) = handle.checked_sub(1).filter(|i| *i < 4) else { return 0 };
+    s.pads[i as usize].map_or(0, |pad| pad.input_type())
 }
 
 extern "C" fn for_index(_t: This, i: i32) -> u64 {
