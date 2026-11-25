@@ -33,14 +33,14 @@ jobs:
       # the app and the steamhost helper (the headless Steam host for
       # DRM games); tests for the crates that are platform-neutral.
       - name: Build
-        run: cargo build --release --locked -p aurora -p steamhost -p vk_overlay
+        run: cargo build --release --locked -p aurora -p steamhost -p vk_overlay -p html_shim
 
       # Ubuntu 22.04 has glibc 2.35, so the binaries also start on older
       # distros (Ubuntu 22.04, Mint 21, Debian 12). Fail if one needs newer.
       - name: Check the glibc the binaries need
         run: |
           max=2.35
-          for f in target/release/aurora target/release/steamhost target/release/libVkLayer_aurora_overlay.so; do
+          for f in target/release/aurora target/release/steamhost target/release/libVkLayer_aurora_overlay.so target/release/libaurora_htmlsurface.so; do
             need=$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n1)
             echo "$f needs glibc $need"
             if [ "$(printf '%s\n%s\n' "$need" "$max" | sort -V | tail -n1)" != "$max" ]; then
@@ -49,13 +49,13 @@ jobs:
           done
 
       - name: Test
-        run: cargo test --release --locked -p i18n -p ui -p vdf -p model -p store -p vk_overlay
+        run: cargo test --release --locked -p i18n -p ui -p vdf -p model -p store -p vk_overlay -p html_shim
 
       - name: Package
         run: |
           name=Aurora-Linux-x86_64
           mkdir -p dist/$name
-          cp target/release/aurora target/release/steamhost target/release/libVkLayer_aurora_overlay.so README.md LICENSE dist/$name/
+          cp target/release/aurora target/release/steamhost target/release/libVkLayer_aurora_overlay.so target/release/libaurora_htmlsurface.so README.md LICENSE dist/$name/
           tar -C dist -czf dist/$name.tar.gz $name
           (cd dist && sha256sum $name.tar.gz > $name.tar.gz.sha256)
 

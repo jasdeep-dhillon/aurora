@@ -45,7 +45,7 @@ install -d \
     "$appdir/usr/share/licenses/aurora" \
     "$appdir/usr/share/doc/aurora"
 
-install -m755 "$src/aurora" "$src/steamhost" "$src/libVkLayer_aurora_overlay.so" "$appdir/opt/aurora/"
+install -m755 "$src/aurora" "$src/steamhost" "$src/libVkLayer_aurora_overlay.so" "$src/libaurora_htmlsurface.so" "$appdir/opt/aurora/"
 for dll in steamclient64.dll steamclient32.dll; do
     if [[ -f "$src/$dll" ]]; then
         install -m644 "$src/$dll" "$appdir/opt/aurora/$dll"

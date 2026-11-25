@@ -1544,7 +1544,10 @@ fn spawn_for_host(
         .env("SteamUser", account);
     let mut cmd = finish(app, install_dir, &opts, cmd);
     #[cfg(target_os = "linux")]
-    apply_vk_overlay_env(&mut cmd, overlay, app_overlay_enabled(app.app_id));
+    {
+        apply_vk_overlay_env(&mut cmd, overlay, app_overlay_enabled(app.app_id));
+        apply_html_shim_env(&mut cmd, app, install_dir);
+    }
     #[cfg(not(target_os = "linux"))]
     let _ = overlay;
     cmd.spawn().map_err(|e| format!("could not start {}: {e}", app.name))
@@ -1609,6 +1612,110 @@ fn vk_overlay_lib() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Does the game executable request Steam's `ISteamHTMLSurface` interface?
+/// Under `steamhost` (no `steamwebhelper`), `ISteamHTMLSurface::CreateBrowser`
+/// never delivers `HTML_BrowserReady_t`, causing games like Microsoft Flight
+/// Simulator (2020) to hang on their splash screen.
+#[cfg(target_os = "linux")]
+fn uses_steam_html_surface(path: &Path) -> bool {
+    use std::io::Read;
+    const NEEDLE: &[u8] = b"STEAMHTMLSURFACE_INTERFACE_VERSION";
+    const CHUNK: usize = 64 * 1024;
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let overlap = NEEDLE.len() - 1;
+    let mut buf = vec![0u8; overlap + CHUNK];
+    let mut carry = 0usize;
+    loop {
+        let Ok(n) = f.read(&mut buf[carry..]) else { return false };
+        if n == 0 {
+            return false;
+        }
+        let end = carry + n;
+        if contains_subslice(&buf[..end], NEEDLE) {
+            return true;
+        }
+        if end >= overlap {
+            buf.copy_within(end - overlap..end, 0);
+            carry = overlap;
+        } else {
+            carry = end;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if hay.len() < needle.len() {
+        return false;
+    }
+    let first = needle[0];
+    let limit = hay.len() - needle.len() + 1;
+    let mut i = 0;
+    while i < limit {
+        let Some(pos) = hay[i..limit].iter().position(|&b| b == first) else {
+            return false;
+        };
+        let at = i + pos;
+        if &hay[at..at + needle.len()] == needle {
+            return true;
+        }
+        i = at + 1;
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn html_shim_lib() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("AURORA_HTML_SHIM_LIB").filter(|s| !s.is_empty()).map(PathBuf::from).filter(|p| p.is_file()) {
+        return Some(std::fs::canonicalize(&p).unwrap_or(p));
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    for candidate_dir in [Some(dir), dir.parent()] {
+        let Some(d) = candidate_dir else { continue };
+        let lib = d.join("libaurora_htmlsurface.so");
+        if lib.is_file() {
+            return Some(std::fs::canonicalize(&lib).unwrap_or(lib));
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn apply_html_shim_env_with(cmd: &mut Command, lib: &Path) {
+    let canon_lib = std::fs::canonicalize(lib).unwrap_or_else(|_| lib.to_path_buf());
+    let preload = append_colon_paths(existing_cmd_env(cmd, "LD_PRELOAD").as_deref(), &[&canon_lib]);
+    cmd.env("LD_PRELOAD", preload);
+    if let Some(lib_dir) = canon_lib.parent().filter(|p| !p.as_os_str().is_empty() && *p != Path::new("/") && *p != Path::new("/usr")) {
+        let pv_ro = append_colon_paths(existing_cmd_env(cmd, "PRESSURE_VESSEL_FILESYSTEMS_RO").as_deref(), &[lib_dir]);
+        if !pv_ro.is_empty() {
+            cmd.env("PRESSURE_VESSEL_FILESYSTEMS_RO", pv_ro);
+        }
+    }
+    tracing::info!("enabling headless ISteamHTMLSurface shim ({})", canon_lib.display());
+}
+
+#[cfg(target_os = "linux")]
+fn apply_html_shim_env(cmd: &mut Command, app: &OwnedApp, install_dir: &Path) {
+    match std::env::var("AURORA_HTML_SHIM").as_deref() {
+        Ok("0") => return,
+        Ok("1") => {}
+        _ => {
+            if !launch_exe(app, install_dir).is_some_and(|exe| uses_steam_html_surface(&exe)) {
+                return;
+            }
+        }
+    }
+    let Some(lib) = html_shim_lib() else {
+        tracing::warn!("headless ISteamHTMLSurface shim unavailable: libaurora_htmlsurface.so not found beside aurora executable");
+        return;
+    };
+    apply_html_shim_env_with(cmd, &lib);
 }
 
 #[cfg(target_os = "linux")]
@@ -3135,6 +3242,42 @@ mod tests {
         assert!(!has_steam_drm(&plain));
         assert!(!has_steam_drm(&dir.join("missing.exe")));
         assert_eq!(pe_is_64bit(&wrapped), Some(true));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finds_steam_html_surface_across_chunk_boundary_and_sets_ld_preload() {
+        let dir = std::env::temp_dir().join(format!("aurora-html-shim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let needle = b"STEAMHTMLSURFACE_INTERFACE_VERSION_005";
+
+        let boundary = dir.join("boundary.exe");
+        let mut data = vec![b'x'; 64 * 1024 - 10];
+        data.extend_from_slice(needle);
+        data.extend_from_slice(b"\0trailing");
+        std::fs::write(&boundary, &data).unwrap();
+
+        let plain = dir.join("plain.exe");
+        std::fs::write(&plain, b"ordinary game binary").unwrap();
+
+        assert!(uses_steam_html_surface(&boundary));
+        assert!(!uses_steam_html_surface(&plain));
+        assert!(!uses_steam_html_surface(&dir.join("missing.exe")));
+
+        let lib = dir.join("libaurora_htmlsurface.so");
+        std::fs::write(&lib, b"").unwrap();
+        let mut cmd = Command::new("/bin/true");
+        cmd.env("LD_PRELOAD", "/existing/lib.so");
+        apply_html_shim_env_with(&mut cmd, &lib);
+        let envs: std::collections::HashMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+            .collect();
+        let canon = std::fs::canonicalize(&lib).unwrap();
+        assert_eq!(envs.get("LD_PRELOAD").map(String::as_str), Some(format!("/existing/lib.so:{}", canon.display()).as_str()));
+        assert!(envs.get("PRESSURE_VESSEL_FILESYSTEMS_RO").is_some_and(|v| v.contains(&canon.parent().unwrap().to_string_lossy().to_string())));
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

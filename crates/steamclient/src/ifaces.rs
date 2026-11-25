@@ -158,6 +158,11 @@ pub fn imp(kind: &str, name: &str) -> Option<Fp> {
         ("ISteamRemoteStorage", "GetFileNameAndSize") => f!(rs_name_and_size),
         ("ISteamRemoteStorage", "GetQuota") => f!(rs_quota),
         ("ISteamRemoteStorage", "GetQuota32") => f!(rs_quota32),
+
+        // ISteamHTMLSurface (headless: complete CreateBrowser so games that
+        // initialize an HTML surface at boot don't hang waiting for CEF)
+        ("ISteamHTMLSurface", "Init" | "Shutdown") => f!(yes),
+        ("ISteamHTMLSurface", "CreateBrowser") => f!(html_create_browser),
         ("ISteamRemoteStorage", "GetLocalFileChange") => f!(empty_str),
 
         // ISteamMatchmaking: Steam lobbies (lobby.rs); P2P packets (p2p.rs).
@@ -396,6 +401,15 @@ extern "C" fn u_encrypted_ticket(_t: This, buf: *mut u8, max: i32, len: *mut u32
     }
     unsafe { std::ptr::copy_nonoverlapping(t.as_ptr(), buf, t.len()) };
     true
+}
+
+extern "C" fn html_create_browser(_t: This, _ua: *const c_char, _css: *const c_char) -> u64 {
+    static NEXT_HANDLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let handle = NEXT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed).max(1);
+    let mut g = lock();
+    let call = g.new_call();
+    g.complete(call, cb::HTML_BROWSER_READY, handle.to_le_bytes().to_vec(), false);
+    call
 }
 
 /// `<Steam>/userdata/<account id>/<app id>`.
