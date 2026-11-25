@@ -272,7 +272,7 @@ pub fn ensure_session() -> bool {
             true
         }
         other => {
-            crate::log!("no session from Aurora: {other:?}");
+            crate::log!("no session from Aurora (received reply: {})", other.is_some());
             false
         }
     }
