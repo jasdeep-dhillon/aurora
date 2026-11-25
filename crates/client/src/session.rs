@@ -478,6 +478,21 @@ async fn wait_for(events: &mut net::connection::Events, want: u32) -> Result<Pac
     }
 }
 
+/// Detached tasks can outlive their online session during reconnect.
+fn cloud_lock(account: SteamId, app: AppId) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Arc, LazyLock, Mutex, Weak};
+    type Locks = HashMap<(SteamId, AppId), Weak<tokio::sync::Mutex<()>>>;
+    static LOCKS: LazyLock<Mutex<Locks>> = LazyLock::new(Mutex::default);
+    let mut locks = LOCKS.lock().unwrap();
+    if let Some(lock) = locks.get(&(account, app)).and_then(Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert((account, app), Arc::downgrade(&lock));
+    lock
+}
+
 /// Data the online loop keeps between messages.
 struct Online {
     conn: Connection,
@@ -503,8 +518,6 @@ struct Online {
     /// Steam Cloud: where `userdata` is, and games the player turned it off for.
     steam_root: Option<std::path::PathBuf>,
     cloud_off: std::collections::HashSet<AppId>,
-    /// Apps with an in-flight CloudSync/CloudDelete task (serialized per app).
-    cloud_in_flight: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AppId>>>,
     /// Install folders of games we started (for the upload after they close).
     launched_dirs: HashMap<AppId, std::path::PathBuf>,
     queue: std::collections::VecDeque<crate::download::InstallRequest>,
@@ -566,8 +579,6 @@ struct Online {
     cache_dirty: bool,
     cache_saved: std::time::Instant,
     active_groups: crate::chat_groups::ActiveGroups,
-    /// Games whose pending Steam Cloud upload is running.
-    cloud_flushing: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AppId>>>,
     /// Games compiling their shaders before launch; set to skip the rest.
     shader_jobs: HashMap<AppId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Games whose new Proton prefix was set up this session (once, even if
@@ -651,7 +662,6 @@ async fn online(
         download_host: None,
         steam_root: None,
         cloud_off: Default::default(),
-        cloud_in_flight: Default::default(),
         launched_dirs: HashMap::new(),
         queue: Default::default(),
         active_req: None,
@@ -684,7 +694,6 @@ async fn online(
         cache_dirty: false,
         cache_saved: std::time::Instant::now(),
         active_groups: Default::default(),
-        cloud_flushing: Default::default(),
         shader_jobs: Default::default(),
         prefix_setups: Default::default(),
         from_offline: false,
@@ -855,9 +864,14 @@ async fn online(
                         launch_now!(app_id, install_dir, args);
                     }
                     Some(target) if !st.running.contains_key(&app_id) => {
+                        let Ok(guard) = cloud_lock(st.me, app_id).try_lock_owned() else {
+                            sink(Event::Error("Steam Cloud is already syncing this game.".into()));
+                            continue;
+                        };
                         sink(Event::CloudSyncing { app_id });
                         let (conn, sink, tx) = (st.conn.clone(), sink.clone(), launch_tx.clone());
                         tokio::spawn(async move {
+                            let _guard = guard;
                             let report = crate::cloud::sync(&conn, &target, crate::cloud::Mode::Download, &[], &[]).await;
                             let blocked = !report.conflicts.is_empty();
                             sink(Event::CloudReport { report, held_launch: blocked.then(|| args.clone()) });
@@ -1090,28 +1104,15 @@ async fn online(
                     } else if mode != crate::cloud::Mode::Check && st.playing == Some(app_id) {
                         sink(Event::Error("Close the game before syncing Steam Cloud.".into()));
                     } else if let Some(target) = st.cloud_target_any(app_id, &install_dir) {
-                        // Serialize CloudSync / CloudDelete per app so writes never overlap.
-                        let acquired = st.cloud_in_flight.lock().unwrap().insert(app_id);
-                        if !acquired {
+                        let Ok(guard) = cloud_lock(st.me, app_id).try_lock_owned() else {
+                            sink(Event::Error("Steam Cloud is already syncing this game.".into()));
                             continue;
-                        }
+                        };
                         // A manual sync works even when automatic sync is off.
                         sink(Event::CloudSyncing { app_id });
-                        let (conn, sink, tx, me, in_flight) = (
-                            conn.clone(),
-                            sink.clone(),
-                            launch_tx.clone(),
-                            st.me,
-                            std::sync::Arc::clone(&st.cloud_in_flight),
-                        );
+                        let (conn, sink, tx, me) = (conn.clone(), sink.clone(), launch_tx.clone(), st.me);
                         tokio::spawn(async move {
-                            struct Guard(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AppId>>>, AppId);
-                            impl Drop for Guard {
-                                fn drop(&mut self) {
-                                    self.0.lock().unwrap().remove(&self.1);
-                                }
-                            }
-                            let _guard = Guard(in_flight, app_id);
+                            let _guard = guard;
                             let report = crate::cloud::sync(&conn, &target, mode, &keep_local, &keep_cloud).await;
                             let blocked = !report.conflicts.is_empty();
                             if matches!(mode, crate::cloud::Mode::Upload | crate::cloud::Mode::Sync) && report.errors.is_empty() && !blocked {
@@ -1129,24 +1130,14 @@ async fn online(
                     if st.playing == Some(app_id) {
                         sink(Event::Error("Close the game before deleting Steam Cloud files.".into()));
                     } else if let Some(target) = st.cloud_target_any(app_id, &install_dir) {
-                        let acquired = st.cloud_in_flight.lock().unwrap().insert(app_id);
-                        if !acquired {
+                        let Ok(guard) = cloud_lock(st.me, app_id).try_lock_owned() else {
+                            sink(Event::Error("Steam Cloud is already syncing this game.".into()));
                             continue;
-                        }
+                        };
                         sink(Event::CloudSyncing { app_id });
-                        let (conn, sink, in_flight) = (
-                            conn.clone(),
-                            sink.clone(),
-                            std::sync::Arc::clone(&st.cloud_in_flight),
-                        );
+                        let (conn, sink) = (conn.clone(), sink.clone());
                         tokio::spawn(async move {
-                            struct Guard(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AppId>>>, AppId);
-                            impl Drop for Guard {
-                                fn drop(&mut self) {
-                                    self.0.lock().unwrap().remove(&self.1);
-                                }
-                            }
-                            let _guard = Guard(in_flight, app_id);
+                            let _guard = guard;
                             let deleted = crate::cloud::delete(&conn, &target, &names).await;
                             let mut report = crate::cloud::sync(&conn, &target, crate::cloud::Mode::Check, &[], &[]).await;
                             if let Err(e) = deleted {
@@ -1786,7 +1777,7 @@ async fn online(
                 if let Some(dir) = st.launched_dirs.remove(&app_id).or(host_cloud_dir) {
                     if let Some(target) = st.cloud_target(app_id, &dir) {
                         if st.link == Link::Online {
-                            st.upload_saves(app_id, target, sink);
+                            st.upload_saves(app_id, target, sink, false);
                         } else {
                             offline::add_cloud_pending(st.me, app_id, &dir);
                             st.send_offline_lists(sink);
@@ -3829,16 +3820,20 @@ impl Online {
     }
 
     /// Send a game's changed saves up; if that fails, try again once online.
-    fn upload_saves(&self, app_id: AppId, target: crate::cloud::Target, sink: &Sink) {
-        if !self.cloud_flushing.lock().unwrap().insert(app_id) {
+    fn upload_saves(&self, app_id: AppId, target: crate::cloud::Target, sink: &Sink, retry: bool) {
+        let lock = cloud_lock(self.me, app_id);
+        let guard = lock.clone().try_lock_owned().ok();
+        // A retry remains pending when busy. A newly finished game must upload
+        // even when another task is already syncing an older version.
+        if retry && guard.is_none() {
             return;
         }
         sink(Event::CloudSyncing { app_id });
-        let (conn, sink, me, flushing) = (self.conn.clone(), sink.clone(), self.me, self.cloud_flushing.clone());
+        let (conn, sink, me) = (self.conn.clone(), sink.clone(), self.me);
         tokio::spawn(async move {
+            let _guard = match guard { Some(guard) => guard, None => lock.lock_owned().await };
             let dir = target.install_dir.clone();
             let report = crate::cloud::sync(&conn, &target, crate::cloud::Mode::Upload, &[], &[]).await;
-            flushing.lock().unwrap().remove(&app_id);
             if report.errors.is_empty() && report.conflicts.is_empty() {
                 offline::remove_cloud_pending(me, app_id);
             } else {
@@ -3863,7 +3858,7 @@ impl Online {
             match self.cloud_target(app_id, &dir) {
                 Some(t) => {
                     tracing::info!("uploading saves of {app_id} changed while offline");
-                    self.upload_saves(app_id, t, sink);
+                    self.upload_saves(app_id, t, sink, true);
                 }
                 // Cloud turned off for it, or no longer owned.
                 None => offline::remove_cloud_pending(self.me, app_id),
@@ -4151,6 +4146,16 @@ mod invite_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cloud_operations_share_a_lock_only_for_the_same_account_and_app() {
+        let guard = super::cloud_lock(10, 20).try_lock_owned().unwrap();
+        assert!(super::cloud_lock(10, 20).try_lock_owned().is_err());
+        assert!(super::cloud_lock(11, 20).try_lock_owned().is_ok());
+        assert!(super::cloud_lock(10, 21).try_lock_owned().is_ok());
+        drop(guard);
+        assert!(super::cloud_lock(10, 20).try_lock_owned().is_ok());
+    }
+
     #[test]
     fn trading_cards_know_their_set() {
         let card = [("Game", "app_365360"), ("item_class", "item_class_2"), ("cardborder", "cardborder_0")];

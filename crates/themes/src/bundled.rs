@@ -252,11 +252,6 @@ fn sync_bundled_list(
 
                 let manifest_path = dir.join("theme.toml");
                 if !manifest_path.exists() {
-                    if !state.seeded_versions.contains_key(bundled.id) {
-                        write_bundled_theme(themes_dir, bundled)?;
-                        record_seeded(&mut state, bundled.id, &bundled_ver, &mut state_dirty);
-                        report.installed.push(bundled.id);
-                    }
                     continue;
                 }
 
@@ -516,6 +511,20 @@ mod tests {
         assert!(mgr.resolved.as_ref().unwrap().script.is_some());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manifestless_theme_survives_sync_and_failed_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let themes = root.path().join("themes");
+        let existing = themes.join(BUNDLED_THEMES[0].id);
+        fs::create_dir_all(&existing).unwrap();
+        fs::write(existing.join("notes"), b"draft").unwrap();
+        let report = sync_bundled_list(&themes, root.path(), &BUNDLED_THEMES[..1]).unwrap();
+        assert!(report.installed.is_empty());
+        assert!(!existing.join("theme.toml").exists());
+        assert!(crate::install::commit_tmp_dir(&themes.join("missing"), &existing).is_err());
+        assert_eq!(fs::read(existing.join("notes")).unwrap(), b"draft");
     }
 
     #[test]
