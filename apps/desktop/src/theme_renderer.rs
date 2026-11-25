@@ -1401,6 +1401,7 @@ fn render_scroll_generic(
 pub trait LibraryHost {
     fn is_detail_open(&self) -> bool;
     fn whats_new_enabled(&self) -> bool { true }
+    fn is_collections_open(&self) -> bool { false }
     fn render_detail(&mut self, ui: &mut Ui, t: &Theme, ctx: &mut Ctx);
     fn handle_library_action(&mut self, action: &str, ctx: &mut Ctx);
     fn render_action_popup(&mut self, ui: &mut Ui, t: &Theme, response: &egui::Response, action: &str);
@@ -1568,7 +1569,9 @@ fn render_lib_node(lctx: &mut LibRenderCtx<'_, '_>, ui: &mut Ui, node: &Node) {
 
         Node::Button { label, icon, action, style } => {
             let mut resolved_style = style.clone();
-            if action == "navigate:library" && !lctx.host.is_detail_open() {
+            if (action == "navigate:library" && !lctx.host.is_detail_open())
+                || (action == "library:collections" && lctx.host.is_collections_open())
+            {
                 resolved_style.bg = style.active_bg.or(style.bg);
             }
             let mut resp = render_styled_button(ui, &t, label, icon.as_deref(), &resolved_style);
