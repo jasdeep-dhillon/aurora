@@ -578,8 +578,9 @@ impl Extension for Servers {
                                 }
                             }
                         });
-                    w::search(ui, &t, &mut self.search, t!("Filter server name or IP"), 210.0);
-                    w::search(ui, &t, &mut self.map_filter, t!("Map"), 130.0);
+                    // Keep the inner text edits from moving the toolbar cursor inside the fields.
+                    ui.scope(|ui| w::search(ui, &t, &mut self.search, t!("Filter server name or IP"), 210.0));
+                    ui.scope(|ui| w::search(ui, &t, &mut self.map_filter, t!("Map"), 130.0));
                     ui.checkbox(&mut self.has_players, t!("Has players"));
                     ui.checkbox(&mut self.not_full, t!("Not full"));
                     ui.checkbox(&mut self.no_password, t!("No password"));
