@@ -24,7 +24,7 @@ on:
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 # Two quick pushes never race to publish the same version.
 concurrency:
@@ -184,6 +184,8 @@ jobs:
     needs: [version, linux, windows]
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       # For the changelog and Linux package recipes.
       - uses: actions/checkout@v4
