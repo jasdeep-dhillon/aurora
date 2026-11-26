@@ -2601,3 +2601,6 @@
 "IP:Port (e.g. 198.51.100.10:27015)" = "IP:puerto (p. ej., 198.51.100.10:27015)"
 "App ID (optional)" = "ID de la aplicación (opcional)"
 "Enter a valid IPv4 address and port (a.b.c.d:port)." = "Introduce una dirección IPv4 y un puerto válidos (a.b.c.d:puerto)."
+"Smooth scrolling" = "Desplazamiento suave"
+"Glide each mouse wheel step over a few frames. Off: the page jumps the whole step at once." = "Desliza cada paso de la rueda del ratón durante unos fotogramas. Desactivado: la página salta el paso completo de una vez."
+"Sort by recent activity" = "Ordenar por actividad reciente"
