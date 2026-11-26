@@ -41,6 +41,10 @@ items = [
 ]
 
 [[shell.children.children]]
+type = "spacer"
+size = 4
+
+[[shell.children.children]]
 type = "back_forward"
 size = 28
 style = { color = "$text@0.5", hover_color = "$text", font_size = 13 }
