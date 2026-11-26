@@ -2605,4 +2605,6 @@
 "By {name}" = "Por {name}"
 "{name}'s favorites" = "Favoritos de {name}"
 "Newest first" = "Más recientes primero"
+"Smooth scrolling" = "Desplazamiento suave"
+"Glide each mouse wheel step over a few frames. Off: the page jumps the whole step at once." = "Desliza cada paso de la rueda del ratón durante unos fotogramas. Desactivado: la página salta el paso completo de una vez."
 "Sort by recent activity" = "Ordenar por actividad reciente"

@@ -2714,4 +2714,6 @@
 "By {name}" = "От {name}"
 "{name}'s favorites" = "Избранное {name}"
 "Newest first" = "Сначала новые"
+"Smooth scrolling" = "Плавная прокрутка"
+"Glide each mouse wheel step over a few frames. Off: the page jumps the whole step at once." = "Растягивает каждый шаг колеса мыши на несколько кадров. Выкл.: страница сразу прыгает на весь шаг."
 "Sort by recent activity" = "Сортировать по недавней активности"
