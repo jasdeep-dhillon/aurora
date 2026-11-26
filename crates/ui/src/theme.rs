@@ -341,7 +341,7 @@ impl Theme {
 
     /// Color for hyperlinks on neutral surfaces.
     pub fn link_color(&self) -> Color32 {
-        if self.name.eq_ignore_ascii_case("Metro") { Color32::WHITE } else { self.accent_text() }
+        if self.name.eq_ignore_ascii_case("Metro") && self.dark { Color32::WHITE } else { self.accent_text() }
     }
 
     /// Background paired with white text for a destructive action or badge.
