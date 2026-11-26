@@ -2603,3 +2603,4 @@
 "Enter a valid IPv4 address and port (a.b.c.d:port)." = "Saisissez une adresse IPv4 et un port valides (a.b.c.d:port)."
 "Limit to 60 fps" = "Limiter à 60 i/s"
 "Draw the window at most 60 times a second, even on faster monitors. Uses less CPU and GPU while scrolling or animating." = "Dessine la fenêtre au plus 60 fois par seconde, même sur les écrans plus rapides. Utilise moins de CPU et de GPU pendant le défilement ou les animations."
+"Sort by recent activity" = "Trier par activité récente"
