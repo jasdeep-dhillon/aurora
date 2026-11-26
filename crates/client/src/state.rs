@@ -431,11 +431,18 @@ impl State {
             Event::Personas(list) => {
                 for p in list {
                     let mut p = p.clone();
-                    // Steam's echoes of our own persona often leave the game
-                    // out; keep the game we know is running so our status
-                    // stays "In game" (green) instead of falling back to Online.
-                    if p.steam_id == self.steam_id && !p.in_game() {
-                        p.game_app_id = self.playing;
+                    if p.steam_id == self.steam_id {
+                        if p.state == model::PersonaState::Invisible {
+                            // Invisible: friends don't see our game, so we
+                            // don't show it on our own status either.
+                            hide_game(&mut p);
+                        } else if !p.in_game() {
+                            // Steam's echoes of our own persona often leave
+                            // the game out; keep the game we know is running
+                            // so our status stays "In game" (green) instead
+                            // of falling back to Online.
+                            p.game_app_id = self.playing;
+                        }
                     }
                     self.personas.insert(p.steam_id, p);
                 }
@@ -701,9 +708,13 @@ impl State {
                 self.playing = Some(*app_id);
                 self.game_lobby = None;
                 self.game_connect = None;
-                // Show it on our own status right away, like Steam.
+                // Show it on our own status right away, like Steam (unless
+                // we're invisible).
                 let me = self.steam_id;
-                self.personas.entry(me).or_insert_with(|| Persona { steam_id: me, ..Default::default() }).game_app_id = Some(*app_id);
+                let p = self.personas.entry(me).or_insert_with(|| Persona { steam_id: me, ..Default::default() });
+                if p.state != model::PersonaState::Invisible {
+                    p.game_app_id = Some(*app_id);
+                }
             }
             Event::GameStopped { app_id } => {
                 if self.launching == Some(*app_id) {
@@ -929,6 +940,16 @@ impl State {
     pub fn app_name(&self, id: AppId) -> Option<&str> {
         self.apps.as_ref().and_then(|a| a.get(&id)).map(|a| a.name.as_str()).or_else(|| self.app_names.get(&id).map(|s| s.as_str()))
     }
+}
+
+/// Drop everything that says what a persona is playing.
+fn hide_game(p: &mut Persona) {
+    p.game_app_id = None;
+    p.game_name = None;
+    p.rich_status = None;
+    p.server = None;
+    p.lobby = None;
+    p.connect = None;
 }
 
 fn same_group_msg(a: &GroupMessage, b: &GroupMessage) -> bool {
@@ -1190,6 +1211,33 @@ mod group_tests {
         // Once the game closes, a later echo shows plain Online again.
         s.apply(&Event::GameStopped { app_id: 730 });
         s.apply(&Event::Personas(vec![Persona { steam_id: 7, ..Default::default() }]));
+        assert!(!s.me().unwrap().in_game());
+    }
+
+    #[test]
+    fn own_persona_hides_game_while_invisible() {
+        use model::PersonaState::{Invisible, Online};
+        let mut s = State { steam_id: 7, ..Default::default() };
+        s.apply(&Event::Personas(vec![Persona { steam_id: 7, state: Invisible, ..Default::default() }]));
+        // Starting a game while invisible doesn't show it.
+        s.apply(&Event::GameStarted { app_id: 730 });
+        assert!(!s.me().unwrap().in_game());
+        // Nor does an echo that carries the game.
+        s.apply(&Event::Personas(vec![Persona {
+            steam_id: 7,
+            state: Invisible,
+            game_app_id: Some(730),
+            rich_status: Some("In a match".into()),
+            ..Default::default()
+        }]));
+        let me = s.me().unwrap();
+        assert!(!me.in_game());
+        assert!(me.rich_status.is_none());
+        // Going online again while still playing shows the game.
+        s.apply(&Event::Personas(vec![Persona { steam_id: 7, state: Online, ..Default::default() }]));
+        assert_eq!(s.me().unwrap().game_app_id, Some(730));
+        // Going invisible mid-game hides it again.
+        s.apply(&Event::Personas(vec![Persona { steam_id: 7, state: Invisible, game_app_id: Some(730), ..Default::default() }]));
         assert!(!s.me().unwrap().in_game());
     }
 
