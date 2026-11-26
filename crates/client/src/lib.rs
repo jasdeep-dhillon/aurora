@@ -549,6 +549,9 @@ pub enum Event {
     /// Number of licenses; owned apps follow in [`Event::Apps`].
     Licenses { count: usize },
     Apps(Vec<OwnedApp>),
+    /// The app ids each license owner provides: you, and with Steam
+    /// Families each member whose licenses are shared with you.
+    AppOwners(std::collections::HashMap<SteamId, Vec<AppId>>),
     /// Full friends list (replaces any earlier one).
     Friends(Vec<(SteamId, Relationship)>),
     /// Personas whose details changed (friends and yourself).

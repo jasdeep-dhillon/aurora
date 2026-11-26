@@ -50,6 +50,9 @@ pub struct State {
     /// Games whose install script is running before they start: the step.
     pub install_script: HashMap<AppId, String>,
     pub comments: crate::read_cache::ReadCache<SteamId, Result<model::Comments, String>, 64>,
+    /// The apps each license owner provides (you, and family members whose
+    /// licenses are shared with you), from the license list.
+    pub app_owners: HashMap<SteamId, std::collections::HashSet<model::AppId>>,
     pub badges: crate::read_cache::ReadCache<SteamId, Result<model::Badges, String>, 64>,
     /// Profile reviews by (profile, page).
     pub reviews: crate::read_cache::ReadCache<(SteamId, u32), Result<model::UserReviews, String>, 64>,
@@ -392,6 +395,9 @@ impl State {
                 }
             }
             Event::Licenses { count } => self.license_count = *count,
+            Event::AppOwners(by_owner) => {
+                self.app_owners = by_owner.iter().map(|(o, apps)| (*o, apps.iter().copied().collect())).collect();
+            }
             Event::Apps(apps) => {
                 for a in apps.iter() {
                     for path in &a.art {

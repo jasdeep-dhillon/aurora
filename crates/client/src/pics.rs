@@ -51,9 +51,10 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// The library for these licenses. With a saved library, only the packages
-/// and apps that changed since are fetched (falls back to everything).
-pub async fn resolve(conn: &Connection, licenses: &[(u32, u64)], steam_id: model::SteamId) -> Result<Vec<OwnedApp>> {
+/// The library for these licenses, and each package's app ids. With a saved
+/// library, only the packages and apps that changed since are fetched
+/// (falls back to everything).
+pub async fn resolve(conn: &Connection, licenses: &[(u32, u64)], steam_id: model::SteamId) -> Result<(Vec<OwnedApp>, BTreeMap<u32, Vec<AppId>>)> {
     let started = std::time::Instant::now();
     let path = cache_path(steam_id);
     let saved: Option<Cache> = crate::offline::read(&path)
@@ -73,12 +74,13 @@ pub async fn resolve(conn: &Connection, licenses: &[(u32, u64)], steam_id: model
     cache.parse_version = PARSE_VERSION;
     cache.app_version = env!("CARGO_PKG_VERSION").to_string();
     let mut apps = cache.apps.clone();
+    let packages = cache.packages.clone();
     if current != 0 {
         tokio::task::spawn_blocking(move || crate::offline::write(&path, &cache));
     }
     apps.sort_by_key(|a| a.name.to_lowercase());
     tracing::info!("library: {} apps in {:.1} s ({how})", apps.len(), started.elapsed().as_secs_f32());
-    Ok(apps)
+    Ok((apps, packages))
 }
 
 async fn changes_since(conn: &Connection, since: u32) -> Result<CMsgClientPicsChangesSinceResponse> {
@@ -301,7 +303,13 @@ pub async fn names(conn: &Connection, ids: &[AppId]) -> Result<Vec<(AppId, Strin
 
 /// `(dlc, parent game, name)` for the DLC among `ids`, from their public info.
 pub async fn dlc_parents(conn: &Connection, ids: &[AppId]) -> Result<Vec<(AppId, AppId, String)>> {
-    let apps = app_info(conn, ids, &HashMap::new()).await?;
+    // Without access tokens PICS leaves out most DLC (missing_token), so
+    // other family members' DLC never found their game.
+    let tokens = app_tokens(conn, ids).await.unwrap_or_else(|e| {
+        tracing::warn!("dlc access tokens: {e}");
+        HashMap::new()
+    });
+    let apps = app_info(conn, ids, &tokens).await?;
     Ok(apps.into_iter().filter_map(|a| a.parent.map(|p| (a.app_id, p, a.name))).collect())
 }
 

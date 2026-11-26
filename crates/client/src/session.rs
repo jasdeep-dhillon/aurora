@@ -9,6 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+/// SteamID of account id 0 (individual, public universe).
+const BASE_STEAM_ID: u64 = 76561197960265728;
+
 const PROTOCOL_VERSION: u32 = 65580;
 const OS_TYPE_WIN11: u32 = 20;
 /// Status | PlayerName | Presence | LastSeen | GameExtraInfo | RichPresence
@@ -1957,11 +1960,26 @@ impl Online {
                     .iter()
                     .map(|l| (l.package_id(), l.access_token()))
                     .collect();
+                // With Steam Families the list also holds the other members'
+                // licenses, each with its owner's account id: whose copy has
+                // which DLC (Change Preferred Copy) comes from these.
+                let me = self.me;
+                let owners: Vec<(u32, SteamId)> = list
+                    .licenses
+                    .iter()
+                    .map(|l| (l.package_id(), if l.owner_id() == 0 { me } else { BASE_STEAM_ID + l.owner_id() as u64 }))
+                    .collect();
                 sink(Event::Licenses { count: licenses.len() });
-                let (conn, tx, sink, me) = (self.conn.clone(), apps_tx.clone(), sink.clone(), self.me);
+                let (conn, tx, sink) = (self.conn.clone(), apps_tx.clone(), sink.clone());
                 tokio::spawn(async move {
                     match pics::resolve(&conn, &licenses, me).await {
-                        Ok(apps) => {
+                        Ok((apps, packages)) => {
+                            let mut by_owner: HashMap<SteamId, Vec<AppId>> = HashMap::new();
+                            for (package, owner) in &owners {
+                                by_owner.entry(*owner).or_default().extend(packages.get(package).into_iter().flatten().copied());
+                            }
+                            tracing::info!("licenses: {} owners ({:?})", by_owner.len(), by_owner.iter().map(|(o, a)| (*o, a.len())).collect::<Vec<_>>());
+                            sink(Event::AppOwners(by_owner));
                             let _ = tx.send(apps);
                         }
                         Err(e) => sink(Event::Error(format!("Could not load library: {e}"))),

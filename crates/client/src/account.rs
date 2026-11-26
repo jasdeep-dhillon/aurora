@@ -94,13 +94,14 @@ pub async fn family(conn: &Connection, me: SteamId, language: &str) -> Result<Fa
             tracing::warn!("family library: {e}");
             Vec::new()
         });
-    let (dlc, games): (Vec<_>, Vec<_>) = shared.into_iter().partition(|a| a.app_type() == APP_TYPE_DLC);
+    // `app_type` here is the store's type (0 game, 4 DLC, 8192 music…).
+    let (dlc, games): (Vec<_>, Vec<_>) = shared.into_iter().partition(|a| a.app_type() == STORE_TYPE_DLC);
+    let shared_dlc = shared_dlc(conn, &dlc).await;
     let mut shared: Vec<SharedApp> = games
         .into_iter()
         .map(|a| SharedApp { app_id: a.appid(), name: a.name().to_string(), owners: a.owner_steamids.clone(), excluded: a.exclude_reason() != 0 })
         .collect();
     shared.sort_by_key(|a| a.name.to_lowercase());
-    let shared_dlc = shared_dlc(conn, &dlc).await;
     let preferred = preferred_lenders(conn, id).await;
     status.family = Some(Family {
         id,
@@ -121,10 +122,13 @@ pub async fn family(conn: &Connection, me: SteamId, language: &str) -> Result<Fa
     Ok(status)
 }
 
-/// Steam's `EProtoAppType` value for DLC.
-const APP_TYPE_DLC: i32 = 32;
+/// The store's app type for DLC, as the family library reports it
+/// (`EStoreAppType`: 0 game, 4 DLC; not `EProtoAppType`).
+const STORE_TYPE_DLC: i32 = 4;
 
-/// Attach each family DLC to its game through PICS public info.
+/// Attach the family library's DLC to its games through PICS. Most family
+/// DLC isn't listed there (Change Preferred Copy reads each member's DLC
+/// from the license list instead); this covers what is.
 async fn shared_dlc(conn: &Connection, dlc: &[CFamilyGroupsGetSharedLibraryAppsResponseSharedApp]) -> Vec<SharedDlc> {
     if dlc.is_empty() {
         return Vec::new();
