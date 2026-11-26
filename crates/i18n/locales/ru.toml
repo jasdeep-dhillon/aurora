@@ -2723,6 +2723,7 @@
 "IP:Port (e.g. 198.51.100.10:27015)" = "IP:порт (например, 198.51.100.10:27015)"
 "App ID (optional)" = "ID приложения (необязательно)"
 "Enter a valid IPv4 address and port (a.b.c.d:port)." = "Введите допустимый адрес IPv4 и порт (a.b.c.d:порт)."
+"Copy page URL" = "Копировать адрес страницы"
 "Show:" = "Показать:"
 "By {name}" = "От {name}"
 "{name}'s favorites" = "Избранное {name}"

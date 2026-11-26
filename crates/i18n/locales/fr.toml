@@ -2614,6 +2614,7 @@
 "IP:Port (e.g. 198.51.100.10:27015)" = "IP:port (p. ex. 198.51.100.10:27015)"
 "App ID (optional)" = "ID de l’application (facultatif)"
 "Enter a valid IPv4 address and port (a.b.c.d:port)." = "Saisissez une adresse IPv4 et un port valides (a.b.c.d:port)."
+"Copy page URL" = "Copier l'URL de la page"
 "Show:" = "Afficher :"
 "By {name}" = "Par {name}"
 "{name}'s favorites" = "Favoris de {name}"
