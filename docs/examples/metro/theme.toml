@@ -1,7 +1,7 @@
 [meta]
 id = "metro"
 name = "Metro"
-version = "1.0.1"
+version = "1.0.2"
 author = "Aurora (after MetroSteam by RoseTheFlower)"
 description = "Port of the MetroSteam skin: one flat 38px black title bar, square corners, Segoe-style type and solid accent selection."
 
