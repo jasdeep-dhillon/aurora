@@ -90,6 +90,8 @@ pub struct AppFlags {
     pub toast_notifications: bool,
     /// Multiple of egui's scroll distance per wheel notch / touchpad move.
     pub scroll_speed: f32,
+    /// Glide each mouse-wheel notch over a few frames (off: jump at once).
+    pub smooth_scroll: bool,
     /// Draw the main window at most 60 times a second.
     pub cap_fps: bool,
     /// The one-time Steam-DRM launch notice has been shown and accepted.
@@ -569,11 +571,16 @@ fn accessibility(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, flags: &SharedFlags) {
         ui.add(egui::Slider::new(&mut f.scroll_speed, 0.5..=5.0).step_by(0.25).custom_formatter(|v, _| format!("{v:.2}×")));
     });
     ui.add_space(8.0);
+    row(ui, t!("Smooth scrolling"), t!("Glide each mouse wheel step over a few frames. Off: the page jumps the whole step at once."), &mut |ui| {
+        ui.add(toggle(&mut f.smooth_scroll));
+    });
+    ui.add_space(8.0);
     row(ui, t!("Limit to 60 fps"), t!("Draw the window at most 60 times a second, even on faster monitors. Uses less CPU and GPU while scrolling or animating."), &mut |ui| {
         ui.add(toggle(&mut f.cap_fps));
     });
     let mut stored = flags.lock().unwrap();
     stored.scroll_speed = f.scroll_speed;
+    stored.smooth_scroll = f.smooth_scroll;
     stored.cap_fps = f.cap_fps;
 }
 
