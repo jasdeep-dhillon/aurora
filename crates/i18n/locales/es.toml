@@ -2535,6 +2535,19 @@
 "Wallet balance" = "Saldo de la cartera"
 "{n} files in the cloud" = "{n} archivos en la nube"
 "Saving…" = "Guardando…"
+# Steam Family: shared copy and preferred copy
+"Steam Family details are unavailable." = "Los detalles de la familia de Steam no están disponibles."
+"Some DLC details are unavailable." = "Algunos detalles de los DLC no están disponibles."
+"Shared from your Steam Family member" = "Compartido por un miembro de tu familia Steam"
+"Change preferred copy" = "Cambiar copia preferida"
+"Change Preferred Copy" = "Cambiar copia preferida"
+"Select your preferred copy of this game." = "Selecciona tu copia preferida de este juego."
+"PREFERRED COPY" = "COPIA PREFERIDA"
+"Base game only" = "Solo el juego base"
+"+ {n} DLC in common to all copies in the Steam Family" = "+ {n} DLC en común con todas las copias de la familia Steam"
+"Confirm" = "Confirmar"
+"Preferred copy updated." = "Copia preferida actualizada."
+"Using your own copy" = "Usando tu propia copia"
 
 # View menu and desktop views
 "Large Mode" = "Modo amplio"
