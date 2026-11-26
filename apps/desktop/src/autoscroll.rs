@@ -23,7 +23,7 @@ pub struct AutoScroll {
 }
 
 impl AutoScroll {
-    fn stop(&mut self) {
+    pub fn stop(&mut self) {
         self.anchor = None;
         self.held = false;
         self.dragged = false;
@@ -118,5 +118,38 @@ impl AutoScroll {
         for dir in [vec2(0.0, -1.0), vec2(0.0, 1.0), vec2(-1.0, 0.0), vec2(1.0, 0.0)] {
             arrow(dir);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_clears_active_autoscroll_state() {
+        let mut s = AutoScroll::default();
+        let mut raw = RawInput {
+            time: Some(1.0),
+            events: vec![
+                Event::PointerButton {
+                    pos: egui::pos2(100.0, 100.0),
+                    button: PointerButton::Middle,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+                Event::PointerMoved(egui::pos2(100.0, 150.0)),
+            ],
+            ..Default::default()
+        };
+        s.feed(&mut raw);
+        assert!(s.anchor.is_some());
+        assert!(s.held);
+        assert!(s.dragged);
+
+        s.stop();
+        assert!(s.anchor.is_none());
+        assert!(!s.held);
+        assert!(!s.dragged);
+        assert!(s.last_time.is_none());
     }
 }

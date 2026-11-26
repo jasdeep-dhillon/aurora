@@ -1219,7 +1219,9 @@ impl eframe::App for SteamApp {
             }
         }
         // After the speed setting: autoscroll's speed follows the pointer.
-        if !self.bigpicture.active {
+        if self.bigpicture.active {
+            self.autoscroll.stop();
+        } else {
             self.autoscroll.feed(raw_input);
         }
     }
