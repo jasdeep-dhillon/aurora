@@ -68,6 +68,10 @@ pub struct Prefs {
     pub favorite_friends: Vec<u64>,
     /// Mouse wheel and touchpad scroll distance, as a multiple of egui's.
     pub scroll_speed: f32,
+    /// Draw the main window at most 60 times a second, even on faster
+    /// monitors (Settings > Accessibility).
+    #[serde(default)]
+    pub cap_fps: bool,
     /// The player has seen the one-time notice for Steam-DRM games (how they
     /// start through a background Steam instance).
     #[serde(default)]
@@ -150,6 +154,7 @@ impl Default for Prefs {
             auto_offline: false,
             favorite_friends: Vec::new(),
             scroll_speed: 2.0,
+            cap_fps: false,
             drm_host_ack: false,
             proton_override: None,
             proton_per_app: Default::default(),
@@ -367,6 +372,7 @@ impl SteamApp {
             toast_messages: prefs.toast_messages,
             toast_notifications: prefs.toast_notifications,
             scroll_speed: prefs.scroll_speed,
+            cap_fps: prefs.cap_fps,
             drm_host_ack: prefs.drm_host_ack,
             overlay_enabled: prefs.overlay_enabled,
             fps_counter: prefs.fps_counter,
@@ -1228,14 +1234,17 @@ impl eframe::App for SteamApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        // At most 60 frames a second, even on faster monitors: a frame that
-        // comes sooner waits out the rest of its 1/60 s. Idle windows draw
-        // nothing, and slower timed redraws keep their own pace.
-        const MIN_FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
-        if let Some(last) = self.last_frame {
-            let elapsed = last.elapsed();
-            if elapsed < MIN_FRAME {
-                std::thread::sleep(MIN_FRAME - elapsed);
+        // "Limit to 60 fps" (Settings > Accessibility): at most 60 frames a
+        // second, even on faster monitors. A frame that comes sooner waits
+        // out the rest of its 1/60 s. Idle windows draw nothing, and slower
+        // timed redraws keep their own pace.
+        if self.prefs.cap_fps {
+            const MIN_FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
+            if let Some(last) = self.last_frame {
+                let elapsed = last.elapsed();
+                if elapsed < MIN_FRAME {
+                    std::thread::sleep(MIN_FRAME - elapsed);
+                }
             }
         }
         self.last_frame = Some(std::time::Instant::now());
@@ -1262,6 +1271,7 @@ impl eframe::App for SteamApp {
             self.prefs.toast_messages = f.toast_messages;
             self.prefs.toast_notifications = f.toast_notifications;
             self.prefs.scroll_speed = f.scroll_speed;
+            self.prefs.cap_fps = f.cap_fps;
             self.prefs.drm_host_ack = f.drm_host_ack;
             self.prefs.overlay_enabled = f.overlay_enabled;
             self.prefs.fps_counter = f.fps_counter;

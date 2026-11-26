@@ -90,6 +90,8 @@ pub struct AppFlags {
     pub toast_notifications: bool,
     /// Multiple of egui's scroll distance per wheel notch / touchpad move.
     pub scroll_speed: f32,
+    /// Draw the main window at most 60 times a second.
+    pub cap_fps: bool,
     /// The one-time Steam-DRM launch notice has been shown and accepted.
     pub drm_host_ack: bool,
     /// Enable the in-game overlay.
@@ -566,7 +568,13 @@ fn accessibility(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, flags: &SharedFlags) {
     row(ui, t!("Scroll speed"), t!("How far the mouse wheel and touchpad scroll."), &mut |ui| {
         ui.add(egui::Slider::new(&mut f.scroll_speed, 0.5..=5.0).step_by(0.25).custom_formatter(|v, _| format!("{v:.2}×")));
     });
-    flags.lock().unwrap().scroll_speed = f.scroll_speed;
+    ui.add_space(8.0);
+    row(ui, t!("Limit to 60 fps"), t!("Draw the window at most 60 times a second, even on faster monitors. Uses less CPU and GPU while scrolling or animating."), &mut |ui| {
+        ui.add(toggle(&mut f.cap_fps));
+    });
+    let mut stored = flags.lock().unwrap();
+    stored.scroll_speed = f.scroll_speed;
+    stored.cap_fps = f.cap_fps;
 }
 
 /// The interface size slider. Zooming rescales the slider itself, so a
