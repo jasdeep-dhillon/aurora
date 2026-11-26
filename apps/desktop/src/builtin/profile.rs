@@ -157,6 +157,18 @@ impl Extension for Profile {
         }
         let display_name = if mine && !ctx.state.persona_name.is_empty() { ctx.state.persona_name.clone() } else { persona.name.clone() };
 
+        // Right-click on empty space: "Copy page URL" (this profile on Steam).
+        let path = match self.section {
+            Section::Games => "games/?tab=all",
+            Section::Badges => "badges/",
+            Section::Reviews => "recommended/",
+            Section::Groups => "groups/",
+            Section::Cards => "badges/",
+            Section::Edit => "edit/info",
+            Section::Profile => "",
+        };
+        crate::links::page_url_menu(ui, &format!("https://steamcommunity.com/profiles/{id}/{path}"));
+
         // Full-page background, like a Steam profile.
         let full = ui.max_rect();
         let bg_url = info.as_ref().and_then(|i| i.background.clone());
