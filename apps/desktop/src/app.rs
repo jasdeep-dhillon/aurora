@@ -231,6 +231,8 @@ pub struct SteamApp {
     confirm_exit: bool,
     window_mode: Option<WindowMode>,
     pub(crate) bigpicture: crate::bigpicture::BigPicture,
+    /// Middle-click autoscroll, like a browser.
+    autoscroll: crate::autoscroll::AutoScroll,
     /// A window size waiting to be centered once the monitor size is known.
     center_window: Option<[f32; 2]>,
     /// A window size asked for but not reached yet: (size, resizable, frames
@@ -438,6 +440,7 @@ impl SteamApp {
             confirm_exit: false,
             window_mode: None,
             bigpicture,
+            autoscroll: Default::default(),
             center_window: None,
             pending_size: None,
             tray: crate::tray::Tray::new(cc),
@@ -1241,6 +1244,12 @@ impl eframe::App for SteamApp {
                 }
             }
         }
+        // After the speed setting: autoscroll's speed follows the pointer.
+        if self.bigpicture.active {
+            self.autoscroll.stop();
+        } else {
+            self.autoscroll.feed(raw_input);
+        }
         if !self.prefs.smooth_scroll {
             instant_wheel(raw_input, _ctx.options(|o| o.input_options.line_scroll_speed));
         }
@@ -1255,6 +1264,7 @@ impl eframe::App for SteamApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.sync_theme_state(&ctx);
+        self.autoscroll.paint(&ctx, self.prefs.theme.accent);
         if self.applied_zoom != self.prefs.zoom {
             ctx.set_zoom_factor(self.prefs.zoom);
             self.applied_zoom = self.prefs.zoom;
