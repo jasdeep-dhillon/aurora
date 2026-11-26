@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Aurora
+GenericName=Game Launcher
+Comment=Lightweight steam launcher
+Exec=aurora %u
+Icon=aurora
+Terminal=false
+Categories=Network;FileTransfer;Game
+StartupWMClass=SteamInRust
+X-KDE-RunOnDiscreteGpu=true
+PrefersNonDefaultGPU=true
