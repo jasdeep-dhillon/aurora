@@ -228,6 +228,8 @@ pub struct SteamApp {
     confirm_exit: bool,
     window_mode: Option<WindowMode>,
     pub(crate) bigpicture: crate::bigpicture::BigPicture,
+    /// When the last frame started (for the 60 fps cap).
+    last_frame: Option<std::time::Instant>,
     /// A window size waiting to be centered once the monitor size is known.
     center_window: Option<[f32; 2]>,
     /// A window size asked for but not reached yet: (size, resizable, frames
@@ -434,6 +436,7 @@ impl SteamApp {
             confirm_exit: false,
             window_mode: None,
             bigpicture,
+            last_frame: None,
             center_window: None,
             pending_size: None,
             tray: crate::tray::Tray::new(cc),
@@ -1225,6 +1228,17 @@ impl eframe::App for SteamApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // At most 60 frames a second, even on faster monitors: a frame that
+        // comes sooner waits out the rest of its 1/60 s. Idle windows draw
+        // nothing, and slower timed redraws keep their own pace.
+        const MIN_FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
+        if let Some(last) = self.last_frame {
+            let elapsed = last.elapsed();
+            if elapsed < MIN_FRAME {
+                std::thread::sleep(MIN_FRAME - elapsed);
+            }
+        }
+        self.last_frame = Some(std::time::Instant::now());
         let ctx = ui.ctx().clone();
         self.sync_theme_state(&ctx);
         if self.applied_zoom != self.prefs.zoom {
