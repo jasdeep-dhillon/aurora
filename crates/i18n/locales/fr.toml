@@ -2618,6 +2618,8 @@
 "By {name}" = "Par {name}"
 "{name}'s favorites" = "Favoris de {name}"
 "Newest first" = "Plus récents d'abord"
+"Limit to 60 fps" = "Limiter à 60 i/s"
+"Draw the window at most 60 times a second, even on faster monitors. Uses less CPU and GPU while scrolling or animating." = "Dessine la fenêtre au plus 60 fois par seconde, même sur les écrans plus rapides. Utilise moins de CPU et de GPU pendant le défilement ou les animations."
 "Smooth scrolling" = "Défilement fluide"
 "Glide each mouse wheel step over a few frames. Off: the page jumps the whole step at once." = "Fait glisser chaque cran de la molette sur quelques images. Désactivé : la page saute tout le cran d'un coup."
 "Sort by recent activity" = "Trier par activité récente"
